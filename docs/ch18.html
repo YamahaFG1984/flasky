@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 18 章 · 更多资源 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="18">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 18 章</span>
+<h1>更多资源</h1>
+<p class="lede">
+  恭喜你，这本书基本读完了！希望这些章节给了你一个扎实的基础，让你能用 Hono 开始构建自己的应用。
+  最后这一章很短：推荐一些顺手的工具、原书提到的那些 Flask 扩展在 Hono 生态里的对应物、遇到问题去哪里求助，以及怎样参与到社区中去。
+</p>
+
+<div class="goals">
+  <h4>本章内容</h4>
+  <ul>
+    <li>适合 TypeScript / Hono 开发的编辑器和调试方式</li>
+    <li>原书第 18 章提到的扩展，在 Hono 生态里用什么</li>
+    <li>从这里出发，还可以往哪些方向深入</li>
+    <li>去哪里提问，怎样回馈社区</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="ide">集成开发环境</h2>
+
+<p>
+  原书推荐在 IDE 里开发 Flask 应用，因为代码补全和交互式调试器能大大提高效率。它列出了 PyCharm、VS Code 和 PyDev。
+  对 TypeScript 来说，编辑器的作用更大 —— 类型系统的全部价值，都是通过编辑器里的提示和红色波浪线体现出来的：
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128187;</span><h4>Visual Studio Code</h4><p>免费、开源、跨平台，TypeScript 支持是内置的（两者都出自微软）。本教程默认的编辑器。</p></div>
+  <div class="card"><span class="ic">&#129504;</span><h4>WebStorm</h4><p>JetBrains 出品（和原书推荐的 PyCharm 同一家），重构和数据库工具很强。个人非商业使用免费。</p></div>
+  <div class="card"><span class="ic">&#9889;</span><h4>Zed / Neovim</h4><p>追求速度和键盘操作的选择，通过语言服务器（LSP）获得和 VS Code 同等的 TypeScript 支持。</p></div>
+</div>
+
+<p>几个会让你事半功倍的用法：</p>
+<ul>
+  <li><strong>断点调试。</strong>在 VS Code 里打开“JavaScript Debug Terminal”，在其中运行 <code>npm run dev</code>，然后在代码行号左边点一下设置断点。请求到达时程序会停下来，你可以查看每个变量、单步执行 —— 这就是原书提到的“交互式调试器”，而且比 Werkzeug 的网页调试器安全得多（第 2 章）。</li>
+  <li><strong>跳转与查找引用。</strong>按住 <kbd>Ctrl</kbd>（macOS 是 <kbd>Cmd</kbd>）点击任何函数名，就能跳到它的定义；右键“查找所有引用”，能看到它在哪些地方被调用。读 Hono 和 Drizzle 的源码时也同样好用。</li>
+  <li><strong>让类型检查一直开着。</strong>编辑器只检查打开的文件；提交代码前运行一次 <code>npm run typecheck</code>（即 <code>tsc --noEmit</code>），检查整个项目。</li>
+</ul>
+
+<h2 id="ecosystem">寻找扩展：Hono 生态里的对应物</h2>
+
+<p>原书在最后列出了一些没有用到、但值得了解的 Flask 扩展。它们要解决的问题在 Hono 世界里同样存在：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>原书提到的扩展</th><th>用途</th><th>Hono / TypeScript 生态</th></tr></thead>
+  <tbody>
+    <tr><td>Flask-Babel</td><td>国际化与本地化</td><td><code>hono/language</code> 中间件检测用户语言，配合 i18next 等翻译库；日期数字格式用浏览器和 Node 内置的 <code>Intl</code>（第 3 章）</td></tr>
+    <tr><td>Marshmallow</td><td>对象的序列化与反序列化</td><td>Zod（本书一直在用），或者更轻量的 Valibot；<code>@hono/zod-openapi</code> 还能顺便生成 API 文档</td></tr>
+    <tr><td>Celery</td><td>后台任务队列</td><td>BullMQ（基于 Redis）、pg-boss（直接用 PostgreSQL）、Cloudflare Queues（第 6 章）</td></tr>
+    <tr><td>Frozen-Flask</td><td>把应用导出成静态网站</td><td>Hono 内置 <code>hono/ssg</code> 的 <code>toSSG()</code></td></tr>
+    <tr><td>Flask-DebugToolbar</td><td>浏览器里的调试工具</td><td><code>hono/logger</code>、<code>hono/timing</code>（第 16 章）、<code>showRoutes()</code>（第 2 章）；以及浏览器开发者工具的网络面板</td></tr>
+    <tr><td>Flask-Assets</td><td>合并、压缩 CSS 和 JS</td><td>Vite；配合 <code>@hono/vite-dev-server</code> 或全栈框架 HonoX</td></tr>
+    <tr><td>Flask-Session</td><td>服务器端会话</td><td>hono-sessions，或按第 4 章的“深入”一节把会话存进数据库 / Redis</td></tr>
+    <tr><td>Flask-SocketIO</td><td>WebSocket 与长轮询</td><td>Hono 的 <code>upgradeWebSocket()</code>（Node.js 上用 <code>@hono/node-ws</code>）；单向推送用 <code>hono/streaming</code> 的 <code>streamSSE()</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  原书建议：需要的功能在书里找不到时，先去 Flask 官方的扩展列表里找，再去 PyPI、GitHub 搜。Hono 的对应入口是：
+</p>
+<ul>
+  <li><strong>Hono 官方文档的 Middleware 页面</strong>：内置中间件和官方第三方中间件的完整列表。</li>
+  <li><strong>GitHub 上的 <code>honojs/middleware</code> 仓库</strong>：<code>@hono/</code> 开头的官方周边包都在这里，比如 <code>@hono/zod-validator</code>、<code>@hono/otel</code>、<code>@hono/sentry</code>、<code>@hono/prometheus</code>。</li>
+  <li><strong>npm</strong>：搜索时加上 “hono” 关键字。另外别忘了，Hono 基于 Web 标准，<strong>任何不依赖特定框架的 JavaScript 库都能直接用</strong> —— Drizzle、Zod、Nodemailer、marked 都不是“Hono 扩展”，但用起来毫无障碍。</li>
+</ul>
+
+<h2 id="next">接下来可以往哪里走</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="读完本书之后的几个深入方向">
+  <rect class="bx-a" x="290" y="130" width="180" height="60" rx="12"/>
+  <text class="ttl on-a" x="380" y="156" text-anchor="middle">你现在在这里</text>
+  <text class="sm" x="380" y="176" text-anchor="middle">一个完整的 Hono + Drizzle 应用</text>
+
+  <rect class="bx-b" x="20" y="20" width="220" height="80" rx="10"/>
+  <text class="ttl on-b" x="36" y="44">边缘部署</text>
+  <text class="sm" x="36" y="66">Cloudflare Workers + D1 / Neon</text>
+  <text class="sm" x="36" y="84">同一套路由，换运行时和数据库驱动</text>
+
+  <rect class="bx-g" x="270" y="20" width="220" height="80" rx="10"/>
+  <text class="ttl on-g" x="286" y="44">前后端一体</text>
+  <text class="sm" x="286" y="66">HonoX · React/Vue 前端 + hc 客户端</text>
+  <text class="sm" x="286" y="84">前后端共享类型</text>
+
+  <rect class="bx-p" x="520" y="20" width="220" height="80" rx="10"/>
+  <text class="ttl on-p" x="536" y="44">认证进阶</text>
+  <text class="sm" x="536" y="66">第三方登录（OAuth）· 双因素</text>
+  <text class="sm" x="536" y="84">Better Auth 等成熟方案</text>
+
+  <rect class="bx-b" x="20" y="220" width="220" height="80" rx="10"/>
+  <text class="ttl on-b" x="36" y="244">实时功能</text>
+  <text class="sm" x="36" y="266">新评论推送：SSE / WebSocket</text>
+  <text class="sm" x="36" y="284">streamSSE · upgradeWebSocket</text>
+
+  <rect class="bx-g" x="270" y="220" width="220" height="80" rx="10"/>
+  <text class="ttl on-g" x="286" y="244">可观测性</text>
+  <text class="sm" x="286" y="266">结构化日志 · 指标 · 链路追踪</text>
+  <text class="sm" x="286" y="284">OpenTelemetry（@hono/otel）</text>
+
+  <rect class="bx-p" x="520" y="220" width="220" height="80" rx="10"/>
+  <text class="ttl on-p" x="536" y="244">搜索与缓存</text>
+  <text class="sm" x="536" y="266">PostgreSQL 全文搜索 · Redis</text>
+  <text class="sm" x="536" y="284">让首页在大流量下依然很快</text>
+
+  <path class="ln" d="M330 128 L160 102"/><path class="ln" d="M380 128 V102"/><path class="ln" d="M430 128 L600 102"/>
+  <path class="ln" d="M330 192 L160 218"/><path class="ln" d="M380 192 V218"/><path class="ln" d="M430 192 L600 218"/>
+</svg>
+<figcaption>图 18-1　六个值得继续深入的方向，没有先后顺序，按你的项目需要来选</figcaption>
+</figure>
+
+<p>给每个方向一个具体的起点，都可以在 Flasky 上动手：</p>
+<ol class="steps">
+  <li><strong>边缘部署。</strong>把 <code>createDb()</code> 换成 Cloudflare D1 或 Neon 的 HTTP 驱动，<code>src/index.ts</code> 换成 <code>export default app</code>，就能把 Flasky 部署到 Cloudflare Workers。原因前面反复提过：Hono 的应用本身就是一个 <code>fetch</code> 函数，而我们从第 7 章起就通过 <code>c.var</code> 注入依赖。</li>
+  <li><strong>前后端一体。</strong>试着用 React 重写首页的文章列表，通过第 14 章的 API 获取数据，并用 <code>hc&lt;typeof api&gt;</code> 获得类型安全的调用。</li>
+  <li><strong>认证进阶。</strong>加一个“用 GitHub 登录”按钮。理解了第 8 章的会话与令牌之后，OAuth 的流程不会难懂。</li>
+  <li><strong>实时功能。</strong>用 <code>streamSSE()</code> 实现“你关注的人发了新文章”的实时提醒。</li>
+  <li><strong>可观测性。</strong>把第 16 章的慢查询日志和第 17 章的错误邮件，升级为结构化日志 + 错误监控服务。</li>
+  <li><strong>搜索。</strong>用 PostgreSQL 的 <code>tsvector</code> 给文章加上全文搜索，这是 PGlite 也支持的功能。</li>
+</ol>
+
+<h2 id="help">获取帮助</h2>
+
+<p>
+  原书说：如果遇到一个自己解决不了的问题，别忘了有一群和你一样的开发者愿意帮忙。这句话在今天依然成立：
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128218;</span><h4>官方文档</h4><p>hono.dev 和 orm.drizzle.team 的文档都写得很好，而且示例可以直接运行。遇到问题先搜文档。</p></div>
+  <div class="card"><span class="ic">&#128172;</span><h4>Discord 社区</h4><p>Hono 和 Drizzle 都有官方 Discord，维护者本人经常出现，回复很快。</p></div>
+  <div class="card"><span class="ic">&#128025;</span><h4>GitHub</h4><p>Issues 和 Discussions 里有大量前人问过的问题。提新 issue 前先搜一搜，并附上最小的可复现代码。</p></div>
+  <div class="card"><span class="ic">&#10067;</span><h4>Stack Overflow</h4><p>原书推荐的问答网站，问题和答案会一直留在搜索结果里，帮助后来的人。</p></div>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 怎样提一个容易得到回答的问题</div>
+  <p>
+    说清楚你想做什么、实际发生了什么（完整的错误信息）、你已经试过什么；附上<strong>最小的</strong>能复现问题的代码 ——
+    很多时候，在把代码精简到最小的过程中，你自己就找到答案了。也别忘了写上 Node、Hono、Drizzle 的版本号。
+  </p>
+</div>
+
+<h2 id="involve">参与社区</h2>
+
+<p>
+  原书最后说：Flask 能这么好，离不开社区里无数志愿者的工作。你现在也成了社区的一员，从大家的工作中受益，不妨想想怎样回馈。
+  原书给出的建议，对 Hono 和 Drizzle 同样适用：
+</p>
+<ul>
+  <li>阅读你常用的项目的文档，提交修正或改进。</li>
+  <li>把文档翻译成新的语言 —— 中文文档永远缺人手。</li>
+  <li>在问答网站和 Discord 上回答别人的问题。</li>
+  <li>在技术聚会或会议上分享你的项目和经验。</li>
+  <li>给你用到的包提交 bug 修复或改进。</li>
+  <li>写一个新的 Hono 中间件，开源出来。</li>
+  <li>把你的应用开源 —— 就像原书作者开源了 Flasky 一样。</li>
+</ul>
+
+<p>
+  希望你能以其中某一种方式参与进来。如果你做了，谢谢你！
+</p>
+
+<div class="box key">
+  <div class="t">&#9733; 回头看看这一路</div>
+  <p>
+    从第 2 章那两行 Hello World，到一个有注册登录、角色权限、Markdown 博客、关注与评论、REST API、自动化测试、能用 Docker 部署的社交博客。
+    你用到的每一个概念 —— 请求与响应、中间件、模板与转义、表单与会话、ORM 与迁移、签名与令牌、JOIN 与分页、测试与部署 —— 都不属于某个特定的框架。
+    换一个框架、换一门语言，它们依然是你手里最可靠的工具。
+  </p>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

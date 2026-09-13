@@ -1,0 +1,853 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 14 章 · 应用编程接口 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="14">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 14 章</span>
+<h1>应用编程接口</h1>
+<p class="lede">
+  越来越多的应用把业务逻辑放在客户端：手机 App、单页应用（SPA）……服务器的角色变成了“只提供数据的存取服务”，也就是 <strong>API</strong>。
+  这一章给 Flasky 加上一套 REST API：用 JSON 交换数据、用令牌做无状态认证、统一的错误格式和分页。Hono 的轻量正是做 API 的理想选择。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 REST 的核心思想：资源、URL、方法、表示、无状态、版本</li>
+    <li>把 API 放进一个独立的子应用，挂在 <code>/api/v1</code> 下，并让它的错误永远是 JSON</li>
+    <li>用 HTTP Basic 认证和 Bearer 令牌实现无状态认证</li>
+    <li>把数据库行“序列化”成对外的 JSON，把客户端的 JSON 校验后“反序列化”</li>
+    <li>实现文章、用户、评论的资源接口，返回正确的状态码和 <code>Location</code> 头</li>
+    <li>给集合资源分页，并用 curl / HTTPie 测试 API</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="rest">REST 简介</h2>
+
+<p>
+  客户端和 Web 服务之间有很多种通信协议。原书提到，早些年流行 XML-RPC、SOAP 这类“远程过程调用”协议；
+  后来 <strong>REST</strong>（Representational State Transfer，表述性状态转移）成了 Web 应用的首选，因为它就建立在大家熟悉的 Web 模型之上。
+  Roy Fielding 在他的博士论文里用六个特征定义了 REST：
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128421;</span><h4>客户端-服务器</h4><p>两者职责分离：服务器管数据，客户端管界面。</p></div>
+  <div class="card"><span class="ic">&#128260;</span><h4>无状态</h4><p>每个请求都带齐所需的全部信息，服务器不在请求之间记住客户端。</p></div>
+  <div class="card"><span class="ic">&#128190;</span><h4>可缓存</h4><p>响应要标明能不能缓存，客户端和中间节点据此优化。</p></div>
+  <div class="card"><span class="ic">&#128279;</span><h4>统一接口</h4><p>用 URL 标识资源、用标准方法操作、用自描述的消息和超链接。最复杂也最核心。</p></div>
+  <div class="card"><span class="ic">&#129521;</span><h4>分层系统</h4><p>客户端和服务器之间可以插入代理、缓存、网关，双方都不必知道。</p></div>
+  <div class="card"><span class="ic">&#128230;</span><h4>按需代码（可选）</h4><p>客户端可以从服务器下载代码来执行，比如网页里的 JavaScript。</p></div>
+</div>
+
+<h3>资源就是一切</h3>
+
+<p>
+  REST 的核心概念是<strong>资源</strong>：应用领域里值得关注的东西。在 Flasky 里，用户、文章、评论都是资源。
+  每个资源有一个唯一的 URL；同一类资源的集合也有一个 URL；还可以定义表示“某个子集”的集合 URL：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="Flasky API 的资源 URL">
+  <rect class="bx-a" x="300" y="14" width="160" height="40" rx="8"/>
+  <text class="mono on-a" x="380" y="39" text-anchor="middle">/api/v1</text>
+  <path class="ln" d="M340 56 L130 92"/><path class="ln" d="M380 56 V92"/><path class="ln" d="M420 56 L630 92"/>
+
+  <rect class="bx-b" x="30" y="94" width="200" height="40" rx="8"/>
+  <text class="mono on-b" x="130" y="119" text-anchor="middle">/posts/</text>
+  <rect class="bx-b" x="280" y="94" width="200" height="40" rx="8"/>
+  <text class="mono on-b" x="380" y="119" text-anchor="middle">/users/:id</text>
+  <rect class="bx-b" x="530" y="94" width="200" height="40" rx="8"/>
+  <text class="mono on-b" x="630" y="119" text-anchor="middle">/comments/</text>
+
+  <path class="ln" d="M130 136 V168"/>
+  <rect class="bx" x="30" y="170" width="200" height="40" rx="8"/>
+  <text class="mono" x="130" y="187" text-anchor="middle">/posts/:id</text>
+  <text class="mono" x="130" y="203" text-anchor="middle">/posts/:id/comments/</text>
+  <path class="ln" d="M380 136 V168"/>
+  <rect class="bx" x="280" y="170" width="200" height="40" rx="8"/>
+  <text class="mono" x="380" y="187" text-anchor="middle">/users/:id/posts/</text>
+  <text class="mono" x="380" y="203" text-anchor="middle">/users/:id/timeline/</text>
+  <path class="ln" d="M630 136 V168"/>
+  <rect class="bx" x="530" y="170" width="200" height="40" rx="8"/>
+  <text class="mono" x="630" y="195" text-anchor="middle">/comments/:id</text>
+</svg>
+<figcaption>图 14-1　以 <code>/</code> 结尾的 URL 表示集合（像一个“目录”），不带的表示单个资源</figcaption>
+</figure>
+
+<h3>请求方法</h3>
+
+<p>客户端在资源 URL 上用不同的 HTTP 方法表示要做什么（原书表 14-1）：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>方法</th><th>目标</th><th>含义</th><th>成功时的状态码</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET</code></td><td>单个资源</td><td>获取这个资源</td><td>200</td></tr>
+    <tr><td><code>GET</code></td><td>集合</td><td>获取集合（或其中一页）</td><td>200</td></tr>
+    <tr><td><code>POST</code></td><td>集合</td><td>新建一个资源加入集合。新资源的 URL 由服务器决定，放在 <code>Location</code> 响应头里</td><td>201</td></tr>
+    <tr><td><code>PUT</code></td><td>单个资源</td><td>修改资源（客户端能决定 URL 时也可以用来创建）</td><td>200 或 204</td></tr>
+    <tr><td><code>DELETE</code></td><td>单个资源</td><td>删除资源</td><td>200 或 204</td></tr>
+    <tr><td><code>DELETE</code></td><td>集合</td><td>删除集合里的所有资源</td><td>200 或 204</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 不支持的方法</div>
+  <p>
+    REST 不要求每个资源都支持所有方法。原书说，客户端用了不支持的方法时应该返回 405（Method Not Allowed），Flask 会自动处理。
+    Hono 默认把“路径对了、方法不对”当作没匹配到路由，返回 404。对大多数 API 来说这无伤大雅；需要严格 405 时，可以给这些路径注册一个 <code>app.all()</code> 兜底路由返回 405。
+  </p>
+</div>
+
+<h3>请求和响应的正文</h3>
+
+<p>
+  资源以某种格式在请求和响应的正文里来回传递，格式由 <code>Content-Type</code> 头说明。原书指出，Web 服务最常用的两种格式是 JSON 和 XML，
+  而 JSON 因为简洁、而且和 JavaScript 天然亲近而更受欢迎。一篇文章的 JSON 表示可能是这样：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+{
+  "url": "http://localhost:3000/api/v1/posts/12345",
+  "body": "…正文…",
+  "author_url": "http://localhost:3000/api/v1/users/2",
+  "comments_url": "http://localhost:3000/api/v1/posts/12345/comments/"
+}
+</pre>
+</div>
+
+<p>
+  注意 <code>url</code>、<code>author_url</code>、<code>comments_url</code> 都是<strong>完整的网址</strong>。原书强调：设计良好的 API，客户端只需要知道少数几个入口 URL，
+  其余的都从响应里的链接“发现” —— 就像浏览网页时点链接发现新页面一样。
+</p>
+
+<h3>版本</h3>
+
+<p>
+  传统网站更新时，服务器上换了新版本，所有用户立刻就用上了新版。API 不一样：手机 App 由用户决定什么时候升级，服务器没法强迫所有客户端同时更新。
+  所以 API 的改动必须非常小心，不兼容的改动会让旧客户端直接坏掉。常见的做法是<strong>在 URL 里带上版本号</strong>：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="新旧客户端同时访问不同版本的 API">
+  <rect class="bx" x="20" y="20" width="170" height="50" rx="8"/>
+  <text class="ttl" x="105" y="42" text-anchor="middle">旧版 App</text>
+  <text class="sm" x="105" y="60" text-anchor="middle">用户还没更新</text>
+  <rect class="bx" x="20" y="110" width="170" height="50" rx="8"/>
+  <text class="ttl" x="105" y="132" text-anchor="middle">新版 App / 网页</text>
+  <text class="sm" x="105" y="150" text-anchor="middle">随时可以更新</text>
+  <path class="ln-b" d="M192 45 H300" marker-end="url(#ar-b)"/>
+  <text class="mono on-b" x="246" y="38" text-anchor="middle">/api/v1/posts/</text>
+  <path class="ln-g" d="M192 135 H300" marker-end="url(#ar-g)"/>
+  <text class="mono on-g" x="246" y="128" text-anchor="middle">/api/v2/posts/</text>
+  <rect class="bx-a" x="304" y="14" width="436" height="152" rx="12"/>
+  <text class="ttl on-a" x="522" y="38" text-anchor="middle">同一个服务器</text>
+  <rect class="bx-b" x="324" y="52" width="190" height="50" rx="8"/>
+  <text class="sm on-b" x="419" y="74" text-anchor="middle">api v1 子应用</text>
+  <text class="sm" x="419" y="92" text-anchor="middle">旧的 JSON 格式，冻结</text>
+  <rect class="bx-g" x="530" y="52" width="190" height="50" rx="8"/>
+  <text class="sm on-g" x="625" y="74" text-anchor="middle">api v2 子应用</text>
+  <text class="sm" x="625" y="92" text-anchor="middle">新格式、新功能</text>
+  <text class="sm" x="522" y="130" text-anchor="middle">等所有客户端都迁移到 v2，再下线 v1</text>
+</svg>
+<figcaption>图 14-2　URL 带版本号，新旧两套 API 可以并存。在 Hono 里就是挂两个子应用</figcaption>
+</figure>
+
+<h2 id="blueprint">API 子应用</h2>
+
+<p>原书把 API 放进一个单独的蓝本，按资源分文件（例 14-1）。我们用同样的结构：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>原书 app/api/</th><th>本教程 src/routes/api/</th><th>内容</th></tr></thead>
+  <tbody>
+    <tr><td><code>__init__.py</code></td><td><code>index.ts</code></td><td>创建子应用、错误处理、认证、挂载各资源</td></tr>
+    <tr><td><code>authentication.py</code></td><td><code>authentication.ts</code></td><td>Basic 认证、令牌认证、<code>/tokens</code></td></tr>
+    <tr><td><code>errors.py</code></td><td><code>errors.ts</code></td><td>400 / 401 / 403 的 JSON 辅助函数</td></tr>
+    <tr><td><code>decorators.py</code></td><td>（在 <code>authentication.ts</code> 里）</td><td><code>apiPermission()</code> 中间件</td></tr>
+    <tr><td><code>posts.py</code> / <code>users.py</code> / <code>comments.py</code></td><td>同名 <code>.ts</code></td><td>各资源的路由</td></tr>
+    <tr><td>模型里的 <code>to_json()</code></td><td><code>json.ts</code></td><td>序列化函数</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/index.ts">
+<pre>
+import { Hono } from 'hono'
+import { HTTPException } from 'hono/http-exception'
+import { ValidationError } from '../../lib/errors.js'
+import type { AppEnv } from '../../types.js'
+import { apiAuth, confirmedOnly, tokens } from './authentication.js'
+import { commentsApi } from './comments.js'
+import { badRequest } from './errors.js'
+import { postsApi } from './posts.js'
+import { usersApi } from './users.js'
+
+export const api = new Hono&lt;AppEnv&gt;()
+
+// 只管 /api/v1 下面的错误：永远返回 JSON，不返回 HTML 错误页
+api.onError((err, c) =&gt; {
+  if (err instanceof ValidationError) return badRequest(c, err.message)
+  if (err instanceof HTTPException) {
+    if (err.status === 404) return c.json({ error: 'not found' }, 404)
+    return err.getResponse()
+  }
+  console.error(err)
+  return c.json({ error: 'internal server error' }, 500)
+})
+
+// 相当于原书 api 蓝本上的 before_request + auth.login_required
+api.use('*', apiAuth, confirmedOnly)
+
+api.route('/', tokens)
+api.route('/', postsApi)
+api.route('/', usersApi)
+api.route('/', commentsApi)
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+const app = new Hono&lt;AppEnv&gt;({ strict: false })     // strict: false → /posts 和 /posts/ 是同一个路由
+// …
+app.route('/api/v1', api)                              // 版本号只在这里写一次
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 结尾的斜杠</div>
+  <p>
+    原书提醒：Flask 对结尾带斜杠的路由有特殊处理 —— 请求 <code>/posts</code> 会被自动重定向到 <code>/posts/</code>。
+    Hono 默认把两者当成不同的路径；创建应用时传入 <code>strict: false</code>，两种写法就都能匹配到同一个路由，不需要重定向。
+  </p>
+</div>
+
+<h2 id="errors">错误处理</h2>
+
+<p>REST 服务通过状态码告诉客户端请求的结果，必要时在正文里附上说明（原书表 14-2）：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>状态码</th><th>名称</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>200</td><td>OK</td><td>请求成功</td></tr>
+    <tr><td>201</td><td>Created</td><td>请求成功，并创建了新资源</td></tr>
+    <tr><td>202</td><td>Accepted</td><td>已接受，但还在异步处理中</td></tr>
+    <tr><td>204</td><td>No Content</td><td>请求成功，没有要返回的数据</td></tr>
+    <tr><td>400</td><td>Bad Request</td><td>请求无效或不一致</td></tr>
+    <tr><td>401</td><td>Unauthorized</td><td>没有提供认证信息，或认证信息无效</td></tr>
+    <tr><td>403</td><td>Forbidden</td><td>认证通过了，但权限不够</td></tr>
+    <tr><td>404</td><td>Not Found</td><td>URL 指向的资源不存在</td></tr>
+    <tr><td>405</td><td>Method Not Allowed</td><td>这个资源不支持该方法</td></tr>
+    <tr><td>500</td><td>Internal Server Error</td><td>处理请求时发生了意外错误</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  原书指出，404 和 500 有点特殊：它们通常由框架自己产生，默认返回 HTML，这会让期待 JSON 的 API 客户端很困惑。
+  原书的办法是<strong>内容协商</strong>：根据请求的 <code>Accept</code> 头，给 API 客户端返回 JSON，给浏览器返回 HTML。我们在全局的错误处理里做同样的事：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+// 请求头说“要 JSON、不要 HTML” → 是 API 客户端
+function wantsJson(c: Context) {
+  const accept = c.req.header('Accept') ?? ''
+  return accept.includes('application/json') &amp;&amp; !accept.includes('text/html')
+}
+
+const ERROR_NAMES = { 403: 'forbidden', 404: 'not found', 500: 'internal server error' } as const
+
+function errorResponse(c: Context&lt;AppEnv&gt;, status: 403 | 404 | 500) {
+  if (wantsJson(c)) return c.json({ error: ERROR_NAMES[status] }, status)
+  c.status(status)
+  return c.render(&lt;ErrorPage status={status} /&gt;, { title: ERROR_NAMES[status] })
+}
+
+app.notFound((c) =&gt; errorResponse(c, 404))
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="错误响应的两层处理">
+  <rect class="bx" x="20" y="74" width="140" height="50" rx="8"/>
+  <text class="ttl" x="90" y="104" text-anchor="middle">出错了</text>
+  <path class="ln" d="M162 90 L236 46" marker-end="url(#ar)"/>
+  <path class="ln" d="M162 108 L236 152" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="240" y="16" width="250" height="62" rx="10"/>
+  <text class="ttl on-p" x="365" y="40" text-anchor="middle">发生在 /api/v1 的路由里</text>
+  <text class="sm" x="365" y="60" text-anchor="middle">api.onError：永远返回 JSON</text>
+  <rect class="bx-a" x="240" y="122" width="250" height="62" rx="10"/>
+  <text class="ttl on-a" x="365" y="146" text-anchor="middle">其他地方 / 没有匹配的路由</text>
+  <text class="sm" x="365" y="166" text-anchor="middle">app.onError / app.notFound：看 Accept</text>
+  <path class="ln-p" d="M492 46 H560" marker-end="url(#ar-p)"/>
+  <rect class="bx-p" x="564" y="26" width="176" height="40" rx="8"/>
+  <text class="mono" x="652" y="51" text-anchor="middle">{"error":"not found"}</text>
+  <path class="ln-a" d="M492 140 L560 116" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M492 166 L560 172" marker-end="url(#ar-a)"/>
+  <rect class="bx-p" x="564" y="96" width="176" height="36" rx="8"/>
+  <text class="sm" x="652" y="119" text-anchor="middle">要 JSON → JSON</text>
+  <rect class="bx" x="564" y="152" width="176" height="36" rx="8"/>
+  <text class="sm" x="652" y="175" text-anchor="middle">浏览器 → HTML 错误页</text>
+</svg>
+<figcaption>图 14-3　子应用的 <code>onError</code> 只管自己的路由（第 7 章讲过的“蓝本错误处理器”），全局的负责其余一切</figcaption>
+</figure>
+
+<p>其余状态码由 API 自己主动返回，写成几个辅助函数（原书例 14-5）：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/errors.ts">
+<pre>
+import type { Context } from 'hono'
+
+export const badRequest = (c: Context, message: string) =&gt; c.json({ error: 'bad request', message }, 400)
+export const unauthorized = (c: Context, message: string) =&gt; c.json({ error: 'unauthorized', message }, 401)
+export const forbidden = (c: Context, message: string) =&gt; c.json({ error: 'forbidden', message }, 403)
+</pre>
+</div>
+
+<h2 id="auth">用户认证</h2>
+
+<p>
+  API 和网页一样需要保护数据。但 REST 要求<strong>无状态</strong>：服务器不能在请求之间记住客户端，每个请求都必须带上全部必要的信息 —— 包括身份凭据。
+</p>
+<p>
+  原书讨论了一个微妙之处：网页用的 Flask-Login 把状态存在 Cookie 里，服务器其实也没存什么，看起来是符合无状态的。
+  但对于不是浏览器的客户端（手机 App、命令行脚本），处理 Cookie 很麻烦，所以一般认为在 API 里用 Cookie 不是好设计。
+  REST 建立在 HTTP 之上，那么首选就是 HTTP 自己的认证机制：凭据放在每个请求的 <code>Authorization</code> 头里。
+</p>
+
+<div class="box key">
+  <div class="t">&#9733; 为什么无状态这么重要</div>
+  <p>
+    原书的解释：无状态的服务器非常容易扩容。如果服务器记住了客户端的状态，就得保证同一个客户端的请求总是落到同一台服务器上，或者让所有服务器共享状态存储 ——
+    这两件事都很难做好。服务器什么都不记，就可以随意加机器，任何一台都能处理任何请求。
+  </p>
+</div>
+
+<h3>方式一：HTTP Basic 认证（邮箱 + 密码）</h3>
+
+<p>
+  Basic 认证把 <code>用户名:密码</code> 用 Base64 编码后放进请求头：<code>Authorization: Basic am9obkBleGFtcGxlLmNvbTpjYXQ=</code>。
+  原书用 Flask-HTTPAuth 处理它；Hono 内置了 <code>hono/basic-auth</code>，同样让你提供一个验证函数：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-HTTPAuth</div>
+    <div class="code" data-lang="python"><pre>
+auth = HTTPBasicAuth()
+
+@auth.verify_password
+def verify_password(email, password):
+    if email == '':
+        return False
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return False
+    g.current_user = user
+    return user.verify_password(password)
+
+@auth.error_handler
+def auth_error():
+    return unauthorized('Invalid credentials')
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">hono/basic-auth</div>
+    <div class="code" data-lang="ts"><pre>
+import { basicAuth } from 'hono/basic-auth'
+
+const passwordAuth = basicAuth({
+  verifyUser: async (email, password, c) =&gt; {
+    const user = await findUserByEmail(c.var.db, email)
+    if (!user ||
+        !(await verifyPassword(user.passwordHash, password))) {
+      return false
+    }
+    c.set('user', user)            // 相当于 g.current_user
+    c.set('tokenUsed', false)
+    return true
+  },
+  // 认证失败时的响应正文（对象会被转成 JSON，状态码 401）
+  invalidUserMessage: { error: 'unauthorized', message: 'Invalid credentials' },
+})
+</pre></div>
+  </div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; API 必须走 HTTPS</div>
+  <p>
+    原书特别强调：因为每个请求都带着凭据，API 路由<strong>必须</strong>通过 HTTPS 提供，让所有请求和响应在传输中加密。
+    Base64 只是编码，不是加密，任何人截获了请求都能直接解码出密码。
+  </p>
+</div>
+
+<h3>方式二：令牌认证</h3>
+
+<p>
+  每个请求都发送密码，风险太大。原书的改进是<strong>令牌</strong>：客户端先用邮箱和密码换一个有时效的令牌，之后的请求都用令牌代替密码。
+  令牌就算泄露，一小时后也就失效了。生成令牌用第 8 章的 JWT 工具，只是 <code>purpose</code> 换成 <code>'api'</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export const generateAuthToken = (secret: string, userId: number, expiresIn: number) =&gt;
+  generateToken(secret, 'api', { id: userId }, expiresIn)
+
+export async function verifyAuthToken(db: Db, secret: string, token: string) {
+  const data = await readToken(secret, token, 'api')
+  return data &amp;&amp; typeof data.id === 'number' ? findUserById(db, data.id) : null
+}
+</pre>
+</div>
+
+<p>
+  原书把令牌塞进 Basic 认证的“用户名”字段、密码留空来传递。现在更通行的做法是用专门的 <strong>Bearer</strong> 方案：<code>Authorization: Bearer &lt;令牌&gt;</code>。
+  我们的认证中间件两种都支持 —— 看到 Bearer 就按令牌验证，否则交给 Basic 认证：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/authentication.ts">
+<pre>
+export const apiAuth = createMiddleware&lt;AppEnv&gt;(async (c, next) =&gt; {
+  const header = c.req.header('Authorization') ?? ''
+  if (header.startsWith('Bearer ')) {
+    const user = await verifyAuthToken(c.var.db, c.var.config.secretKey, header.slice(7))
+    if (!user) return unauthorized(c, 'Invalid credentials')
+    c.set('user', user)
+    c.set('tokenUsed', true)                 // 记下“这次是用令牌认证的”
+    return next()
+  }
+  return passwordAuth(c, next)
+})
+
+// 认证通过但没有确认邮箱的账户，一律 403（原书的 before_request 也做了这个检查）
+export const confirmedOnly = createMiddleware&lt;AppEnv&gt;(async (c, next) =&gt; {
+  if (!c.var.user?.confirmed) return forbidden(c, 'Unconfirmed account')
+  await next()
+})
+</pre>
+</div>
+
+<p>
+  原书把 <code>login_required</code> 挂在蓝本的 <code>before_request</code> 上，让 API 的所有路由都自动受到保护。
+  我们在前面的 <code>api/index.ts</code> 里写的 <code>api.use('*', apiAuth, confirmedOnly)</code> 是同样的效果。
+</p>
+
+<p>换取令牌的路由：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/authentication.ts">
+<pre>
+const EXPIRATION = 3600
+
+tokens.post('/tokens', async (c) =&gt; {
+  // 只能用邮箱+密码换令牌。如果允许“用旧令牌换新令牌”，令牌就等于永不过期了
+  if (c.var.tokenUsed || !c.var.user) return unauthorized(c, 'Invalid credentials')
+  const token = await generateAuthToken(c.var.config.secretKey, c.var.user.id, EXPIRATION)
+  return c.json({ token, expiration: EXPIRATION })
+})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="令牌认证的完整流程">
+  <rect class="bx" x="20" y="20" width="140" height="280" rx="10"/>
+  <text class="ttl" x="90" y="44" text-anchor="middle">API 客户端</text>
+  <rect class="bx-a" x="600" y="20" width="140" height="280" rx="10"/>
+  <text class="ttl on-a" x="670" y="44" text-anchor="middle">Flasky API</text>
+
+  <path class="ln" d="M162 80 H596" marker-end="url(#ar)"/>
+  <text class="mono" x="380" y="74" text-anchor="middle">① POST /api/v1/tokens · Basic john@example.com:cat</text>
+  <path class="ln-a" d="M596 108 H164" marker-end="url(#ar-a)"/>
+  <text class="mono on-a" x="380" y="102" text-anchor="middle">② {"token": "eyJ…", "expiration": 3600}</text>
+
+  <path class="ln-g" d="M162 150 H596" marker-end="url(#ar-g)"/>
+  <text class="mono on-g" x="380" y="144" text-anchor="middle">③ GET /api/v1/posts/ · Bearer eyJ…</text>
+  <path class="ln-g" d="M596 176 H164" marker-end="url(#ar-g)"/>
+  <text class="mono on-g" x="380" y="170" text-anchor="middle">④ 200 {"posts": […]}</text>
+  <text class="sm" x="380" y="196" text-anchor="middle">…一小时内的所有请求都用令牌，不再发送密码…</text>
+
+  <path class="ln-r" d="M162 230 H596" marker-end="url(#ar-r)"/>
+  <text class="mono on-r" x="380" y="224" text-anchor="middle">⑤ 一小时后：GET … · Bearer eyJ…（已过期）</text>
+  <path class="ln-r" d="M596 256 H164" marker-end="url(#ar-r)"/>
+  <text class="mono on-r" x="380" y="250" text-anchor="middle">⑥ 401 → 客户端回到 ① 重新申请</text>
+  <text class="sm" x="380" y="288" text-anchor="middle">服务器不保存任何令牌：验签 + 看过期时间就够了 —— 这正是无状态</text>
+</svg>
+<figcaption>图 14-4　令牌的生命周期。泄露的令牌最多有效一小时</figcaption>
+</figure>
+
+<h2 id="json">资源与 JSON 的转换</h2>
+
+<h3>序列化：数据库行 → JSON</h3>
+
+<p>
+  把内部数据转换成传输格式，叫<strong>序列化</strong>。原书给每个模型加了 <code>to_json()</code> 方法；我们写成独立的函数，因为它需要 <code>c</code> 来生成完整网址：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/json.ts">
+<pre>
+export function postJson(c: Context&lt;AppEnv&gt;, post: PostWithAuthor) {
+  return {
+    url: externalUrl(c, `/api/v1/posts/${post.id}`),
+    body: post.body,
+    body_html: post.bodyHtml,
+    timestamp: post.timestamp,                                  // Date 会自动转成 ISO 8601 字符串
+    author_url: externalUrl(c, `/api/v1/users/${post.authorId}`),
+    comments_url: externalUrl(c, `/api/v1/posts/${post.id}/comments/`),
+    comment_count: post.commentCount,                           // “编”出来的属性
+  }
+}
+
+export function userJson(c: Context&lt;AppEnv&gt;, user: User, postCount: number) {
+  return {
+    url: externalUrl(c, `/api/v1/users/${user.id}`),
+    username: user.username,                                    // 邮箱、角色、密码哈希一律不对外
+    member_since: user.memberSince,
+    last_seen: user.lastSeen,
+    posts_url: externalUrl(c, `/api/v1/users/${user.id}/posts/`),
+    followed_posts_url: externalUrl(c, `/api/v1/users/${user.id}/timeline/`),
+    post_count: postCount,
+  }
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="用户的数据库行与对外 JSON 的差异">
+  <rect class="bx-b" x="20" y="20" width="300" height="190" rx="10"/>
+  <text class="ttl on-b" x="170" y="44" text-anchor="middle">数据库里的一行 users</text>
+  <text class="mono" x="36" y="70">id · username</text>
+  <text class="mono on-r" x="36" y="92">email · password_hash · role_id</text>
+  <text class="mono on-r" x="36" y="114">confirmed · avatar_hash</text>
+  <text class="mono" x="36" y="136">member_since · last_seen</text>
+  <text class="mono" x="36" y="158">name · location · about_me</text>
+  <path class="ln-a" d="M322 115 H400" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="361" y="106" text-anchor="middle">userJson</text>
+  <rect class="bx-g" x="404" y="20" width="336" height="190" rx="10"/>
+  <text class="ttl on-g" x="572" y="44" text-anchor="middle">对外的 JSON</text>
+  <text class="mono" x="420" y="70">username · member_since · last_seen</text>
+  <text class="mono on-g" x="420" y="92">url · posts_url · followed_posts_url</text>
+  <text class="sm" x="420" y="110">↑ 链接：客户端靠它们发现其他资源</text>
+  <text class="mono on-g" x="420" y="136">post_count</text>
+  <text class="sm" x="420" y="154">↑ 数据库里没有的“计算属性”</text>
+  <text class="sm on-r" x="420" y="182">红色的字段出于隐私和安全，不出现在这里</text>
+</svg>
+<figcaption>图 14-5　原书强调：资源的对外表示，不需要和数据库模型一模一样</figcaption>
+</figure>
+
+<h3>反序列化：JSON → 数据库</h3>
+
+<p>
+  反过来，把客户端发来的 JSON 变成数据库里的数据，叫<strong>反序列化</strong>。原书指出这里的挑战是：客户端发来的数据可能无效、错误或多余。
+  原书的 <code>Post.from_json()</code> 只取 <code>body</code> 一个字段，其余的全部忽略：<code>body_html</code> 由服务器生成、作者只能是认证的用户、URL 由服务器决定……
+</p>
+<p>
+  我们用第 4 章的 Zod 做同样的事，只是这次校验的是 <code>'json'</code> 而不是 <code>'form'</code>。Zod 的 <code>z.object()</code> 默认会<strong>丢掉 schema 里没有的字段</strong>，
+  所以客户端就算发了 <code>author_url</code>，也根本到不了处理函数：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/posts.ts">
+<pre>
+// 校验失败 → 抛 ValidationError → API 的 onError 把它变成 400
+const json = &lt;S extends z.ZodType&gt;(schema: S) =&gt;
+  zValidator('json', schema, (result) =&gt; {
+    if (!result.success) throw new ValidationError(result.error.issues[0]?.message ?? 'invalid request')
+  })
+
+const newPostSchema = z.object({
+  body: z.string('post does not have a body').min(1, 'post does not have a body'),
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/lib/errors.ts">
+<pre>
+// 相当于原书的 app/exceptions.py
+export class ValidationError extends Error {}
+</pre>
+</div>
+
+<p>
+  为什么要抛异常，而不是直接返回 400？原书解释：校验代码往往在很深的地方，它不知道该怎么处理错误，于是把错误“往上抛”，交给更高层的代码统一处理。
+  这样处理函数本身就可以写得非常干净，完全不用管错误检查。
+</p>
+
+<h2 id="endpoints">实现资源接口</h2>
+
+<p>GET 请求最简单，只读取不修改（原书例 14-17）：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/posts.ts">
+<pre>
+export const postsApi = new Hono&lt;AppEnv&gt;()
+
+postsApi.get('/posts', async (c) =&gt; {
+  const pagination = await getPostsPage(c.var.db, pageParam(c), c.var.config.postsPerPage)
+  return c.json(pageJson(c, 'posts', pagination, '/api/v1/posts/', postJson))
+})
+
+postsApi.get('/posts/:id{[0-9]+}', async (c) =&gt; {
+  const post = await getPost(c.var.db, Number(c.req.param('id')))
+  if (!post) throw new HTTPException(404)                // API 的 onError 会把它变成 JSON 的 404
+  return c.json(postJson(c, post))
+})
+</pre>
+</div>
+
+<p>POST 在集合上创建新文章。成功时返回 <strong>201</strong>，并在 <code>Location</code> 头里给出新文章的地址。原书还贴心地把新资源放在响应正文里，省得客户端再发一次 GET：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/posts.ts">
+<pre>
+postsApi.post('/posts', apiPermission(Permission.WRITE), json(newPostSchema), async (c) =&gt; {
+  const { body } = c.req.valid('json')
+  const created = await createPost(c.var.db, requireUser(c).id, body)   // 作者 = 认证的用户，由服务器决定
+  const post = await getPost(c.var.db, created.id)
+  if (!post) throw new HTTPException(500)
+  return c.json(postJson(c, post), 201, { Location: externalUrl(c, `/api/v1/posts/${post.id}`) })
+})
+</pre>
+</div>
+
+<p>检查权限的中间件和网页版的类似，但权限不足时返回 JSON 而不是 403 页面（原书例 14-19）：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/authentication.ts">
+<pre>
+export const apiPermission = (permission: number) =&gt;
+  createMiddleware&lt;AppEnv&gt;(async (c, next) =&gt; {
+    if (!can(c.var.user, permission)) return forbidden(c, 'Insufficient permissions')
+    await next()
+  })
+</pre>
+</div>
+
+<p>PUT 修改文章。除了要有写文章的权限，还必须是作者本人或管理员 —— 这个检查写在处理函数里：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/posts.ts">
+<pre>
+const editPostSchema = z.object({ body: z.string().min(1).optional() })
+
+postsApi.put('/posts/:id{[0-9]+}', apiPermission(Permission.WRITE), json(editPostSchema), async (c) =&gt; {
+  const db = c.var.db
+  const id = Number(c.req.param('id'))
+  const post = await getPost(db, id)
+  if (!post) throw new HTTPException(404)
+  const user = requireUser(c)
+  if (user.id !== post.authorId &amp;&amp; !can(user, Permission.ADMIN)) return forbidden(c, 'Insufficient permissions')
+  const { body } = c.req.valid('json')
+  if (body !== undefined) await updatePost(db, id, body)      // 复用第 11 章的函数，body_html 自动更新
+  return c.json(postJson(c, (await getPost(db, id))!))
+})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="POST 创建文章时经过的每一层">
+  <rect class="bx" x="20" y="80" width="110" height="50" rx="8"/>
+  <text class="mono" x="75" y="102" text-anchor="middle">POST</text>
+  <text class="mono" x="75" y="118" text-anchor="middle">/posts/</text>
+  <path class="ln" d="M132 105 H152" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="156" y="70" width="110" height="70" rx="8"/>
+  <text class="sm on-b" x="211" y="98" text-anchor="middle">apiAuth</text>
+  <text class="sm on-r" x="211" y="120" text-anchor="middle">✘ 401</text>
+  <path class="ln" d="M268 105 H288" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="292" y="70" width="110" height="70" rx="8"/>
+  <text class="sm on-b" x="347" y="98" text-anchor="middle">confirmedOnly</text>
+  <text class="sm on-r" x="347" y="120" text-anchor="middle">✘ 403</text>
+  <path class="ln" d="M404 105 H424" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="428" y="70" width="110" height="70" rx="8"/>
+  <text class="sm on-p" x="483" y="98" text-anchor="middle">apiPermission</text>
+  <text class="sm on-r" x="483" y="120" text-anchor="middle">✘ 403</text>
+  <path class="ln" d="M540 105 H560" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="564" y="70" width="80" height="70" rx="8"/>
+  <text class="sm on-a" x="604" y="98" text-anchor="middle">json()</text>
+  <text class="sm on-r" x="604" y="120" text-anchor="middle">✘ 400</text>
+  <path class="ln-g" d="M646 105 H666" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="670" y="70" width="70" height="70" rx="8"/>
+  <text class="sm on-g" x="705" y="98" text-anchor="middle">处理</text>
+  <text class="sm on-g" x="705" y="120" text-anchor="middle">✔ 201</text>
+  <text class="sm" x="380" y="180" text-anchor="middle">每一层只负责一件事；任何一层不通过，都返回对应状态码的 JSON</text>
+</svg>
+<figcaption>图 14-6　一个 POST 请求要依次通过认证、账户确认、权限、数据校验四道关卡</figcaption>
+</figure>
+
+<p>
+  用户和评论的接口是同样的套路：<code>users.ts</code> 里的三个 GET 分别复用 <code>findUserById()</code> 和第 11、12 章的 <code>getPostsPage()</code>（按作者 / 按关注者筛选）；
+  <code>comments.ts</code> 复用第 13 章的 <code>getPostComments()</code>、<code>getAllComments()</code> 和 <code>createComment()</code>，POST 同样返回 201 + <code>Location</code>。
+  全部资源如下（原书表 14-3）：
+</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>资源 URL</th><th>方法</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>/users/:id</code></td><td>GET</td><td>一个用户</td></tr>
+    <tr><td><code>/users/:id/posts/</code></td><td>GET</td><td>某用户写的所有文章</td></tr>
+    <tr><td><code>/users/:id/timeline/</code></td><td>GET</td><td>某用户关注的人写的文章（第 12 章的 JOIN）</td></tr>
+    <tr><td><code>/posts/</code></td><td>GET</td><td>所有文章</td></tr>
+    <tr><td><code>/posts/</code></td><td>POST</td><td>新建文章</td></tr>
+    <tr><td><code>/posts/:id</code></td><td>GET</td><td>一篇文章</td></tr>
+    <tr><td><code>/posts/:id</code></td><td>PUT</td><td>修改文章</td></tr>
+    <tr><td><code>/posts/:id/comments/</code></td><td>GET</td><td>某篇文章的评论</td></tr>
+    <tr><td><code>/posts/:id/comments/</code></td><td>POST</td><td>给文章添加评论</td></tr>
+    <tr><td><code>/comments/</code></td><td>GET</td><td>所有评论</td></tr>
+    <tr><td><code>/comments/:id</code></td><td>GET</td><td>一条评论</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>原书指出，API 只实现了网页功能的一个子集，需要时可以继续扩展：关注、评论管理……应用本身支持删除文章，所以也不需要 DELETE。</p>
+
+<h2 id="pagination">给集合分页</h2>
+
+<p>
+  返回整个集合的 GET 请求，数据量一大就会非常昂贵。API 也要分页。原书的格式是：当前页的数据、上一页和下一页的链接（没有就是 <code>null</code>）、以及总数。
+  所有集合资源都用同一种格式，所以写一个通用的函数：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/api/json.ts">
+<pre>
+export function pageJson&lt;T, K extends string&gt;(
+  c: Context&lt;AppEnv&gt;, key: K, pagination: Pagination&lt;T&gt;, path: string, toJson: (c: Context&lt;AppEnv&gt;, item: T) =&gt; unknown,
+) {
+  const link = (page: number | null) =&gt; (page === null ? null : externalUrl(c, `${path}?page=${page}`))
+  return {
+    [key]: pagination.items.map((item) =&gt; toJson(c, item)),
+    prev: link(pagination.prevNum),
+    next: link(pagination.nextNum),
+    count: pagination.total,
+  } as Record&lt;K, unknown[]&gt; &amp; { prev: string | null; next: string | null; count: number }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts">
+<pre>
+{
+  "posts": [ { "url": "http://localhost:3000/api/v1/posts/150", … }, … ],
+  "prev": null,
+  "next": "http://localhost:3000/api/v1/posts/?page=2",
+  "count": 150
+}
+</pre>
+</div>
+
+<p>客户端不需要知道分页的规则，只要沿着 <code>next</code> 一直走，直到它变成 <code>null</code>。这就是前面说的“通过链接发现资源”。</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>14a</b>：应用编程接口</div>
+
+<h2 id="testing">用 curl 和 HTTPie 测试</h2>
+
+<p>
+  测试 Web 服务需要一个 HTTP 客户端。原书推荐了两个命令行工具：几乎每台电脑都自带的 cURL，以及语法更简洁的 HTTPie。
+  启动开发服务器后，在另一个终端里：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 用邮箱和密码获取文章列表
+curl -u john@example.com:cat http://localhost:3000/api/v1/posts/
+# 或者用 HTTPie
+http --auth john@example.com:cat GET http://localhost:3000/api/v1/posts/
+
+# 发一篇新文章
+curl -u john@example.com:cat -H "Content-Type: application/json" \
+     -d '{"body": "从*命令行*发的文章"}' http://localhost:3000/api/v1/posts/
+http --auth john@example.com:cat POST http://localhost:3000/api/v1/posts/ "body=从*命令行*发的文章"
+</pre>
+</div>
+
+<p>发文章的响应：</p>
+
+<div class="code" data-lang="http">
+<pre>
+HTTP/1.1 201 Created
+Content-Type: application/json
+Location: http://localhost:3000/api/v1/posts/151
+
+{
+  "url": "http://localhost:3000/api/v1/posts/151",
+  "body": "从*命令行*发的文章",
+  "body_html": "&lt;p&gt;从&lt;em&gt;命令行&lt;/em&gt;发的文章&lt;/p&gt;",
+  "timestamp": "2025-03-06T02:30:27.000Z",
+  "author_url": "http://localhost:3000/api/v1/users/1",
+  "comments_url": "http://localhost:3000/api/v1/posts/151/comments/",
+  "comment_count": 0
+}
+</pre>
+</div>
+
+<p>改用令牌：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 1. 换取令牌
+curl -u john@example.com:cat -X POST http://localhost:3000/api/v1/tokens/
+# {"token":"eyJhbGciOiJIUzI1NiIs…","expiration":3600}
+
+# 2. 之后一小时内都用令牌
+curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs…" http://localhost:3000/api/v1/posts/
+http -A bearer -a eyJhbGciOiJIUzI1NiIs… GET http://localhost:3000/api/v1/posts/
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 注意 CSRF 中间件不会拦截 API</div>
+  <p>
+    第 4 章的 <code>csrf()</code> 只检查“表单类型”的请求（<code>application/x-www-form-urlencoded</code>、<code>multipart/form-data</code>、<code>text/plain</code>）。
+    API 请求用的是 <code>application/json</code>，浏览器里的恶意网页没法在不经过 CORS 预检的情况下跨站发送这种请求，所以 CSRF 中间件放行它们是安全的。
+  </p>
+</div>
+
+<h2 id="beyond">超越原书：Hono 生态里的 API 工具</h2>
+
+<p>原书的 API 到此就完整了。Hono 在做 API 方面还有几个特别好用的工具，值得了解：</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128279;</span><h4>RPC 客户端 <code>hc</code></h4><p>用 <code>hc&lt;typeof app&gt;()</code> 生成一个<strong>带完整类型</strong>的客户端：前端调用 API 时，路径、参数、返回值全都有类型检查，后端改了接口前端立刻报错。</p></div>
+  <div class="card"><span class="ic">&#128214;</span><h4>OpenAPI 文档</h4><p><code>@hono/zod-openapi</code> 用你已经写好的 Zod schema 自动生成 OpenAPI 规范，再配合 <code>@hono/swagger-ui</code> 得到一个可以在线调试的文档页。</p></div>
+  <div class="card"><span class="ic">&#127760;</span><h4>CORS</h4><p>如果 API 要给其他域名下的网页调用，加上 <code>hono/cors</code> 中间件，声明允许哪些来源。</p></div>
+  <div class="card"><span class="ic">&#9203;</span><h4>限流</h4><p>公开的 API 需要防止被刷。社区有基于内存或 Redis 的限流中间件，在认证之后按用户计数。</p></div>
+</div>
+
+<p>
+  原书说：恭喜，第二部分到此结束，Flasky 的功能开发全部完成。下一步显然是把它部署上线 —— 这带来了一系列新的挑战，也就是第三部分的主题。
+</p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>REST：资源用 URL 标识，用 GET / POST / PUT / DELETE 操作，用 JSON 表示，每个请求无状态；URL 里带版本号。</li>
+  <li>API 是一个挂在 <code>/api/v1</code> 的子应用；它自己的 <code>onError</code> 保证错误永远是 JSON，全局错误处理按 <code>Accept</code> 头做内容协商。</li>
+  <li>认证放在 <code>Authorization</code> 头里：Basic（<code>hono/basic-auth</code>）或 Bearer 令牌（JWT，一小时过期）；令牌不能用来换新令牌。</li>
+  <li>序列化函数决定对外暴露什么（带上完整的资源链接，隐藏敏感字段）；反序列化用 <code>zValidator('json')</code>，只接受允许的字段。</li>
+  <li>POST 成功返回 201 + <code>Location</code>；权限不足 403、校验失败 400、找不到 404，全部是 JSON。</li>
+  <li>集合资源统一分页格式 <code>{ items, prev, next, count }</code>，客户端沿着 <code>next</code> 链接翻页。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 curl 走一遍完整流程：换令牌 → 发文章 → 读回来 → 修改 → 读评论。每一步都看看响应头里的状态码。</li>
+    <li>给 API 加一个 <code>DELETE /posts/:id</code>，只允许作者和管理员调用，成功返回 204（提示：<code>c.body(null, 204)</code>）。</li>
+    <li>加一个 <code>GET /users/:id/followers/</code> 接口，返回分页的粉丝列表，格式和其他集合一致。</li>
+    <li>用 <code>hc</code> 写一个小脚本调用你的 API（提示：<code>import { hc } from 'hono/client'</code>），体会类型提示带来的便利。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

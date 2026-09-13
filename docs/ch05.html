@@ -1,0 +1,1013 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 5 章 · 数据库 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="5">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 5 章</span>
+<h1>数据库</h1>
+<p class="lede">
+  会话只能记住一个用户的一点点东西，而且关掉浏览器就可能消失。真正需要长期保存、所有用户共享的数据，要放进数据库。
+  这一章介绍关系型数据库的基本概念，然后用 <strong>Drizzle ORM</strong> 定义表、增删改查，
+  最后用 <strong>drizzle-kit</strong> 管理数据库结构的变更（迁移）。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解表、行、主键、外键和“一对多”关系，知道 SQL 与 NoSQL 的取舍</li>
+    <li>知道为什么选 Drizzle，以及为什么开发用 PGlite、生产用 PostgreSQL</li>
+    <li>用 Drizzle 的 <code>pgTable</code> 定义模型，并从中自动得到 TypeScript 类型</li>
+    <li>熟练地插入、修改、删除、查询数据，会看 Drizzle 生成的 SQL</li>
+    <li>在处理函数和交互式 shell 里使用数据库</li>
+    <li>用 drizzle-kit 生成、审查、应用迁移</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="sql">SQL 数据库</h2>
+
+<p>
+  关系型数据库把数据存在<strong>表</strong>（table）里，每张表对应应用里的一类东西 —— 用户、角色、文章。
+  表有固定的<strong>列</strong>（column，定义了“这类东西有哪些属性”）和不定数量的<strong>行</strong>（row，每一行就是一个具体的东西）。
+</p>
+<p>
+  每张表有一个特殊的列叫<strong>主键</strong>（primary key），它的值在表内唯一，用来标识每一行。
+  表还可以有<strong>外键</strong>（foreign key）列，存的是另一张表（或同一张表）某一行的主键。
+  这种行与行之间的链接叫<strong>关系</strong>（relationship），是“关系型”数据库名字的由来。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="roles 表与 users 表的一对多关系">
+  <rect class="bx-b" x="60" y="40" width="220" height="130" rx="10"/>
+  <text class="ttl on-b" x="170" y="64" text-anchor="middle">roles</text>
+  <line class="ln" x1="60" y1="76" x2="280" y2="76"/>
+  <text class="mono" x="80" y="100">🔑 id</text>
+  <text class="sm" x="260" y="100" text-anchor="end">整数，主键</text>
+  <text class="mono" x="80" y="126">name</text>
+  <text class="sm" x="260" y="126" text-anchor="end">字符串，唯一</text>
+
+  <rect class="bx-a" x="480" y="40" width="220" height="156" rx="10"/>
+  <text class="ttl on-a" x="590" y="64" text-anchor="middle">users</text>
+  <line class="ln" x1="480" y1="76" x2="700" y2="76"/>
+  <text class="mono" x="500" y="100">🔑 id</text>
+  <text class="sm" x="680" y="100" text-anchor="end">整数，主键</text>
+  <text class="mono" x="500" y="126">username</text>
+  <text class="sm" x="680" y="126" text-anchor="end">字符串，唯一</text>
+  <text class="mono on-a" x="500" y="152">🔗 role_id</text>
+  <text class="sm" x="680" y="152" text-anchor="end">外键 → roles.id</text>
+
+  <path class="ln-a" d="M280 100 H400 V152 H476"/>
+  <text class="ttl on-b" x="296" y="94">1</text>
+  <path class="ln-a" d="M462 142 L476 152 L462 162"/>
+  <text class="ttl on-a" x="444" y="146">多</text>
+  <text class="sm" x="380" y="214" text-anchor="middle">一个角色可以对应许多用户；每个用户只属于一个角色 —— 这叫“一对多”</text>
+</svg>
+<figcaption>图 5-1　实体-关系图（ER 图）。方框是表，连线是关系，两端标注“一”和“多”</figcaption>
+</figure>
+
+<p>
+  这种设计的好处是<strong>没有重复</strong>：角色名只存在 <code>roles</code> 表里一处，把 “Admin” 改名为 “Administrator”，
+  所有引用它的用户立刻就“看到”了新名字。代价是想列出“用户及其角色名”时，得把两张表<strong>连接</strong>（join）起来查。
+  好在关系数据库很擅长做这件事。
+</p>
+
+<h2 id="nosql">NoSQL 数据库</h2>
+
+<p>
+  不遵循关系模型的数据库统称 NoSQL。常见的一类用<strong>集合</strong>（collection）代替表、用<strong>文档</strong>（document）代替行。
+  它们通常不支持连接，所以会把数据<strong>反规范化</strong>（denormalize）：直接把角色名抄进每个用户文档里。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="反规范化后的 NoSQL 文档">
+  <rect class="bx-p" x="20" y="20" width="220" height="150" rx="10"/>
+  <text class="ttl on-p" x="130" y="44" text-anchor="middle">users 集合</text>
+  <rect class="bx" x="36" y="56" width="198" height="30" rx="6"/>
+  <text class="mono" x="46" y="76">{ "john", role: "Admin" }</text>
+  <rect class="bx" x="36" y="94" width="198" height="30" rx="6"/>
+  <text class="mono" x="46" y="114">{ "susan", role: "User" }</text>
+  <rect class="bx" x="36" y="132" width="198" height="30" rx="6"/>
+  <text class="mono" x="46" y="152">{ "david", role: "User" }</text>
+
+  <rect class="bx-g" x="280" y="30" width="220" height="60" rx="8"/>
+  <text class="ttl on-g" x="296" y="54">✔ 读取快</text>
+  <text class="sm" x="296" y="76">列出用户和角色，不需要连接</text>
+  <rect class="bx-r" x="280" y="104" width="220" height="60" rx="8"/>
+  <text class="ttl on-r" x="296" y="128">✘ 改名贵</text>
+  <text class="sm" x="296" y="150">角色改名 → 要更新每一个文档</text>
+
+  <rect class="bx-d" x="530" y="30" width="210" height="134" rx="10"/>
+  <text class="ttl" x="546" y="54">SQL 还是 NoSQL？</text>
+  <text class="sm" x="546" y="78">SQL 数据库遵循 ACID，</text>
+  <text class="sm" x="546" y="96">即使断电也能保证一致性。</text>
+  <text class="sm" x="546" y="120">对中小型应用，两者性能</text>
+  <text class="sm" x="546" y="138">差不多。本书选关系型。</text>
+</svg>
+<figcaption>图 5-2　反规范化用“重复存储”换“免连接”。ACID 指原子性、一致性、隔离性和持久性</figcaption>
+</figure>
+
+<h2 id="orm">TypeScript 的数据库工具</h2>
+
+<p>
+  原书用 Flask-SQLAlchemy。在 TypeScript 世界里，访问数据库的工具大致分三个层次：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="数据库访问工具的三个抽象层次">
+  <rect class="bx-d" x="20" y="186" width="720" height="48" rx="8"/>
+  <text class="ttl" x="36" y="215">数据库服务器</text>
+  <text class="sm" x="200" y="215">PostgreSQL · MySQL · SQLite ……</text>
+
+  <rect class="bx" x="20" y="126" width="720" height="48" rx="8"/>
+  <text class="ttl" x="36" y="148">驱动（driver）</text>
+  <text class="mono" x="200" y="148">pool.query('SELECT * FROM users WHERE id = $1', [1])</text>
+  <text class="sm" x="36" y="165">pg、mysql2 …… 自由度最高，但结果没有类型，SQL 写错了运行时才知道</text>
+
+  <rect class="bx-b" x="20" y="66" width="720" height="48" rx="8"/>
+  <text class="ttl on-b" x="36" y="88">类 SQL 的 ORM / 查询构建器</text>
+  <text class="mono" x="270" y="88">db.select().from(users).where(eq(users.id, 1))</text>
+  <text class="sm" x="36" y="105">Drizzle、Kysely …… 写法贴近 SQL，但每个表名、列名、结果都有类型</text>
+
+  <rect class="bx-p" x="20" y="6" width="720" height="48" rx="8"/>
+  <text class="ttl on-p" x="36" y="28">高层 ORM</text>
+  <text class="mono" x="270" y="28">prisma.user.findUnique({ where: { id: 1 } })</text>
+  <text class="sm" x="36" y="45">Prisma、TypeORM …… 离 SQL 最远，上手快，复杂查询有时要绕路</text>
+</svg>
+<figcaption>图 5-3　越往上越方便，越往下越接近数据库本身。Drizzle 处在“既有类型安全，又不隐藏 SQL”的位置</figcaption>
+</figure>
+
+<p>原书给出了挑选数据库框架的四个标准，我们用它们来评估 Drizzle：</p>
+<ul>
+  <li><strong>易用性</strong>：表结构用 TypeScript 定义，查询结果自动带类型；会一点 SQL 就会用 Drizzle，官方口号是“If you know SQL, you know Drizzle”。</li>
+  <li><strong>性能</strong>：原书建议“选一个在必要时能直接写原生 SQL 的抽象层”。Drizzle 本身很薄，几乎就是 SQL 的一对一翻译，随时可以用 <code>sql`…`</code> 写原生 SQL。</li>
+  <li><strong>可移植性</strong>：支持 PostgreSQL、MySQL、SQLite，以及 Neon、Cloudflare D1、PGlite 等各种变体，能跑在 Node.js 和边缘环境。</li>
+  <li><strong>框架集成</strong>：Drizzle 与框架无关，不需要任何“Hono 扩展”—— 在处理函数里直接调用就行。</li>
+</ul>
+
+<h2 id="pglite">开发用 PGlite，生产用 PostgreSQL</h2>
+
+<p>
+  原书开发时用 SQLite（一个文件就是一个数据库，不用装服务器），上线后换成 MySQL 或 Postgres。
+  这个思路很实用，但有个隐患：SQLite 和 Postgres 毕竟是两种数据库，行为有差异，
+  而且在 Drizzle 里，两种数据库的表要用不同的函数定义（<code>sqliteTable</code> 和 <code>pgTable</code>）。
+</p>
+<p>
+  <a href="https://pglite.dev">PGlite</a> 完美地解决了这个问题：它是编译成 WebAssembly 的<strong>真正的 PostgreSQL</strong>，
+  以一个 npm 包的形式运行在你的 Node 进程里，数据存在一个目录中 —— 和 SQLite 一样免安装，但和生产环境是同一种数据库。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="开发、测试环境用 PGlite，生产环境用 PostgreSQL 服务器">
+  <rect class="bx-a" x="250" y="14" width="260" height="46" rx="10"/>
+  <text class="ttl on-a" x="380" y="36" text-anchor="middle">src/db/schema.ts（只写一份）</text>
+  <text class="mono" x="380" y="52" text-anchor="middle">pgTable('users', …)</text>
+
+  <path class="ln" d="M300 62 L130 104" marker-end="url(#ar)"/>
+  <path class="ln" d="M380 62 V104" marker-end="url(#ar)"/>
+  <path class="ln" d="M460 62 L630 104" marker-end="url(#ar)"/>
+
+  <rect class="bx-g" x="20" y="108" width="220" height="104" rx="10"/>
+  <text class="ttl on-g" x="130" y="132" text-anchor="middle">开发</text>
+  <text class="mono" x="130" y="156" text-anchor="middle">./data/dev</text>
+  <text class="sm" x="130" y="178" text-anchor="middle">PGlite，数据存在项目目录里</text>
+  <text class="sm" x="130" y="196" text-anchor="middle">≈ 原书的 data-dev.sqlite</text>
+
+  <rect class="bx-g" x="270" y="108" width="220" height="104" rx="10"/>
+  <text class="ttl on-g" x="380" y="132" text-anchor="middle">测试</text>
+  <text class="mono" x="380" y="156" text-anchor="middle">memory://</text>
+  <text class="sm" x="380" y="178" text-anchor="middle">PGlite，只存在内存里</text>
+  <text class="sm" x="380" y="196" text-anchor="middle">≈ 原书的 sqlite://</text>
+
+  <rect class="bx-b" x="520" y="108" width="220" height="104" rx="10"/>
+  <text class="ttl on-b" x="630" y="132" text-anchor="middle">生产</text>
+  <text class="mono" x="630" y="156" text-anchor="middle">postgres://…</text>
+  <text class="sm" x="630" y="178" text-anchor="middle">独立的 PostgreSQL 服务器</text>
+  <text class="sm" x="630" y="196" text-anchor="middle">通过网络连接</text>
+</svg>
+<figcaption>图 5-4　同一份表定义、同一种 SQL 方言，只是“数据库装在哪”不同</figcaption>
+</figure>
+
+<p>安装需要的包：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install drizzle-orm @electric-sql/pglite pg
+npm install -D drizzle-kit @types/pg
+</pre>
+</div>
+
+<p>原书表 5-1 列出了不同数据库的连接 URL，我们用到的是这些：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>数据库</th><th>URL / 路径</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>PostgreSQL 服务器</td><td><code>postgres://用户名:密码@主机:5432/数据库名</code></td><td>生产环境，<code>pg</code> 驱动连接</td></tr>
+    <tr><td>PGlite（磁盘）</td><td><code>./data/dev</code></td><td>一个目录，PGlite 会自动创建</td></tr>
+    <tr><td>PGlite（内存）</td><td><code>memory://</code></td><td>进程结束就消失，适合测试</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>先写一个最简单的数据库模块。第 7 章会把它改造成能根据配置切换 PGlite 和 PostgreSQL 的版本：</p>
+
+<div class="code" data-lang="ts" data-file="src/db/index.ts">
+<pre>
+import { PGlite } from '@electric-sql/pglite'
+import { drizzle } from 'drizzle-orm/pglite'
+import * as schema from './schema.js'
+
+// 数据存在项目目录的 data/dev 下（记得把 data/ 加进 .gitignore）
+export const db = drizzle(new PGlite('./data/dev'), { schema })
+</pre>
+</div>
+
+<h2 id="models">定义模型</h2>
+
+<p>
+  <strong>模型</strong>（model）指应用里需要持久保存的实体。在原书里，模型是一个继承 <code>db.Model</code> 的 Python 类；
+  在 Drizzle 里，模型就是一个用 <code>pgTable()</code> 定义的表对象：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+class Role(db.Model):
+    __tablename__ = 'roles'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(64), unique=True)
+
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64),
+                         unique=True, index=True)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+import { pgTable, serial, varchar } from 'drizzle-orm/pg-core'
+
+export const roles = pgTable('roles', {
+  id: serial('id').primaryKey(),
+  name: varchar('name', { length: 64 }).notNull().unique(),
+})
+
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  username: varchar('username', { length: 64 }).notNull().unique(),
+})
+</pre></div>
+  </div>
+</div>
+
+<ul>
+  <li><code>pgTable('roles', …)</code> 的第一个参数就是表名（相当于 <code>__tablename__</code>）。原书建议表名用复数，我们照做。</li>
+  <li>每个属性写成 <code>代码里的名字: 类型('数据库里的列名')</code>。两边可以不同：后面会看到 <code>roleId: integer('role_id')</code>，代码用驼峰，数据库用下划线。</li>
+  <li><code>serial</code> 是 PostgreSQL 的自增整数，插入时不用给值，数据库自动分配 1、2、3……</li>
+  <li><code>.unique()</code> 会自动建立唯一索引，所以不用再单独写 <code>index=True</code>。</li>
+</ul>
+
+<p>原书表 5-2 列出了 SQLAlchemy 的常用列类型，Drizzle（PostgreSQL）里的对应关系如下：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>SQLAlchemy</th><th>Drizzle（pg-core）</th><th>TypeScript 类型</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>Integer</code></td><td><code>integer()</code> / <code>serial()</code></td><td><code>number</code></td><td>32 位整数；<code>serial</code> 自增</td></tr>
+    <tr><td><code>SmallInteger</code> / <code>BigInteger</code></td><td><code>smallint()</code> / <code>bigint({ mode })</code></td><td><code>number</code> / <code>bigint</code></td><td>短整数 / 大整数</td></tr>
+    <tr><td><code>Float</code></td><td><code>doublePrecision()</code> / <code>real()</code></td><td><code>number</code></td><td>浮点数</td></tr>
+    <tr><td><code>Numeric</code></td><td><code>numeric({ precision, scale })</code></td><td><code>string</code></td><td>定点数（钱！），以字符串返回避免精度丢失</td></tr>
+    <tr><td><code>String(64)</code></td><td><code>varchar({ length: 64 })</code></td><td><code>string</code></td><td>限长字符串</td></tr>
+    <tr><td><code>Text</code> / <code>UnicodeText</code></td><td><code>text()</code></td><td><code>string</code></td><td>不限长字符串（PostgreSQL 字符串全是 Unicode）</td></tr>
+    <tr><td><code>Boolean</code></td><td><code>boolean()</code></td><td><code>boolean</code></td><td>布尔值</td></tr>
+    <tr><td><code>Date</code> / <code>Time</code></td><td><code>date()</code> / <code>time()</code></td><td><code>string</code>（或 <code>Date</code>）</td><td>日期 / 时间</td></tr>
+    <tr><td><code>DateTime</code></td><td><code>timestamp({ withTimezone: true })</code></td><td><code>Date</code></td><td>日期时间，推荐始终带时区</td></tr>
+    <tr><td><code>Interval</code></td><td><code>interval()</code></td><td><code>string</code></td><td>时间间隔</td></tr>
+    <tr><td><code>Enum</code></td><td><code>pgEnum()</code></td><td>字面量联合类型</td><td>枚举</td></tr>
+    <tr><td><code>PickleType</code></td><td><code>jsonb()</code></td><td>任意（可用 <code>.$type&lt;T&gt;()</code> 标注）</td><td>存结构化数据</td></tr>
+    <tr><td><code>LargeBinary</code></td><td><code>bytea</code>（自定义类型）</td><td><code>Buffer</code></td><td>二进制，大文件应放对象存储</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>原书表 5-3 的列选项：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>SQLAlchemy</th><th>Drizzle</th></tr></thead>
+  <tbody>
+    <tr><td><code>primary_key=True</code></td><td><code>.primaryKey()</code></td></tr>
+    <tr><td><code>unique=True</code></td><td><code>.unique()</code></td></tr>
+    <tr><td><code>index=True</code></td><td>表定义的第三个参数：<code>(t) =&gt; [index('ix_名字').on(t.列)]</code></td></tr>
+    <tr><td><code>nullable=False</code></td><td><code>.notNull()</code>（和 SQLAlchemy 一样，默认允许为空）</td></tr>
+    <tr><td><code>default=值</code></td><td><code>.default(值)</code>；数据库端的当前时间用 <code>.defaultNow()</code>；每次插入时由代码计算用 <code>.$defaultFn(() =&gt; …)</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>从模型得到类型</h3>
+
+<p>Drizzle 最让人愉快的一点：不需要手写任何类型，表定义就是类型的来源：</p>
+
+<div class="code" data-lang="ts" data-file="src/db/schema.ts">
+<pre>
+export type Role = typeof roles.$inferSelect      // 查出来的一行：{ id: number; name: string }
+export type NewUser = typeof users.$inferInsert   // 插入时需要的：{ id?: number; username: string; … }
+</pre>
+</div>
+
+<p>
+  注意 <code>$inferInsert</code> 里 <code>id</code> 是可选的（数据库会自动生成），而 <code>username</code> 是必填的（<code>notNull()</code> 且没有默认值）。
+  以后给表加一列，这些类型会自动跟着变，所有用到的地方编辑器都会检查。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 原书的 __repr__ 呢？</div>
+  <p>
+    原书给每个模型写了 <code>__repr__()</code>，方便在 shell 里打印时看得清楚。Drizzle 查出来的是普通 JavaScript 对象，
+    <code>console.log()</code> 直接就能看到所有字段，不需要额外做什么。
+  </p>
+</div>
+
+<h2 id="relations">关系</h2>
+
+<p>给 <code>users</code> 表加一个外键列，指向 <code>roles.id</code>：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+class Role(db.Model):
+    # ...
+    users = db.relationship('User', backref='role')
+
+class User(db.Model):
+    # ...
+    role_id = db.Column(db.Integer,
+                        db.ForeignKey('roles.id'))
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+import { integer } from 'drizzle-orm/pg-core'
+
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  username: varchar('username', { length: 64 }).notNull().unique(),
+  roleId: integer('role_id').references(() =&gt; roles.id),
+})
+</pre></div>
+  </div>
+</div>
+
+<p>
+  <code>.references(() =&gt; roles.id)</code> 定义了真正的数据库外键约束 —— 它保证 <code>role_id</code> 里只能放存在的角色 ID。
+  写成箭头函数是为了允许“引用在后面才定义的表”（相当于原书用字符串 <code>'User'</code> 来引用后面的类）。
+</p>
+
+<p>
+  原书的 <code>db.relationship()</code> 还提供了“面向对象”的访问方式：<code>role.users</code> 得到这个角色的所有用户，<code>user.role</code> 得到用户的角色。
+  Drizzle 里对应的是 <code>relations()</code>，它<strong>不改变数据库结构</strong>，只是告诉 Drizzle 两张表怎么连，供“关系查询”使用：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/db/schema.ts">
+<pre>
+import { relations } from 'drizzle-orm'
+
+export const rolesRelations = relations(roles, ({ many }) =&gt; ({
+  users: many(users),                    // role.users —— “一对多”的“多”
+}))
+
+export const usersRelations = relations(users, ({ one }) =&gt; ({
+  role: one(roles, { fields: [users.roleId], references: [roles.id] }),   // user.role
+}))
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="外键与 relations 的分工">
+  <rect class="bx-b" x="20" y="20" width="350" height="130" rx="10"/>
+  <text class="ttl on-b" x="36" y="44">.references(() =&gt; roles.id)</text>
+  <text class="sm" x="36" y="70">· 数据库层面：真正的外键约束</text>
+  <text class="sm" x="36" y="92">· 会出现在迁移的 SQL 里</text>
+  <text class="sm" x="36" y="114">· 防止出现“指向不存在角色”的用户</text>
+  <text class="sm" x="36" y="136">· 相当于 db.ForeignKey('roles.id')</text>
+  <rect class="bx-a" x="390" y="20" width="350" height="130" rx="10"/>
+  <text class="ttl on-a" x="406" y="44">relations(…)</text>
+  <text class="sm" x="406" y="70">· 代码层面：告诉 Drizzle 怎么连表</text>
+  <text class="sm" x="406" y="92">· 不产生任何 SQL，不影响迁移</text>
+  <text class="sm" x="406" y="114">· 让 db.query.roles.findMany({ with: … }) 能用</text>
+  <text class="sm" x="406" y="136">· 相当于 db.relationship(…, backref=…)</text>
+</svg>
+<figcaption>图 5-5　一个管“数据库里的规矩”，一个管“代码里的方便”，两者通常一起写</figcaption>
+</figure>
+
+<p>
+  除了一对多，还有别的关系类型：<strong>一对一</strong>可以看作“多”的一方最多只有一个；
+  <strong>多对一</strong>是站在“多”那一方看的一对多；最复杂的<strong>多对多</strong>需要一张额外的“关联表”，第 12 章会详细讲。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>5a</b>：用 Flask-SQLAlchemy 定义数据库模型</div>
+
+<h2 id="ops">数据库操作</h2>
+
+<p>
+  原书在 <code>flask shell</code> 里演示各种数据库操作。我们也可以这么做（本章后面会搭一个 shell），
+  这里先把每种操作的写法过一遍。
+</p>
+
+<h3>创建表</h3>
+
+<p>
+  原书先用 <code>db.create_all()</code> 按模型建表，并提醒：表已存在时它不会更新表结构，想改表只能 <code>drop_all()</code> 再重建，数据全丢。
+  Drizzle 里对应的“快速原型”工具是 <code>drizzle-kit push</code>：它比较 <code>schema.ts</code> 和数据库的实际结构，直接把差异同步过去。
+  先在项目根目录写一个 drizzle-kit 的配置文件：
+</p>
+
+<div class="code" data-lang="ts" data-file="drizzle.config.ts">
+<pre>
+import { defineConfig } from 'drizzle-kit'
+
+export default defineConfig({
+  dialect: 'postgresql',
+  schema: './src/db/schema.ts',
+  out: './drizzle',                       // 迁移文件放在这里（本章最后一节）
+  driver: 'pglite',                       // 开发时连接的是 PGlite
+  dbCredentials: { url: './data/dev' },
+})
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npx drizzle-kit push
+# [✓] Changes applied
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; push 只适合开发初期</div>
+  <p>
+    <code>push</code> 很方便，但它不留记录：生产数据库是怎么一步步变成现在这样的，没有任何文件能说清楚。
+    和原书一样，本章最后我们会换成正规的<strong>迁移</strong>。另外，PGlite 同一时间只能被一个进程打开，
+    运行 drizzle-kit 之前要先停掉开发服务器。
+  </p>
+</div>
+
+<h3>插入行</h3>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+&gt;&gt;&gt; admin_role = Role(name='Admin')
+&gt;&gt;&gt; mod_role = Role(name='Moderator')
+&gt;&gt;&gt; user_role = Role(name='User')
+&gt;&gt;&gt; user_john = User(username='john', role=admin_role)
+&gt;&gt;&gt; db.session.add_all([admin_role, mod_role,
+...                     user_role, user_john])
+&gt;&gt;&gt; db.session.commit()
+&gt;&gt;&gt; admin_role.id
+1
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+const [adminRole, modRole, userRole] = await db
+  .insert(roles)
+  .values([{ name: 'Admin' }, { name: 'Moderator' }, { name: 'User' }])
+  .returning()            // 让数据库把插入后的行（含 id）返回来
+
+adminRole.id              // 1
+
+await db.insert(users).values([
+  { username: 'john', roleId: adminRole.id },
+  { username: 'susan', roleId: userRole.id },
+  { username: 'david', roleId: userRole.id },
+])
+</pre></div>
+  </div>
+</div>
+
+<p>
+  原书演示了一个细节：Python 对象在 <code>commit()</code> 之前 <code>id</code> 是 <code>None</code>，提交之后数据库才分配 ID。
+  Drizzle 没有“先创建对象、再提交”这一步：<code>insert</code> 语句一执行，行就已经在数据库里了，<code>.returning()</code> 把数据库分配的 ID 带回来。
+</p>
+
+<h3>“数据库会话”与事务</h3>
+
+<p>
+  原书说：Flask-SQLAlchemy 的 <code>db.session</code>（和 Flask 的用户会话毫无关系！）会把多次修改攒起来，<code>commit()</code> 时<strong>原子地</strong>一次写入；
+  中途出错就整体回滚，保证数据库不会停留在“改了一半”的状态。数据库会话也叫<strong>事务</strong>（transaction）。
+</p>
+<p>
+  Drizzle 默认每条语句单独执行、单独生效。需要“几条语句要么全成功、要么全失败”时，显式地开一个事务：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+await db.transaction(async (tx) =&gt; {
+  await tx.insert(users).values({ username: 'eve', roleId: userRole.id })
+  await tx.insert(users).values({ username: 'john' })   // 用户名重复 → 抛异常
+})
+// 第二条失败，第一条也被回滚：数据库里没有 eve
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="事务的提交与回滚">
+  <rect class="bx" x="20" y="20" width="200" height="150" rx="10"/>
+  <text class="ttl" x="120" y="44" text-anchor="middle">db.transaction(…)</text>
+  <rect class="bx-g" x="36" y="58" width="168" height="30" rx="6"/>
+  <text class="mono" x="46" y="78">INSERT eve  ✔</text>
+  <rect class="bx-r" x="36" y="96" width="168" height="30" rx="6"/>
+  <text class="mono on-r" x="46" y="116">INSERT john ✘ 重复</text>
+  <text class="sm" x="120" y="152" text-anchor="middle">回调函数抛出异常</text>
+
+  <path class="ln-r" d="M222 95 H300" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="304" y="60" width="180" height="70" rx="10"/>
+  <text class="ttl on-r" x="394" y="88" text-anchor="middle">ROLLBACK</text>
+  <text class="sm" x="394" y="110" text-anchor="middle">两条都撤销</text>
+
+  <rect class="bx-g" x="520" y="20" width="220" height="150" rx="10"/>
+  <text class="ttl on-g" x="630" y="44" text-anchor="middle">回调函数正常结束</text>
+  <text class="sm" x="630" y="80" text-anchor="middle">→ COMMIT</text>
+  <text class="sm" x="630" y="104" text-anchor="middle">所有修改同时生效</text>
+  <text class="sm" x="630" y="140" text-anchor="middle">其他请求不会看到“一半”</text>
+</svg>
+<figcaption>图 5-6　事务的“原子性”：要么全部发生，要么都没发生。第 8 章注册用户时会用到</figcaption>
+</figure>
+
+<h3>修改和删除行</h3>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+&gt;&gt;&gt; admin_role.name = 'Administrator'
+&gt;&gt;&gt; db.session.add(admin_role)
+&gt;&gt;&gt; db.session.commit()
+
+&gt;&gt;&gt; db.session.delete(mod_role)
+&gt;&gt;&gt; db.session.commit()
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+import { eq } from 'drizzle-orm'
+
+await db.update(roles)
+  .set({ name: 'Administrator' })
+  .where(eq(roles.id, adminRole.id))
+
+await db.delete(roles)
+  .where(eq(roles.name, 'Moderator'))
+</pre></div>
+  </div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 别忘了 where</div>
+  <p>
+    <code>db.update(roles).set({ name: 'X' })</code> 如果漏了 <code>.where()</code>，会把<strong>所有</strong>角色都改名；
+    <code>db.delete(roles)</code> 会删光整张表。SQL 本身就是这么规定的，Drizzle 只是忠实地翻译。写修改和删除语句时，先写 <code>where</code>。
+  </p>
+</div>
+
+<h3>查询行</h3>
+
+<p>最基本的查询，取出整张表：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+&gt;&gt;&gt; Role.query.all()
+[&lt;Role 'Administrator'&gt;, &lt;Role 'User'&gt;]
+&gt;&gt;&gt; User.query.filter_by(role=user_role).all()
+[&lt;User 'susan'&gt;, &lt;User 'david'&gt;]
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+await db.select().from(roles)
+// [{ id: 3, name: 'User' }, { id: 1, name: 'Administrator' }]
+// 注意：没写 orderBy 时，数据库不保证返回顺序（刚被修改过的行常常跑到后面）
+
+await db.select().from(users).where(eq(users.roleId, userRole.id))
+// [{ id: 2, username: 'susan', roleId: 3 },
+//  { id: 3, username: 'david', roleId: 3 }]
+</pre></div>
+  </div>
+</div>
+
+<p>原书演示了把查询对象转成字符串来看 SQLAlchemy 生成的 SQL。Drizzle 用 <code>.toSQL()</code>：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+db.select().from(users).where(eq(users.roleId, 3)).toSQL()
+// {
+//   sql: 'select "id", "username", "role_id" from "users" where "users"."role_id" = $1',
+//   params: [3]
+// }
+</pre>
+</div>
+
+<p>
+  注意 <code>$1</code> 和 <code>params</code>：值是作为<strong>参数</strong>单独发给数据库的，而不是拼进 SQL 字符串。
+  这让 SQL 注入攻击无从下手 —— 和 JSX 自动转义防 XSS 是一个道理。
+</p>
+
+<p>原书表 5-5 的查询过滤器，在 Drizzle 里是 <code>select()</code> 之后链式调用的方法：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>SQLAlchemy 过滤器</th><th>Drizzle</th></tr></thead>
+  <tbody>
+    <tr><td><code>filter_by(name='x')</code> / <code>filter(...)</code></td><td><code>.where(eq(t.name, 'x'))</code>；多个条件用 <code>and(…)</code> / <code>or(…)</code>；还有 <code>ne</code>、<code>gt</code>、<code>lt</code>、<code>like</code>、<code>inArray</code>……</td></tr>
+    <tr><td><code>limit(n)</code></td><td><code>.limit(n)</code></td></tr>
+    <tr><td><code>offset(n)</code></td><td><code>.offset(n)</code></td></tr>
+    <tr><td><code>order_by(...)</code></td><td><code>.orderBy(asc(t.col))</code> / <code>desc(t.col)</code></td></tr>
+    <tr><td><code>group_by(...)</code></td><td><code>.groupBy(t.col)</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>原书表 5-6 的“查询执行器”（真正触发数据库查询的方法）。Drizzle 的查询写好后 <code>await</code> 就会执行，所以对应关系是：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>SQLAlchemy</th><th>Drizzle</th></tr></thead>
+  <tbody>
+    <tr><td><code>all()</code></td><td><code>await db.select().from(t)…</code>，得到数组</td></tr>
+    <tr><td><code>first()</code></td><td><code>const [row] = await ….limit(1)</code>，没有结果时 <code>row</code> 是 <code>undefined</code></td></tr>
+    <tr><td><code>get(id)</code></td><td><code>await db.query.t.findFirst({ where: eq(t.id, id) })</code></td></tr>
+    <tr><td><code>first_or_404()</code> / <code>get_or_404()</code></td><td>先查，再 <code>if (!row) throw new HTTPException(404)</code></td></tr>
+    <tr><td><code>count()</code></td><td><code>await db.$count(t, 条件)</code></td></tr>
+    <tr><td><code>paginate()</code></td><td>用 <code>limit</code> + <code>offset</code> + <code>$count</code> 自己写（第 11 章）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>关系查询</h3>
+
+<p>
+  原书用 <code>user_role.users</code> 取出一个角色的所有用户，还演示了 <code>lazy='dynamic'</code>：
+  让关系返回“还没执行的查询”，以便继续加排序等条件。Drizzle 的关系查询在一次调用里就能指定这些：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { asc } from 'drizzle-orm'
+
+const role = await db.query.roles.findFirst({
+  where: eq(roles.name, 'User'),
+  with: { users: { orderBy: asc(users.username) } },   // 相当于 user_role.users.order_by(User.username)
+})
+// { id: 3, name: 'User', users: [{ id: 3, username: 'david', … }, { id: 2, username: 'susan', … }] }
+
+const john = await db.query.users.findFirst({ with: { role: true } })
+// { id: 1, username: 'john', roleId: 1, role: { id: 1, name: 'Administrator' } }
+</pre>
+</div>
+
+<p>
+  <code>db.query.xxx</code> 这套 API 就是靠前面写的 <code>relations()</code> 知道怎么连表的。
+  只要计数的话，用 <code>await db.$count(users, eq(users.roleId, 3))</code>，相当于原书的 <code>user_role.users.count()</code>。
+</p>
+
+<h2 id="views">在处理函数里使用数据库</h2>
+
+<p>
+  现在把数据库接进上一章的“你叫什么名字”应用：每次提交名字时查一下数据库，
+  没见过的名字就存进去，并在页面上说“很高兴认识你”；见过的就说“欢迎回来”。
+</p>
+
+<p>原书的 Flask 版本：</p>
+
+<div class="code" data-lang="python" data-file="hello.py（原书例 5-5）">
+<pre>
+if form.validate_on_submit():
+    user = User.query.filter_by(username=form.name.data).first()
+    if user is None:
+        user = User(username=form.name.data)
+        db.session.add(user)
+        db.session.commit()
+        session['known'] = False
+    else:
+        session['known'] = True
+    session['name'] = form.name.data
+    return redirect(url_for('index'))
+</pre>
+</div>
+
+<p>Hono + Drizzle 版本，处理函数变成了 <code>async</code>：</p>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+import { eq } from 'drizzle-orm'
+import { db } from './db/index.js'
+import { users } from './db/schema.js'
+
+app.post('/', zValidator('form', nameSchema, hook), async (c) =&gt; {
+  const { name } = c.req.valid('form')
+
+  const [user] = await db.select().from(users).where(eq(users.username, name)).limit(1)
+  if (!user) {
+    await db.insert(users).values({ username: name })
+    c.var.session.known = false
+  } else {
+    c.var.session.known = true
+  }
+
+  c.var.session.name = name
+  return c.redirect('/')
+})
+</pre>
+</div>
+
+<p>模板里根据 <code>known</code> 显示不同的第二行：</p>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+function IndexPage({ name, known, value = '', errors }: {
+  name?: string; known?: boolean; value?: string; errors?: FieldErrors
+}) {
+  return (
+    &lt;&gt;
+      &lt;div class="page-header"&gt;
+        &lt;h1&gt;你好，{name ?? '陌生人'}！&lt;/h1&gt;
+        {name &amp;&amp; (known ? &lt;p&gt;欢迎回来！&lt;/p&gt; : &lt;p&gt;很高兴认识你！&lt;/p&gt;)}
+      &lt;/div&gt;
+      {/* …表单和上一章一样… */}
+    &lt;/&gt;
+  )
+}
+
+app.get('/', (c) =&gt; c.render(&lt;IndexPage name={c.var.session.name} known={c.var.session.known} /&gt;))
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 处理函数变成了 async</div>
+  <p>
+    数据库查询要通过网络（或者至少跨越进程内的边界），需要时间，所以 Drizzle 的每个操作都返回 Promise，要用 <code>await</code> 等它完成。
+    用了 <code>await</code> 的函数必须声明成 <code>async</code>。忘了写 <code>await</code> 是新手最常见的 bug 之一：
+    你拿到的会是一个 Promise 对象，而不是查询结果。TypeScript 通常能帮你发现这种错误。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>5b</b>：在视图函数中使用数据库</div>
+
+<h2 id="shell">集成交互式 shell</h2>
+
+<p>
+  原书用 <code>@app.shell_context_processor</code> 让 <code>flask shell</code> 启动时自动导入 <code>db</code> 和各个模型，省得每次手动 import。
+  Node.js 自带 REPL（交互式解释器），我们写个小脚本做同样的事：
+</p>
+
+<div class="code" data-lang="ts" data-file="scripts/shell.ts">
+<pre>
+import repl from 'node:repl'
+import * as drizzle from 'drizzle-orm'
+import { db } from '../src/db/index.js'
+import * as schema from '../src/db/schema.js'
+
+console.log('Flasky shell。可用：db、roles、users、eq、and、desc……')
+const r = repl.start({ prompt: 'flasky&gt; ' })
+Object.assign(r.context, { db, ...schema, ...drizzle })   // 相当于 shell context processor
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npm pkg set scripts.shell="tsx scripts/shell.ts"
+npm run shell
+
+flasky&gt; await db.select().from(users)
+[ { id: 1, username: 'john', roleId: 1 }, … ]
+flasky&gt; await db.$count(users)
+3
+</pre>
+</div>
+
+<p>
+  Node 的 REPL 支持顶层 <code>await</code>，所以可以直接执行查询。
+  如果更喜欢图形界面，drizzle-kit 还自带一个网页版数据库浏览器：运行 <code>npx drizzle-kit studio</code>，在浏览器里查看和编辑表中的数据。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>5c</b>：shell 上下文</div>
+
+<h2 id="migrations">用 drizzle-kit 做数据库迁移</h2>
+
+<p>
+  开发过程中模型一定会变：加一列、改一个类型、建一张新表。数据库必须跟着变，而且<strong>不能丢数据</strong>。
+  原书介绍的解决方案是<strong>数据库迁移框架</strong>：就像 Git 跟踪源代码的变化一样，迁移框架跟踪数据库结构（schema）的变化，
+  每次变化生成一个迁移脚本，可以按顺序依次应用到任何一个数据库上。原书用的是 Alembic（通过 Flask-Migrate），我们用 drizzle-kit。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="drizzle-kit 迁移的工作流程">
+  <rect class="bx-a" x="20" y="30" width="150" height="60" rx="10"/>
+  <text class="ttl on-a" x="95" y="54" text-anchor="middle">① 改 schema.ts</text>
+  <text class="sm" x="95" y="74" text-anchor="middle">比如给 users 加一列</text>
+  <path class="ln-a" d="M172 60 H212" marker-end="url(#ar-a)"/>
+  <rect class="bx" x="216" y="30" width="170" height="60" rx="10"/>
+  <text class="ttl" x="301" y="54" text-anchor="middle">② drizzle-kit generate</text>
+  <text class="sm" x="301" y="74" text-anchor="middle">对比上次快照，算出差异</text>
+  <path class="ln" d="M388 60 H428" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="432" y="30" width="150" height="60" rx="10"/>
+  <text class="ttl on-b" x="507" y="54" text-anchor="middle">③ 审查 SQL</text>
+  <text class="sm" x="507" y="74" text-anchor="middle">drizzle/0001_xxx.sql</text>
+  <path class="ln" d="M584 60 H624" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="628" y="30" width="112" height="60" rx="10"/>
+  <text class="ttl on-g" x="684" y="54" text-anchor="middle">④ git commit</text>
+  <text class="sm" x="684" y="74" text-anchor="middle">和代码一起</text>
+
+  <path class="ln-g" d="M684 92 V130 H380 V150" marker-end="url(#ar-g)"/>
+  <text class="sm" x="530" y="124" text-anchor="middle">⑤ 在每个环境上应用</text>
+
+  <rect class="bx-g" x="60" y="154" width="200" height="90" rx="10"/>
+  <text class="ttl on-g" x="160" y="178" text-anchor="middle">你的开发库</text>
+  <text class="mono" x="160" y="202" text-anchor="middle">npm run db:migrate</text>
+  <text class="sm" x="160" y="224" text-anchor="middle">./data/dev</text>
+  <rect class="bx-g" x="280" y="154" width="200" height="90" rx="10"/>
+  <text class="ttl on-g" x="380" y="178" text-anchor="middle">同事的开发库</text>
+  <text class="mono" x="380" y="202" text-anchor="middle">git pull + migrate</text>
+  <text class="sm" x="380" y="224" text-anchor="middle">自动补上缺的迁移</text>
+  <rect class="bx-g" x="500" y="154" width="200" height="90" rx="10"/>
+  <text class="ttl on-g" x="600" y="178" text-anchor="middle">生产数据库</text>
+  <text class="mono" x="600" y="202" text-anchor="middle">部署脚本里执行</text>
+  <text class="sm" x="600" y="224" text-anchor="middle">第 17 章</text>
+</svg>
+<figcaption>图 5-7　迁移的生命周期：它和代码一起提交，在每个数据库上按顺序执行，每个迁移只会执行一次</figcaption>
+</figure>
+
+<h3>生成迁移</h3>
+
+<p>
+  原书先要 <code>flask db init</code> 建立迁移仓库。drizzle-kit 不需要这一步 —— 前面写的 <code>drizzle.config.ts</code> 里的 <code>out: './drizzle'</code> 就是迁移目录。
+  如果你前面用 <code>push</code> 建过表，先删掉 <code>data/dev</code> 目录，从一个空数据库开始（原书在这里也给了同样的建议）。然后：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npx drizzle-kit generate --name initial_migration
+# 2 tables
+# roles 2 columns 0 indexes 0 fks
+# users 3 columns 0 indexes 1 fks
+# [✓] Your SQL migration file ➜ drizzle/0000_initial_migration.sql 🚀
+</pre>
+</div>
+
+<p>生成的是一个普通的 SQL 文件，一定要打开读一遍：</p>
+
+<div class="code" data-lang="sql" data-file="drizzle/0000_initial_migration.sql">
+<pre>
+CREATE TABLE "roles" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"name" varchar(64) NOT NULL,
+	CONSTRAINT "roles_name_unique" UNIQUE("name")
+);
+--&gt; statement-breakpoint
+CREATE TABLE "users" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"username" varchar(64) NOT NULL,
+	"role_id" integer,
+	CONSTRAINT "users_username_unique" UNIQUE("username")
+);
+--&gt; statement-breakpoint
+ALTER TABLE "users" ADD CONSTRAINT "users_role_id_roles_id_fk" FOREIGN KEY ("role_id") REFERENCES "public"."roles"("id") ON DELETE no action ON UPDATE no action;
+</pre>
+</div>
+
+<p>
+  <code>drizzle/</code> 目录里还有一个 <code>meta/</code> 子目录，保存着每次迁移后的 schema“快照”。
+  下次 <code>generate</code> 时，drizzle-kit 就是拿当前的 <code>schema.ts</code> 和最新快照比较，算出需要哪些 <code>ALTER TABLE</code>。
+  所以原书那句话同样适用：<strong>迁移目录必须和代码一起提交到版本控制</strong>。
+</p>
+
+<h3>应用迁移</h3>
+
+<p>
+  生成迁移只是写出了 SQL 文件，还要在数据库上执行才算“升级”。drizzle-orm 提供了 <code>migrate()</code> 函数，
+  它会在数据库里建一张 <code>__drizzle_migrations</code> 表，记录哪些迁移已经执行过，每次只执行新增的部分：
+</p>
+
+<div class="code" data-lang="ts" data-file="scripts/migrate.ts">
+<pre>
+import { migrate } from 'drizzle-orm/pglite/migrator'
+import { db } from '../src/db/index.js'
+
+await migrate(db, { migrationsFolder: './drizzle' })
+console.log('数据库已迁移到最新版本')
+process.exit(0)
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npm pkg set scripts.db:generate="drizzle-kit generate" scripts.db:migrate="tsx scripts/migrate.ts"
+npm run db:migrate
+# 数据库已迁移到最新版本
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么自己写 migrate 脚本</div>
+  <p>
+    drizzle-kit 本身也有 <code>drizzle-kit migrate</code> 命令，开发时直接用也完全没问题。
+    自己写脚本的好处是：它和应用用的是同一个 <code>db</code> 对象，第 7 章切换到“按配置选数据库”之后，同一个脚本在开发、测试、生产环境都能用；
+    第 17 章的部署脚本也会调用同一个 <code>migrate()</code>。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>5d</b>：用 Flask-Migrate 做数据库迁移</div>
+
+<h3>以后每次修改模型</h3>
+
+<p>原书给出的流程，换成 drizzle-kit 就是：</p>
+<ol class="steps">
+  <li>修改 <code>src/db/schema.ts</code>。</li>
+  <li>运行 <code>npm run db:generate</code> 生成迁移。</li>
+  <li><strong>审查</strong>生成的 SQL，确认它准确表达了你的意图。</li>
+  <li>把迁移文件和代码一起提交到 Git。</li>
+  <li>运行 <code>npm run db:migrate</code> 应用到数据库。</li>
+</ol>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Flask-Migrate</th><th>drizzle-kit / drizzle-orm</th><th>备注</th></tr></thead>
+  <tbody>
+    <tr><td><code>flask db init</code></td><td>写好 <code>drizzle.config.ts</code></td><td>只需一次</td></tr>
+    <tr><td><code>flask db migrate -m "…"</code></td><td><code>drizzle-kit generate --name …</code></td><td>生成迁移</td></tr>
+    <tr><td><code>flask db upgrade</code></td><td><code>migrate(db, …)</code> / <code>drizzle-kit migrate</code></td><td>应用迁移</td></tr>
+    <tr><td><code>flask db downgrade</code></td><td>（没有）</td><td>Drizzle 不生成“回退”脚本，要撤销就写一个新的迁移</td></tr>
+    <tr><td><code>flask db stamp</code></td><td>（很少需要）</td><td>记录保存在 <code>__drizzle_migrations</code> 表里</td></tr>
+    <tr><td><code>db.create_all()</code></td><td><code>drizzle-kit push</code></td><td>只适合原型阶段</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 自动生成的迁移不一定对</div>
+  <p>
+    原书警告：如果你<strong>重命名</strong>了一列，自动迁移可能会理解成“删掉旧列、新建一列”，旧数据就没了。
+    drizzle-kit 在遇到这种模棱两可的情况时会停下来问你：“这一列是新建的，还是从某列改名来的？”—— 认真回答它。
+    但其他意图（比如把字符串列改成整数列时，已有数据该怎么转换）它无从得知，所以<strong>每个迁移都要人工审查</strong>，必要时手动编辑 SQL 文件。
+  </p>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：原书“合并迁移”的技巧</div>
+  <p>
+    原书介绍了一个技巧：开发一个功能时模型改了好几次，不想留下一堆零碎的迁移，可以 <code>downgrade</code> 撤掉最后一个迁移、删掉脚本、再重新生成一个。
+    drizzle-kit 里对应的做法是：在迁移<strong>还没提交、也没应用到别人的数据库之前</strong>，运行 <code>npx drizzle-kit drop</code> 删掉最新的迁移（它会同时更新快照），
+    然后删掉本地开发库重新 <code>migrate</code>，再 <code>generate</code> 一个合并后的新迁移。已经上线的迁移永远不要改。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>关系数据库用表、主键和外键组织数据，避免重复；NoSQL 用反规范化换取免连接的读取速度。</li>
+  <li>Drizzle 是“贴近 SQL 的 ORM”：表用 <code>pgTable</code> 定义，类型用 <code>$inferSelect</code> / <code>$inferInsert</code> 自动推导。</li>
+  <li>开发和测试用 PGlite（进程内的 PostgreSQL），生产用 PostgreSQL 服务器，schema 只写一份。</li>
+  <li><code>.references()</code> 定义数据库外键；<code>relations()</code> 只服务于 <code>db.query.xxx</code> 关系查询。</li>
+  <li>增删改查：<code>insert().values().returning()</code>、<code>update().set().where()</code>、<code>delete().where()</code>、<code>select().from().where()</code>；多条语句要原子执行时用 <code>db.transaction()</code>。</li>
+  <li>值总是作为参数传给数据库（<code>$1</code>），天然防 SQL 注入；<code>.toSQL()</code> 可以看生成的语句。</li>
+  <li>表结构的变更走迁移：<code>drizzle-kit generate</code> → 审查 → 提交 → <code>migrate()</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在 shell 里插入三个角色和几个用户，然后用 <code>db.query.roles.findMany({ with: { users: true } })</code> 列出每个角色下的用户。</li>
+    <li>对同一个查询分别调用 <code>.toSQL()</code>，比较 <code>select().from(users)</code> 和 <code>select({ name: users.username }).from(users)</code> 生成的 SQL 有何不同。</li>
+    <li>给 <code>users</code> 表加一个 <code>email</code> 列（<code>varchar(64)</code>，可为空），走一遍完整的迁移流程，打开生成的 SQL 看看是不是 <code>ALTER TABLE … ADD COLUMN</code>。</li>
+    <li>把刚才的 <code>email</code> 列改名为 <code>mail</code> 再 <code>generate</code>，观察 drizzle-kit 是怎么问你的。</li>
+    <li>故意在 <code>db.transaction()</code> 里让第二条语句失败，确认第一条确实被回滚了。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

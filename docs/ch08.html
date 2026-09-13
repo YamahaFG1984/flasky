@@ -1,0 +1,1243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 8 章 · 用户认证 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="8">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 8 章</span>
+<h1>用户认证</h1>
+<p class="lede">
+  第二部分从这里开始：我们要把 Flasky 做成一个真正的社交博客。第一步是知道“谁在访问”。
+  这一章实现完整的认证系统：安全地保存密码、登录与退出、注册新用户、邮件确认账户，以及修改密码、找回密码、修改邮箱。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解为什么密码只能存哈希，什么是“盐”，为什么要用慢哈希</li>
+    <li>用 Node.js 内置的 <code>scrypt</code> 实现密码哈希和验证</li>
+    <li>自己实现 Flask-Login 的核心：登录状态存会话，每个请求加载当前用户，保护需要登录的路由</li>
+    <li>做出登录、退出、注册页面，并防住“开放重定向”漏洞</li>
+    <li>用 <code>hono/jwt</code> 生成有时效的签名令牌，实现邮件确认账户</li>
+    <li>实现修改密码、重置密码、修改邮箱三个账户管理功能</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="tools">认证需要哪些工具</h2>
+
+<p>原书说：Python 有很多优秀的认证包，但没有一个能包办一切。它组合了几个扩展，Hono 版本也一样是组合：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>用途</th><th>原书</th><th>本教程</th></tr></thead>
+  <tbody>
+    <tr><td>管理登录状态</td><td>Flask-Login</td><td>第 4 章的会话 + 几十行自己写的中间件（<code>src/lib/auth.ts</code>）</td></tr>
+    <tr><td>密码哈希</td><td>Werkzeug</td><td>Node.js 内置的 <code>node:crypto</code>（scrypt）</td></tr>
+    <tr><td>签名令牌</td><td>itsdangerous</td><td><code>hono/jwt</code></td></tr>
+    <tr><td>发邮件</td><td>Flask-Mail</td><td>Nodemailer（第 6 章）</td></tr>
+    <tr><td>表单</td><td>Flask-WTF + Flask-Bootstrap</td><td>Zod + JSX 表单组件（第 4 章）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么登录状态要自己写</div>
+  <p>
+    JavaScript 生态有不少认证库（Better Auth、Auth.js、Lucia 的教程等），生产项目完全可以用它们，尤其是需要“用 GitHub 登录”这类第三方登录时。
+    但本章的目标是让你<strong>看懂认证到底在做什么</strong>。原书也专门用了一节“理解 Flask-Login 是怎么工作的”来拆解它的内部流程。
+    我们要写的代码加起来不到一百行，每一行都能对上原书的一个概念。
+  </p>
+</div>
+
+<h2 id="passwords">密码安全</h2>
+
+<p>
+  原书指出，用户信息的安全经常被忽视。如果攻击者拿到了你的用户表，风险远不止你的网站 ——
+  大多数人在很多网站用同一个密码，泄露一个就等于泄露一串。
+</p>
+<p>
+  所以<strong>数据库里绝不能存密码本身，只存密码的哈希值</strong>。哈希函数把密码变成一串看不出规律的字符，而且无法反推回去；
+  但同样的输入永远得到同样的输出，所以登录时对用户输入的密码再算一次哈希，和存着的比一比就知道对不对。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="加盐的慢哈希：注册时存储，登录时验证">
+  <text class="ttl on-a" x="20" y="22">注册：生成并存储</text>
+  <rect class="bx" x="20" y="34" width="110" height="40" rx="8"/>
+  <text class="mono" x="75" y="59" text-anchor="middle">"cat"</text>
+  <rect class="bx-d" x="20" y="84" width="110" height="40" rx="8"/>
+  <text class="sm" x="75" y="100" text-anchor="middle">随机盐</text>
+  <text class="mono" x="75" y="116" text-anchor="middle">9f3a…</text>
+  <path class="ln" d="M132 54 L186 76" marker-end="url(#ar)"/>
+  <path class="ln" d="M132 104 L186 86" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="190" y="54" width="130" height="56" rx="10"/>
+  <text class="ttl on-a" x="255" y="78" text-anchor="middle">scrypt</text>
+  <text class="sm" x="255" y="96" text-anchor="middle">故意算得很慢</text>
+  <path class="ln-a" d="M322 82 H372" marker-end="url(#ar-a)"/>
+  <rect class="bx-b" x="376" y="54" width="364" height="56" rx="10"/>
+  <text class="sm" x="390" y="76">数据库 users.password_hash：</text>
+  <text class="mono on-b" x="390" y="98">scrypt$9f3a…$b41c…（算法$盐$哈希）</text>
+
+  <text class="ttl on-g" x="20" y="160">登录：用存着的盐再算一次，比较</text>
+  <rect class="bx" x="20" y="172" width="110" height="40" rx="8"/>
+  <text class="mono" x="75" y="197" text-anchor="middle">用户输入</text>
+  <rect class="bx-b" x="20" y="222" width="110" height="40" rx="8"/>
+  <text class="sm" x="75" y="238" text-anchor="middle">从数据库取</text>
+  <text class="mono" x="75" y="254" text-anchor="middle">盐 9f3a…</text>
+  <path class="ln" d="M132 192 L186 214" marker-end="url(#ar)"/>
+  <path class="ln" d="M132 242 L186 224" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="190" y="192" width="130" height="56" rx="10"/>
+  <text class="ttl on-a" x="255" y="224" text-anchor="middle">scrypt</text>
+  <path class="ln-a" d="M322 220 H372" marker-end="url(#ar-a)"/>
+  <rect class="bx-g" x="376" y="192" width="364" height="56" rx="10"/>
+  <text class="sm" x="390" y="214">和存着的哈希逐字节比较（timingSafeEqual）</text>
+  <text class="mono on-g" x="390" y="236">相同 → 密码正确 ✔　不同 → 错误 ✘</text>
+</svg>
+<figcaption>图 8-1　盐让“同样的密码”在不同用户那里得到不同的哈希，彩虹表（预先算好的常见密码哈希表）因此失效；慢哈希让暴力破解变得极其昂贵</figcaption>
+</figure>
+
+<p>三个关键点：</p>
+<ul>
+  <li><strong>盐（salt）</strong>：每个用户随机生成的一段数据，和密码混在一起再哈希。原书的测试 <code>test_password_salts_are_random</code> 验证的就是：两个用户即使密码相同，哈希也不同。</li>
+  <li><strong>慢</strong>：普通的哈希（如 MD5、SHA-256）为速度而生，显卡一秒能算几十亿次，暴力破解太容易。密码哈希要选<em>故意很慢</em>、而且吃内存的算法：scrypt、Argon2、bcrypt。</li>
+  <li><strong>不要自己发明</strong>：原书强调密码哈希很难写对，要用经过社区审查的库。Node.js 的 <code>crypto</code> 模块内置了 scrypt，我们直接用它。</li>
+</ul>
+
+<h3>用 Node.js 的 scrypt 哈希密码</h3>
+
+<p>
+  原书用 Werkzeug 的两个函数：<code>generate_password_hash()</code> 和 <code>check_password_hash()</code>。我们也写两个：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
+
+// node:crypto 的 scrypt 是回调风格的，包一层变成 Promise
+function scryptAsync(password: string, salt: Buffer, keylen: number): Promise&lt;Buffer&gt; {
+  return new Promise((resolve, reject) =&gt; {
+    scrypt(password, salt, keylen, { N: 16384, r: 8, p: 1 }, (err, key) =&gt; (err ? reject(err) : resolve(key)))
+  })
+}
+
+export async function hashPassword(password: string): Promise&lt;string&gt; {
+  const salt = randomBytes(16)                         // 每次都是新的随机盐
+  const key = await scryptAsync(password, salt, 64)
+  return `scrypt$${salt.toString('hex')}$${key.toString('hex')}`   // 盐和哈希存在一起
+}
+
+export async function verifyPassword(hash: string | null, password: string): Promise&lt;boolean&gt; {
+  if (!hash) return false
+  const [algorithm, saltHex, keyHex] = hash.split('$')
+  if (algorithm !== 'scrypt' || !saltHex || !keyHex) return false
+  const expected = Buffer.from(keyHex, 'hex')
+  const actual = await scryptAsync(password, Buffer.from(saltHex, 'hex'), expected.length)
+  return timingSafeEqual(actual, expected)             // 不用 ===，见下文
+}
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：为什么比较要用 timingSafeEqual</div>
+  <p>
+    普通的比较遇到第一个不同的字节就会返回，所以“前 10 个字节都对”比“第 1 个字节就错”要多花一点点时间。
+    攻击者理论上可以通过测量响应时间，一个字节一个字节地猜出哈希。<code>timingSafeEqual</code> 不管哪里不同，都比较完所有字节才返回，时间恒定。
+    这种攻击叫<strong>时序攻击</strong>，现实中很难实施，但防御它几乎零成本。
+  </p>
+</div>
+
+<p>
+  原书用 Python 的 <code>@property</code> 做了一个“只写”的 <code>password</code> 属性：赋值时自动哈希，读取时报错。
+  Drizzle 的行就是普通对象，没有这种魔法。我们的约定更直接：<strong>表里只有 <code>passwordHash</code> 列，写入前一律调用 <code>hashPassword()</code></strong>。
+  明文密码从来不会出现在 <code>users</code> 对象上，自然也就没有“读出明文”的可能。
+</p>
+
+<p>在 <code>users</code> 表里加上邮箱（用于登录）、密码哈希和“是否已确认”三列：</p>
+
+<div class="code" data-lang="ts" data-file="src/db/schema.ts">
+<pre>
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  email: varchar('email', { length: 64 }).notNull().unique(),     // 用邮箱登录，比用户名好记
+  username: varchar('username', { length: 64 }).notNull().unique(),
+  roleId: integer('role_id').references(() =&gt; roles.id),
+  passwordHash: varchar('password_hash', { length: 256 }),
+  confirmed: boolean('confirmed').notNull().default(false),        // 本章后半部分用到
+})
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npm run db:generate -- --name login_support
+npm run db:migrate
+</pre>
+</div>
+
+<p>把原书的密码测试翻译成 Vitest：</p>
+
+<div class="code" data-lang="ts" data-file="tests/user-model.test.ts">
+<pre>
+import { describe, expect, it } from 'vitest'
+import { hashPassword, verifyPassword } from '../src/models/users.js'
+
+describe('密码哈希', () =&gt; {
+  it('哈希里不包含明文，并且能验证', async () =&gt; {
+    const hash = await hashPassword('cat')
+    expect(hash).not.toContain('cat')
+    expect(await verifyPassword(hash, 'cat')).toBe(true)
+    expect(await verifyPassword(hash, 'dog')).toBe(false)
+  })
+
+  it('同样的密码，每次盐都不同', async () =&gt; {
+    expect(await hashPassword('cat')).not.toBe(await hashPassword('cat'))
+  })
+})
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>8a</b>：用 Werkzeug 哈希密码</div>
+
+<h2 id="blueprint">认证路由组</h2>
+
+<p>
+  原书把所有和认证相关的路由放进一个新的蓝本 <code>auth</code>，挂在 <code>/auth</code> 前缀下。
+  按照上一章的做法，新建 <code>src/routes/auth.tsx</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/auth.tsx">
+<pre>
+import { Hono } from 'hono'
+import type { AppEnv } from '../types.js'
+import { LoginPage } from '../views/auth-pages.js'
+
+export const auth = new Hono&lt;AppEnv&gt;()
+
+auth.get('/login', (c) =&gt; c.render(&lt;LoginPage /&gt;, { title: '登录' }))
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+import { auth } from './routes/auth.js'
+// …
+app.route('/', main)
+app.route('/auth', auth)      // /login → /auth/login
+</pre>
+</div>
+
+<p>
+  原书把认证相关的模板放在 <code>templates/auth/</code> 子目录，避免和其他蓝本的模板重名。我们对应地把认证页面组件放在 <code>src/views/auth-pages.tsx</code>。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>8b</b>：认证蓝本</div>
+
+<h2 id="login-state">登录状态：自己实现 Flask-Login</h2>
+
+<p>
+  用户登录后，“已登录”这个状态必须被记住，否则每换一个页面都要重新输密码。原书用 Flask-Login 管理它，并在“理解 Flask-Login 的工作原理”一节里拆解了整个流程。
+  核心其实只有两件事：
+</p>
+<ol>
+  <li><strong>登录时</strong>：把用户的 ID 写进会话（第 4 章的签名 Cookie）。</li>
+  <li><strong>之后每个请求</strong>：从会话里读出 ID，去数据库查出用户，放在一个大家都能用的地方（Flask 里是 <code>current_user</code>，我们是 <code>c.var.user</code>）。</li>
+</ol>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 380" role="img" aria-label="登录流程与之后每个请求识别用户的过程">
+  <rect class="bx" x="20" y="20" width="120" height="340" rx="10"/>
+  <text class="ttl" x="80" y="44" text-anchor="middle">浏览器</text>
+  <rect class="bx-a" x="310" y="20" width="200" height="340" rx="10"/>
+  <text class="ttl on-a" x="410" y="44" text-anchor="middle">Hono 应用</text>
+  <rect class="bx-b" x="620" y="20" width="120" height="340" rx="10"/>
+  <text class="ttl on-b" x="680" y="44" text-anchor="middle">数据库</text>
+
+  <path class="ln" d="M142 76 H306" marker-end="url(#ar)"/>
+  <text class="mono" x="224" y="70" text-anchor="middle">① POST /auth/login</text>
+  <text class="sm" x="224" y="90" text-anchor="middle">email + password</text>
+  <path class="ln-b" d="M512 100 H616" marker-end="url(#ar-b)"/>
+  <text class="sm" x="564" y="94" text-anchor="middle">按邮箱查用户</text>
+  <path class="ln-b" d="M616 120 H514" marker-end="url(#ar-b)"/>
+  <text class="sm" x="564" y="136" text-anchor="middle">passwordHash</text>
+  <text class="sm" x="410" y="150" text-anchor="middle">② verifyPassword ✔</text>
+  <text class="mono on-a" x="410" y="168" text-anchor="middle">session.userId = 7</text>
+  <path class="ln-a" d="M306 190 H144" marker-end="url(#ar-a)"/>
+  <text class="mono on-a" x="224" y="184" text-anchor="middle">③ 302 + Set-Cookie</text>
+  <text class="sm" x="224" y="204" text-anchor="middle">session={"userId":7}.签名</text>
+
+  <line class="ln-d" x1="20" y1="222" x2="740" y2="222"/>
+  <text class="sm" x="380" y="240" text-anchor="middle">之后的每一个请求</text>
+
+  <path class="ln" d="M142 264 H306" marker-end="url(#ar)"/>
+  <text class="mono" x="224" y="258" text-anchor="middle">④ GET /（带 Cookie）</text>
+  <text class="sm" x="410" y="276" text-anchor="middle">session 中间件：验签，得到 userId=7</text>
+  <path class="ln-b" d="M512 290 H616" marker-end="url(#ar-b)"/>
+  <text class="sm" x="564" y="284" text-anchor="middle">按 id 查用户</text>
+  <path class="ln-b" d="M616 310 H514" marker-end="url(#ar-b)"/>
+  <text class="mono on-a" x="410" y="316" text-anchor="middle">c.var.user = john</text>
+  <path class="ln-g" d="M306 340 H144" marker-end="url(#ar-g)"/>
+  <text class="mono on-g" x="224" y="334" text-anchor="middle">⑤ “你好，john！”</text>
+</svg>
+<figcaption>图 8-2　对应原书“理解 Flask-Login 的工作原理”一节：<code>login_user()</code> 写入 ID，<code>user_loader</code> 按 ID 加载用户，<code>current_user</code> 就是加载的结果</figcaption>
+</figure>
+
+<h3>每个请求加载当前用户</h3>
+
+<p>
+  先准备一个按 ID 查用户的函数。第 9 章加入角色之后，它会顺便把用户的权限查出来，所以这里用了一个左连接；现在你可以先把它当作“按 ID 查一行”：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export type User = typeof users.$inferSelect
+
+export async function findUserById(db: Db, id: number) {
+  const [user] = await db.select().from(users).where(eq(users.id, id)).limit(1)
+  return user ?? null
+}
+
+export async function findUserByEmail(db: Db, email: string) {
+  const [user] = await db.select().from(users).where(eq(users.email, email.toLowerCase())).limit(1)
+  return user ?? null
+}
+</pre>
+</div>
+
+<p>然后是加载当前用户的中间件，它就是 Flask-Login 的 <code>user_loader</code> + <code>current_user</code>：</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/auth.ts">
+<pre>
+import { createMiddleware } from 'hono/factory'
+import { findUserById } from '../models/users.js'
+import type { AppEnv } from '../types.js'
+
+export const loadCurrentUser = createMiddleware&lt;AppEnv&gt;(async (c, next) =&gt; {
+  const id = c.var.session.userId
+  const user = id ? await findUserById(c.var.db, id) : null
+  if (id &amp;&amp; !user) delete c.var.session.userId       // 会话里的用户已经被删了
+  c.set('user', user)                                  // 没登录就是 null
+  await next()
+})
+</pre>
+</div>
+
+<p>别忘了在 <code>types.ts</code> 里声明 <code>user</code> 变量，在会话数据里加上 <code>userId</code>，并在 <code>createApp()</code> 里把中间件挂在会话之后：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// src/types.ts
+export type AppEnv = { Variables: { …; user: User | null } }
+
+// src/lib/session.ts
+export interface SessionData { userId?: number; remember?: boolean; flashes?: string[] }
+
+// src/app.tsx
+app.use('*', session, loadCurrentUser)
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 原书的 UserMixin 和 AnonymousUser</div>
+  <p>
+    Flask-Login 要求用户模型提供 <code>is_authenticated</code>、<code>is_active</code>、<code>is_anonymous</code>、<code>get_id()</code> 四个成员，
+    未登录时 <code>current_user</code> 是一个特殊的“匿名用户”对象。我们用更简单的约定：<strong>登录了，<code>c.var.user</code> 是用户对象；没登录，就是 <code>null</code></strong>。
+    <code>if (c.var.user)</code> 就相当于 <code>current_user.is_authenticated</code>。TypeScript 会强制你在使用前检查它是不是 <code>null</code>。
+  </p>
+</div>
+
+<h3>保护路由</h3>
+
+<p>
+  原书用 <code>@login_required</code> 装饰器让某个视图只允许登录用户访问，未登录的人会被送到登录页。
+  在 Hono 里，这就是一个挂在具体路由上的中间件：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/auth.ts">
+<pre>
+export const loginRequired = createMiddleware&lt;AppEnv&gt;(async (c, next) =&gt; {
+  if (!c.var.user) {
+    const url = new URL(c.req.url)
+    // 记下原本想去的地址，登录成功后再送回去（对应 Flask-Login 的 next 参数）
+    return c.redirect(`/auth/login?next=${encodeURIComponent(url.pathname + url.search)}`)
+  }
+  await next()
+})
+</pre>
+</div>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+@app.route('/secret')
+@login_required
+def secret():
+    return 'Only authenticated users are allowed!'
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+main.get('/secret', loginRequired, (c) =&gt; {
+  return c.text('Only authenticated users are allowed!')
+})
+</pre></div>
+  </div>
+</div>
+
+<p>
+  原书专门提醒了装饰器的顺序：<code>@app.route</code> 要写在最上面，否则登记成路由的是“没被保护”的原函数。
+  Hono 里的顺序更直观：<code>app.get(路径, 中间件1, 中间件2, …, 处理函数)</code>，<strong>从左到右依次执行</strong>，前一个不放行，后面的就不会运行。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="路由上的中间件从左到右依次执行">
+  <rect class="bx" x="20" y="60" width="120" height="50" rx="8"/>
+  <text class="mono" x="80" y="90" text-anchor="middle">GET /secret</text>
+  <path class="ln" d="M142 85 H192" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="196" y="50" width="170" height="70" rx="10"/>
+  <text class="ttl on-b" x="281" y="78" text-anchor="middle">loginRequired</text>
+  <text class="sm" x="281" y="100" text-anchor="middle">c.var.user 存在吗？</text>
+  <path class="ln-g" d="M368 85 H440" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="404" y="77" text-anchor="middle">是</text>
+  <rect class="bx-g" x="444" y="50" width="150" height="70" rx="10"/>
+  <text class="ttl on-g" x="519" y="90" text-anchor="middle">处理函数</text>
+  <path class="ln-r" d="M281 122 V148 H600" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="430" y="142" text-anchor="middle">否 → 302 /auth/login?next=%2Fsecret</text>
+  <rect class="bx-d" x="604" y="130" width="136" height="34" rx="6"/>
+  <text class="sm" x="672" y="151" text-anchor="middle">处理函数不会运行</text>
+</svg>
+<figcaption>图 8-3　第 9 章还会在中间再插一个 <code>permissionRequired</code>，检查“登录了，但有没有权限”</figcaption>
+</figure>
+
+<h2 id="login">登录</h2>
+
+<h3>登录表单</h3>
+
+<p>
+  登录表单有邮箱、密码、“保持登录”复选框和提交按钮。第 4 章手写了一个表单字段，现在表单多起来了，
+  把重复的部分提炼成几个小组件，用起来就像原书的 <code>wtf.quick_form()</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+import type { FieldErrors, FormValues } from '../lib/forms.js'
+
+interface FieldProps { name: string; label: string; values?: FormValues; errors?: FieldErrors }
+
+export function Field({ name, label, values, errors, type = 'text' }: FieldProps &amp; { type?: string }) {
+  const error = errors?.[name]?.[0]
+  const value = type === 'password' ? '' : String(values?.[name] ?? '')   // 密码框永远不回填
+  return (
+    &lt;div class="mb-3"&gt;
+      &lt;label class="form-label" for={name}&gt;{label}&lt;/label&gt;
+      &lt;input class={`form-control${error ? ' is-invalid' : ''}`} id={name} name={name} type={type} value={value} /&gt;
+      {error &amp;&amp; &lt;div class="invalid-feedback"&gt;{error}&lt;/div&gt;}
+    &lt;/div&gt;
+  )
+}
+
+export function Checkbox({ name, label, values }: FieldProps) {
+  const checked = values?.[name] === true || values?.[name] === 'on'
+  return (
+    &lt;div class="form-check mb-3"&gt;
+      &lt;input class="form-check-input" type="checkbox" id={name} name={name} checked={checked} /&gt;
+      &lt;label class="form-check-label" for={name}&gt;{label}&lt;/label&gt;
+    &lt;/div&gt;
+  )
+}
+
+export function Submit({ label = '提交' }: { label?: string }) {
+  return &lt;button type="submit" name="submit" class="btn btn-primary"&gt;{label}&lt;/button&gt;
+}
+</pre>
+</div>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-WTF：LoginForm</div>
+    <div class="code" data-lang="python"><pre>
+class LoginForm(FlaskForm):
+    email = StringField('Email', validators=[
+        DataRequired(), Length(1, 64), Email()])
+    password = PasswordField('Password',
+        validators=[DataRequired()])
+    remember_me = BooleanField('Keep me logged in')
+    submit = SubmitField('Log In')
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Zod + JSX</div>
+    <div class="code" data-lang="ts"><pre>
+const loginSchema = z.object({
+  email: z.email('请输入有效的邮箱地址').max(64),
+  password: z.string().min(1, '请输入密码'),
+  remember: checkbox(),   // 勾选 → true，不勾 → false
+})
+
+export function LoginPage({ values, errors }: FormState) {
+  return (&lt;&gt;
+    &lt;div class="page-header"&gt;&lt;h1&gt;登录&lt;/h1&gt;&lt;/div&gt;
+    &lt;form method="post" class="col-md-4"&gt;
+      &lt;Field name="email" label="邮箱" values={values} errors={errors} /&gt;
+      &lt;Field name="password" label="密码" type="password" errors={errors} /&gt;
+      &lt;Checkbox name="remember" label="保持登录" values={values} /&gt;
+      &lt;Submit label="登录" /&gt;
+    &lt;/form&gt;
+    &lt;p&gt;还没有账号？&lt;a href="/auth/register"&gt;点这里注册&lt;/a&gt;。&lt;/p&gt;
+  &lt;/&gt;)
+}
+</pre></div>
+  </div>
+</div>
+
+<p><code>checkbox()</code> 是 <code>src/lib/forms.ts</code> 里的一行小工具，处理 HTML 复选框“不勾选就不发送”的特点：</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/forms.ts">
+<pre>
+export const checkbox = () =&gt; z.string().optional().transform((v) =&gt; v === 'on')
+</pre>
+</div>
+
+<p>导航栏根据登录状态显示“登录”或“退出登录”。布局里用 <code>useRequestContext()</code> 拿到 <code>c.var.user</code>，相当于 Jinja2 模板里的 <code>current_user</code>：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/layout.tsx">
+<pre>
+const c = useRequestContext&lt;AppEnv&gt;()
+const user = c.var.user ?? null
+// …
+&lt;ul class="navbar-nav"&gt;
+  {user ? (
+    &lt;li class="nav-item"&gt;
+      &lt;form method="post" action="/auth/logout"&gt;
+        &lt;button class="btn btn-link nav-link" type="submit"&gt;退出登录&lt;/button&gt;
+      &lt;/form&gt;
+    &lt;/li&gt;
+  ) : (
+    &lt;li class="nav-item"&gt;&lt;a class="nav-link" href="/auth/login"&gt;登录&lt;/a&gt;&lt;/li&gt;
+  )}
+&lt;/ul&gt;
+</pre>
+</div>
+
+<h3>登录的处理函数</h3>
+
+<div class="code" data-lang="ts" data-file="src/routes/auth.tsx">
+<pre>
+auth.post(
+  '/login',
+  validateForm(loginSchema, (c, values, errors) =&gt; c.render(&lt;LoginPage values={values} errors={errors} /&gt;)),
+  async (c) =&gt; {
+    const { email, password, remember } = c.req.valid('form')
+    const user = await findUserByEmail(c.var.db, email)
+    if (user &amp;&amp; (await verifyPassword(user.passwordHash, password))) {
+      loginUser(c, user, remember)
+      return c.redirect(safeNext(c.req.query('next')))
+    }
+    flash(c, '邮箱或密码错误。')
+    return c.render(&lt;LoginPage values={{ email }} /&gt;, { title: '登录' })
+  },
+)
+</pre>
+</div>
+
+<p>对应 Flask-Login 的 <code>login_user()</code> 和 <code>logout_user()</code>，就是往会话里写入和删除 ID：</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/auth.ts">
+<pre>
+export function loginUser(c: Context&lt;AppEnv&gt;, user: User, remember: boolean) {
+  c.var.session.userId = user.id
+  c.var.session.remember = remember      // 会话中间件据此决定 Cookie 的有效期
+}
+
+export function logoutUser(c: Context&lt;AppEnv&gt;) {
+  delete c.var.session.userId
+  delete c.var.session.remember
+}
+</pre>
+</div>
+
+<p>
+  <strong>“保持登录”</strong>是怎么实现的？原书解释：不勾选时，会话 Cookie 在浏览器关闭时失效；勾选后，Flask-Login 会设置一个长期有效的 Cookie。
+  在我们的会话中间件里，这只是设置 Cookie 时的一个 <code>maxAge</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/session.ts">
+<pre>
+await setSignedCookie(c, COOKIE_NAME, after, secret, {
+  path: '/',
+  httpOnly: true,
+  sameSite: 'Lax',
+  secure: !c.var.config.debug &amp;&amp; !c.var.config.testing,          // 生产环境只通过 HTTPS 发送
+  maxAge: c.var.session.remember ? 60 * 60 * 24 * 30 : undefined,  // 不设 maxAge = 关浏览器就失效
+})
+</pre>
+</div>
+
+<h3>next 参数与开放重定向</h3>
+
+<p>
+  登录成功后要回到用户原本想访问的页面，这个地址放在查询参数 <code>next</code> 里。
+  原书特别指出：必须验证 <code>next</code> 是一个<strong>站内的相对路径</strong>，否则攻击者可以构造
+  <code>https://flasky.com/auth/login?next=https://evil.com</code> 这样的链接，用户在真网站上登录后，却被送到了钓鱼网站。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="开放重定向攻击">
+  <rect class="bx-r" x="20" y="20" width="240" height="70" rx="10"/>
+  <text class="ttl on-r" x="140" y="44" text-anchor="middle">钓鱼邮件里的链接</text>
+  <text class="mono" x="140" y="66" text-anchor="middle">flasky.com/auth/login</text>
+  <text class="mono" x="140" y="82" text-anchor="middle">?next=//evil.com</text>
+  <path class="ln" d="M262 55 H320" marker-end="url(#ar)"/>
+  <rect class="bx" x="324" y="20" width="180" height="70" rx="10"/>
+  <text class="ttl" x="414" y="46" text-anchor="middle">真的 Flasky</text>
+  <text class="sm" x="414" y="68" text-anchor="middle">用户放心地输入密码</text>
+  <path class="ln-r" d="M506 55 H564" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="568" y="20" width="172" height="70" rx="10"/>
+  <text class="ttl on-r" x="654" y="46" text-anchor="middle">evil.com</text>
+  <text class="sm" x="654" y="68" text-anchor="middle">“登录已过期，请重输”</text>
+
+  <rect class="bx-g" x="20" y="116" width="720" height="68" rx="10"/>
+  <text class="ttl on-g" x="36" y="140">safeNext()：只放行“以一个 / 开头、且第二个字符不是 / 或 \”的路径</text>
+  <text class="mono" x="36" y="164">'/edit-profile' ✔　　'//evil.com' ✘　　'/\evil.com' ✘　　'https://evil.com' ✘　　缺省 → '/'</text>
+</svg>
+<figcaption>图 8-4　<code>//evil.com</code> 在浏览器看来是“同协议的另一个网站”。原书的检查 <code>next.startswith('/')</code> 挡不住它，我们多检查一个字符</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/lib/auth.ts">
+<pre>
+export function safeNext(next: string | undefined): string {
+  return next &amp;&amp; next.startsWith('/') &amp;&amp; !/^\/[/\\]/.test(next) ? next : '/'
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 登录必须走 HTTPS</div>
+  <p>原书提醒：生产环境里应用必须通过 HTTPS 提供服务，否则密码和会话 Cookie 在网络上是明文传输的，任何中间人都能截获。第 17 章部署时会处理这一点。</p>
+</div>
+
+<h2 id="logout">退出登录</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask（GET 请求）</div>
+    <div class="code" data-lang="python"><pre>
+@auth.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    flash('You have been logged out.')
+    return redirect(url_for('main.index'))
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono（POST 请求）</div>
+    <div class="code" data-lang="ts"><pre>
+auth.post('/logout', loginRequired, (c) =&gt; {
+  logoutUser(c)
+  flash(c, '你已退出登录。')
+  return c.redirect('/')
+})
+</pre></div>
+  </div>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 改动了什么，为什么</div>
+  <p>
+    原书的退出是一个普通链接（GET 请求）。我们改成了一个只有按钮的小表单（POST 请求），前面导航栏的代码里已经看到了。
+    原因是 HTTP 规定 GET 请求应该是“安全”的 —— 只读取，不改变状态。
+    用 GET 做退出，别的网站放一张 <code>&lt;img src="https://flasky.com/auth/logout"&gt;</code> 就能把你的用户踢下线，浏览器的链接预加载也可能误触发。
+    改成 POST 后，还顺带受到了 CSRF 中间件的保护。后面的“关注”“屏蔽评论”等操作我们也都会用 POST。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>8c</b>：用 Flask-Login 登录和退出（这一版包含数据库迁移）</div>
+
+<h3>试一下</h3>
+
+<p>首页的问候语改成根据登录状态显示：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/pages.tsx">
+<pre>
+&lt;h1&gt;你好，{user ? user.username : '陌生人'}！&lt;/h1&gt;
+</pre>
+</div>
+
+<p>
+  还没有注册功能，先在 shell 里手动建一个用户（原书也是这么做的）。为了在 shell 里用上 <code>hashPassword()</code> 这些业务函数，
+  把 <code>src/models/</code> 下的模块也放进 shell 的上下文：<code>Object.assign(r.context, { db, ...schema, ...drizzle, models: { ...usersModel } })</code>。
+  注意别直接展开进顶层，否则 <code>users</code> 模块会和 <code>users</code> 表重名，互相覆盖。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm run shell
+flasky&gt; await db.insert(users).values({ email: 'john@example.com', username: 'john', passwordHash: await models.hashPassword('cat') })
+</pre>
+</div>
+
+<p>然后用 <code>john@example.com</code> / <code>cat</code> 登录，首页就会显示“你好，john！”。</p>
+
+<h2 id="register">注册新用户</h2>
+
+<p>注册表单要求填写邮箱、用户名和两次密码。用户名只能包含字母、数字、点和下划线，并以字母开头：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-WTF：RegistrationForm</div>
+    <div class="code" data-lang="python"><pre>
+class RegistrationForm(FlaskForm):
+    email = StringField('Email', validators=[
+        DataRequired(), Length(1, 64), Email()])
+    username = StringField('Username', validators=[
+        DataRequired(), Length(1, 64),
+        Regexp('^[A-Za-z][A-Za-z0-9_.]*$', 0,
+               'Usernames must have only letters, '
+               'numbers, dots or underscores')])
+    password = PasswordField('Password', validators=[
+        DataRequired(),
+        EqualTo('password2', message='Passwords must match.')])
+    password2 = PasswordField('Confirm password',
+        validators=[DataRequired()])
+
+    def validate_email(self, field):
+        if User.query.filter_by(email=field.data).first():
+            raise ValidationError('Email already registered.')
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Zod</div>
+    <div class="code" data-lang="ts"><pre>
+const registerSchema = z.object({
+  email: z.email('请输入有效的邮箱地址').max(64),
+  username: z.string().trim()
+    .min(1, '请填写用户名').max(64)
+    .regex(/^[A-Za-z][A-Za-z0-9_.]*$/,
+      '用户名只能包含字母、数字、点和下划线，并以字母开头'),
+  password: z.string().min(1, '请输入密码'),
+  password2: z.string().min(1, '请再输入一次密码'),
+}).refine((d) =&gt; d.password === d.password2, {
+  message: '两次输入的密码不一致',
+  path: ['password2'],     // 错误显示在哪个字段下面
+})
+</pre></div>
+  </div>
+</div>
+
+<p>
+  <code>EqualTo</code> 需要同时看两个字段，所以用对象级别的 <code>.refine()</code>。
+  那 <code>validate_email</code> 这种要查数据库的校验呢？Zod 也能写异步校验，但那样 schema 就得依赖数据库了。
+  更清楚的做法是：<strong>Zod 只管“格式对不对”，需要查库的“业务规则”放在处理函数里</strong>，发现问题同样带着错误重新渲染：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/auth.tsx">
+<pre>
+auth.post(
+  '/register',
+  validateForm(registerSchema, (c, values, errors) =&gt; c.render(&lt;RegisterPage values={values} errors={errors} /&gt;)),
+  async (c) =&gt; {
+    const { db, config } = c.var
+    const data = c.req.valid('form')
+    const email = data.email.toLowerCase()
+
+    // 相当于 validate_email / validate_username
+    const errors: Record&lt;string, string[]&gt; = {}
+    if (await db.$count(users, eq(users.email, email))) errors.email = ['该邮箱已被注册']
+    if (await db.$count(users, eq(users.username, data.username))) errors.username = ['该用户名已被使用']
+    if (Object.keys(errors).length) return c.render(&lt;RegisterPage values={data} errors={errors} /&gt;)
+
+    const user = await createUser(db, { email, username: data.username, password: data.password })
+    // …发送确认邮件，见下一节…
+    flash(c, '确认邮件已发送到你的邮箱。')
+    return c.redirect('/auth/login')
+  },
+)
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export async function createUser(db: Db, input: { email: string; username: string; password: string }) {
+  const [user] = await db.insert(users).values({
+    email: input.email.toLowerCase(),
+    username: input.username,
+    passwordHash: await hashPassword(input.password),   // 明文密码到此为止
+  }).returning()
+  return user
+}
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：查重和插入之间的“空隙”</div>
+  <p>
+    先 <code>$count</code> 查重、再 <code>insert</code>，中间有一小段时间。两个人同时用同一个邮箱注册，可能都通过了查重。
+    好在 <code>email</code> 列有 <code>unique</code> 约束，第二个 <code>insert</code> 一定会被数据库拒绝（抛出错误码 23505 的异常），不会产生脏数据。
+    查重的意义是给正常用户一个友好的提示；<strong>真正的保证来自数据库约束</strong>。这是一个值得记住的原则。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>8d</b>：注册新用户</div>
+
+<h2 id="confirm">确认账户</h2>
+
+<p>
+  为了确认用户填的邮箱真的属于他，注册后发一封带确认链接的邮件，用户点了链接才算确认。
+  原书分析了最简单的做法 —— 链接是 <code>/auth/confirm/&lt;用户id&gt;</code> —— 为什么不行：谁都能猜出别人的 ID，随手就能确认任何账户。
+  链接里需要一个<strong>只有服务器才能生成的令牌</strong>。
+</p>
+
+<h3>用 JWT 生成确认令牌</h3>
+
+<p>
+  原书用 itsdangerous 生成带过期时间的 JSON Web 签名。它的原理和第 4 章的签名 Cookie 一模一样：数据 + 用密钥算出的签名。
+  这种“带签名的 JSON 令牌”有一个通用的标准格式，叫 <strong>JWT</strong>（JSON Web Token），Hono 内置了 <code>hono/jwt</code>：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="JWT 的三段结构">
+  <rect class="bx-p" x="20" y="20" width="200" height="90" rx="10"/>
+  <text class="ttl on-p" x="120" y="44" text-anchor="middle">头部</text>
+  <text class="mono" x="120" y="70" text-anchor="middle">{ "alg": "HS256",</text>
+  <text class="mono" x="120" y="88" text-anchor="middle">"typ": "JWT" }</text>
+  <rect class="bx-b" x="240" y="20" width="260" height="90" rx="10"/>
+  <text class="ttl on-b" x="370" y="44" text-anchor="middle">载荷（payload）</text>
+  <text class="mono" x="370" y="70" text-anchor="middle">{ "id": 7, "purpose": "confirm",</text>
+  <text class="mono" x="370" y="88" text-anchor="middle">"exp": 1741230466 }</text>
+  <rect class="bx-a" x="520" y="20" width="220" height="90" rx="10"/>
+  <text class="ttl on-a" x="630" y="44" text-anchor="middle">签名</text>
+  <text class="sm" x="630" y="70" text-anchor="middle">HMAC(头部.载荷, SECRET_KEY)</text>
+  <text class="sm" x="630" y="88" text-anchor="middle">没有密钥就伪造不出来</text>
+
+  <text class="mono" x="380" y="146" text-anchor="middle">eyJhbGciOiJIUzI1NiIs… . eyJpZCI6NywicHVycG9z… . k3Jv9QzT…</text>
+  <text class="sm" x="380" y="170" text-anchor="middle">三段各自 Base64URL 编码，用点连起来，可以直接放进 URL</text>
+  <text class="sm on-r" x="380" y="192" text-anchor="middle">注意：载荷只是编码，任何人都能解码看到内容，所以不要放机密信息</text>
+</svg>
+<figcaption>图 8-5　JWT = 头部.载荷.签名。<code>exp</code>（过期时间）是标准字段，验证时会自动检查</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+import { sign, verify } from 'hono/jwt'
+
+type TokenPurpose = 'confirm' | 'reset' | 'change_email' | 'api'
+
+export async function generateToken(
+  secret: string, purpose: TokenPurpose, data: Record&lt;string, string | number&gt;, expiresIn = 3600,
+): Promise&lt;string&gt; {
+  const exp = Math.floor(Date.now() / 1000) + expiresIn        // 默认一小时后过期
+  return sign({ ...data, purpose, exp }, secret, 'HS256')
+}
+
+export async function readToken(secret: string, token: string, purpose: TokenPurpose) {
+  try {
+    const payload = await verify(token, secret, 'HS256')      // 签名不对、已过期都会抛异常
+    return payload.purpose === purpose ? payload : null
+  } catch {
+    return null
+  }
+}
+</pre>
+</div>
+
+<p>
+  <code>purpose</code> 字段防止令牌“串用”：确认账户的令牌不能拿去重置密码。原书用不同的键名（<code>confirm</code>、<code>reset</code>）达到同样的目的。
+  在它们之上，确认账户的两个函数对应原书 <code>User</code> 模型的 <code>generate_confirmation_token()</code> 和 <code>confirm()</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export const generateConfirmationToken = (secret: string, userId: number, expiresIn = 3600) =&gt;
+  generateToken(secret, 'confirm', { id: userId }, expiresIn)
+
+export async function confirmUser(db: Db, secret: string, user: User, token: string) {
+  const data = await readToken(secret, token, 'confirm')
+  if (!data || data.id !== user.id) return false      // 别人的令牌不能确认我的账户
+  await db.update(users).set({ confirmed: true }).where(eq(users.id, user.id))
+  return true
+}
+</pre>
+</div>
+
+<h3>发送确认邮件</h3>
+
+<p>注册成功后生成令牌、发邮件。邮件里的链接必须是<strong>完整网址</strong>（原书用 <code>url_for(…, _external=True)</code>），因为邮件客户端里没有“当前页面”可以参照：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/auth.tsx">
+<pre>
+const user = await createUser(db, { email, username: data.username, password: data.password })
+const token = await generateConfirmationToken(config.secretKey, user.id)
+sendEmail(c, user.email, '确认你的账户', confirmEmail, {
+  username: user.username,
+  url: externalUrl(c, `/auth/confirm/${token}`),       // http://localhost:3000/auth/confirm/eyJ…
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/lib/url.ts">
+<pre>
+export function externalUrl(c: Context&lt;AppEnv&gt;, path: string): string {
+  return new URL(path, c.req.url).href
+  // 第 17 章部署到反向代理后面时，还要考虑 X-Forwarded-Proto 等请求头
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/views/emails.tsx">
+<pre>
+export const confirmEmail: EmailTemplate&lt;{ username: string; url: string }&gt; = ({ username, url }) =&gt; ({
+  text: `亲爱的 ${username}：\n\n欢迎加入 Flasky！\n\n请点击下面的链接确认你的账户：\n\n${url}\n\nFlasky 团队`,
+  html: (
+    &lt;div&gt;
+      &lt;p&gt;亲爱的 {username}：&lt;/p&gt;
+      &lt;p&gt;欢迎加入 &lt;b&gt;Flasky&lt;/b&gt;！&lt;/p&gt;
+      &lt;p&gt;请&lt;a href={url}&gt;点击这里&lt;/a&gt;确认你的账户。&lt;/p&gt;
+      &lt;p&gt;Flasky 团队&lt;/p&gt;
+    &lt;/div&gt;
+  ),
+})
+</pre>
+</div>
+
+<p>用户点击链接后的处理函数。它要求先登录 —— 原书的设计是用户点链接时如果没登录，会先被送去登录页，登录后再回到这个链接（多亏了 <code>next</code> 参数）：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/auth.tsx">
+<pre>
+auth.get('/confirm/:token', loginRequired, async (c) =&gt; {
+  const user = requireUser(c)
+  if (user.confirmed) return c.redirect('/')           // 已经确认过了，点了两次也没关系
+  if (await confirmUser(c.var.db, c.var.config.secretKey, user, c.req.param('token'))) {
+    flash(c, '账户确认成功，谢谢！')
+  } else {
+    flash(c, '确认链接无效或已过期。')
+  }
+  return c.redirect('/')
+})
+</pre>
+</div>
+
+<p><code>requireUser(c)</code> 是个小帮手：前面的 <code>loginRequired</code> 已经保证了用户存在，但 TypeScript 不知道这一点，它帮我们把类型从 <code>User | null</code> 收窄成 <code>User</code>：</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/auth.ts">
+<pre>
+export function requireUser(c: Context&lt;AppEnv&gt;) {
+  const user = c.var.user
+  if (!user) throw new HTTPException(401)
+  return user
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="账户确认的完整流程">
+  <rect class="bx" x="20" y="40" width="120" height="70" rx="10"/>
+  <text class="ttl" x="80" y="66" text-anchor="middle">注册</text>
+  <text class="sm" x="80" y="88" text-anchor="middle">confirmed=false</text>
+  <path class="ln" d="M142 75 H180" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="184" y="40" width="140" height="70" rx="10"/>
+  <text class="ttl on-a" x="254" y="66" text-anchor="middle">生成令牌</text>
+  <text class="sm" x="254" y="88" text-anchor="middle">{ id, purpose, exp }</text>
+  <path class="ln" d="M326 75 H364" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="368" y="40" width="130" height="70" rx="10"/>
+  <text class="ttl on-b" x="433" y="66" text-anchor="middle">邮件</text>
+  <text class="sm" x="433" y="88" text-anchor="middle">/auth/confirm/令牌</text>
+  <path class="ln" d="M500 75 H538" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="542" y="40" width="198" height="70" rx="10"/>
+  <text class="ttl on-g" x="641" y="66" text-anchor="middle">点击链接（已登录）</text>
+  <text class="sm" x="641" y="88" text-anchor="middle">验签 · 未过期 · id 匹配</text>
+  <text class="sm" x="641" y="104" text-anchor="middle">→ confirmed=true</text>
+  <text class="sm" x="380" y="150" text-anchor="middle">令牌不需要存进数据库：服务器看一眼签名就知道它是不是自己发的，这正是签名令牌的优雅之处</text>
+</svg>
+<figcaption>图 8-6　账户确认的流程</figcaption>
+</figure>
+
+<h3>拦截未确认的用户</h3>
+
+<p>
+  未确认的用户可以登录，但只能看到一个“请先确认账户”的页面。原书用蓝本的 <code>before_app_request</code> 钩子实现，它对所有请求生效。
+  我们在 <code>loadCurrentUser</code> 之后再挂一个全局中间件：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/auth.ts">
+<pre>
+export const confirmedGuard = createMiddleware&lt;AppEnv&gt;(async (c, next) =&gt; {
+  const user = c.var.user
+  if (user) {
+    const path = c.req.path
+    // 认证相关的页面（确认、重发、退出）和静态文件要放行，否则用户永远确认不了
+    const exempt = path.startsWith('/auth/') || path.startsWith('/static/')
+    if (!user.confirmed &amp;&amp; !exempt) return c.redirect('/auth/unconfirmed')
+  }
+  await next()
+})
+
+// src/app.tsx
+app.use('*', session, loadCurrentUser, confirmedGuard)
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="confirmedGuard 的判断流程">
+  <rect class="bx" x="20" y="74" width="110" height="46" rx="8"/>
+  <text class="ttl" x="75" y="102" text-anchor="middle">任意请求</text>
+  <path class="ln" d="M132 97 H170" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="174" y="70" width="120" height="54" rx="10"/>
+  <text class="sm on-b" x="234" y="94" text-anchor="middle">已登录？</text>
+  <path class="ln-g" d="M234 68 V30 H660 V66" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="440" y="24" text-anchor="middle">否（游客照常访问）</text>
+  <path class="ln" d="M296 97 H334" marker-end="url(#ar)"/>
+  <text class="sm" x="315" y="90" text-anchor="middle">是</text>
+  <rect class="bx-b" x="338" y="70" width="120" height="54" rx="10"/>
+  <text class="sm on-b" x="398" y="94" text-anchor="middle">已确认？</text>
+  <path class="ln-g" d="M460 90 H580 V70" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="520" y="84" text-anchor="middle">是</text>
+  <path class="ln" d="M398 126 V150" marker-end="url(#ar)"/>
+  <text class="sm" x="410" y="142">否</text>
+  <rect class="bx-b" x="330" y="154" width="136" height="40" rx="8"/>
+  <text class="sm on-b" x="398" y="178" text-anchor="middle">/auth/* 或 /static/*？</text>
+  <path class="ln-g" d="M468 174 H620 V124" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="560" y="168" text-anchor="middle">是，放行</text>
+  <path class="ln-r" d="M328 174 H240" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="80" y="154" width="156" height="40" rx="8"/>
+  <text class="sm on-r" x="158" y="178" text-anchor="middle">302 /auth/unconfirmed</text>
+  <rect class="bx-g" x="560" y="70" width="180" height="54" rx="10"/>
+  <text class="ttl on-g" x="650" y="102" text-anchor="middle">继续 → 处理函数</text>
+</svg>
+<figcaption>图 8-7　原书原话：当 before_request 返回一个响应或重定向时，Flask 就不再调用视图函数。Hono 中间件直接 <code>return</code> 也是一样的效果</figcaption>
+</figure>
+
+<p>“请先确认”页面和“重新发送确认邮件”的路由：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/auth.tsx">
+<pre>
+auth.get('/unconfirmed', (c) =&gt; {
+  const user = c.var.user
+  if (!user || user.confirmed) return c.redirect('/')
+  return c.render(&lt;UnconfirmedPage user={user} /&gt;, { title: '确认账户' })
+})
+
+auth.get('/confirm', loginRequired, async (c) =&gt; {
+  const user = requireUser(c)
+  const token = await generateConfirmationToken(c.var.config.secretKey, user.id)
+  sendEmail(c, user.email, '确认你的账户', confirmEmail, {
+    username: user.username,
+    url: externalUrl(c, `/auth/confirm/${token}`),
+  })
+  flash(c, '新的确认邮件已发送到你的邮箱。')
+  return c.redirect('/')
+})
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>8e</b>：账户确认（这一版包含数据库迁移）</div>
+
+<h2 id="manage">账户管理</h2>
+
+<p>原书最后列出了三个账户管理功能，并在代码仓库里实现了它们（<b>8f</b>、<b>8g</b>、<b>8h</b>）。它们用到的全是本章已经讲过的技术。</p>
+
+<h3>修改密码</h3>
+
+<p>已登录的用户输入旧密码和两次新密码。只要验证了旧密码，就可以放心修改：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/auth.tsx">
+<pre>
+const changePasswordSchema = z.object({
+  oldPassword: z.string().min(1, '请输入旧密码'),
+  password: z.string().min(1, '请输入密码'),
+  password2: z.string().min(1, '请再输入一次密码'),
+}).refine((d) =&gt; d.password === d.password2, { message: '两次输入的密码不一致', path: ['password2'] })
+
+auth.post(
+  '/change-password',
+  loginRequired,
+  validateForm(changePasswordSchema, (c, values, errors) =&gt; c.render(&lt;ChangePasswordPage values={values} errors={errors} /&gt;)),
+  async (c) =&gt; {
+    const user = requireUser(c)
+    const { oldPassword, password } = c.req.valid('form')
+    if (!(await verifyPassword(user.passwordHash, oldPassword))) {
+      flash(c, '旧密码不正确。')
+      return c.render(&lt;ChangePasswordPage /&gt;, { title: '修改密码' })
+    }
+    await c.var.db.update(users).set({ passwordHash: await hashPassword(password) }).where(eq(users.id, user.id))
+    flash(c, '密码已更新。')
+    return c.redirect('/')
+  },
+)
+</pre>
+</div>
+
+<h3>重置密码</h3>
+
+<p>忘记密码的用户没法登录，所以要借助邮件和令牌，流程和确认账户很像：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="重置密码的流程">
+  <rect class="bx" x="20" y="40" width="140" height="80" rx="10"/>
+  <text class="ttl" x="90" y="66" text-anchor="middle">① /auth/reset</text>
+  <text class="sm" x="90" y="88" text-anchor="middle">输入邮箱</text>
+  <path class="ln" d="M162 80 H200" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="204" y="40" width="170" height="80" rx="10"/>
+  <text class="ttl on-a" x="289" y="66" text-anchor="middle">② 生成 reset 令牌</text>
+  <text class="sm" x="289" y="88" text-anchor="middle">发到该邮箱</text>
+  <text class="sm" x="289" y="106" text-anchor="middle">（邮箱不存在也提示“已发送”）</text>
+  <path class="ln" d="M376 80 H414" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="418" y="40" width="150" height="80" rx="10"/>
+  <text class="ttl on-b" x="493" y="66" text-anchor="middle">③ 点链接</text>
+  <text class="sm" x="493" y="88" text-anchor="middle">/auth/reset/令牌</text>
+  <text class="sm" x="493" y="106" text-anchor="middle">输入两次新密码</text>
+  <path class="ln" d="M570 80 H608" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="612" y="40" width="128" height="80" rx="10"/>
+  <text class="ttl on-g" x="676" y="66" text-anchor="middle">④ 验证令牌</text>
+  <text class="sm" x="676" y="88" text-anchor="middle">更新密码哈希</text>
+  <text class="sm" x="676" y="106" text-anchor="middle">→ 去登录</text>
+  <text class="sm" x="380" y="160" text-anchor="middle">这里用户<strong>没有登录</strong>，所以令牌里的 id 就是要修改的用户，不能像确认账户那样和当前用户比对</text>
+</svg>
+<figcaption>图 8-8　重置密码：令牌本身就证明了“这个人能收到这个邮箱的邮件”</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export const generateResetToken = (secret: string, userId: number, expiresIn = 3600) =&gt;
+  generateToken(secret, 'reset', { id: userId }, expiresIn)
+
+export async function resetPassword(db: Db, secret: string, token: string, newPassword: string) {
+  const data = await readToken(secret, token, 'reset')
+  if (!data || typeof data.id !== 'number') return false
+  const updated = await db.update(users)
+    .set({ passwordHash: await hashPassword(newPassword) })
+    .where(eq(users.id, data.id))
+    .returning({ id: users.id })
+  return updated.length === 1
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/routes/auth.tsx">
+<pre>
+auth.post('/reset', validateForm(resetRequestSchema, …), async (c) =&gt; {
+  if (c.var.user) return c.redirect('/')
+  const user = await findUserByEmail(c.var.db, c.req.valid('form').email)
+  if (user) {
+    const token = await generateResetToken(c.var.config.secretKey, user.id)
+    sendEmail(c, user.email, '重置密码', resetPasswordEmail, {
+      username: user.username,
+      url: externalUrl(c, `/auth/reset/${token}`),
+    })
+  }
+  // 无论邮箱存不存在都说“已发送”，不给攻击者探测哪些邮箱注册过
+  flash(c, '重置密码的邮件已发送到你的邮箱。')
+  return c.redirect('/auth/login')
+})
+
+auth.post('/reset/:token', validateForm(resetSchema, …), async (c) =&gt; {
+  if (c.var.user) return c.redirect('/')
+  const ok = await resetPassword(c.var.db, c.var.config.secretKey, c.req.param('token'), c.req.valid('form').password)
+  if (!ok) return c.redirect('/')
+  flash(c, '密码已重置，请用新密码登录。')
+  return c.redirect('/auth/login')
+})
+</pre>
+</div>
+
+<h3>修改邮箱</h3>
+
+<p>
+  新邮箱要先验证确实属于用户才能生效。原书提到两种做法：把待确认的新邮箱存在数据库的一个字段里，或者直接把它放进令牌。
+  原书选了后者，我们也一样 —— 令牌签了名，新邮箱在里面不会被篡改：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export const generateEmailChangeToken = (secret: string, userId: number, newEmail: string, expiresIn = 3600) =&gt;
+  generateToken(secret, 'change_email', { id: userId, newEmail }, expiresIn)
+
+export async function changeEmail(db: Db, secret: string, user: User, token: string) {
+  const data = await readToken(secret, token, 'change_email')
+  if (!data || data.id !== user.id || typeof data.newEmail !== 'string') return false
+  if (await findUserByEmail(db, data.newEmail)) return false        // 这期间被别人注册了
+  await db.update(users).set({ email: data.newEmail }).where(eq(users.id, user.id))
+  return true
+}
+</pre>
+</div>
+
+<p>处理函数要求用户输入密码（防止别人趁你离开电脑时改掉你的邮箱），然后把令牌发到<strong>新邮箱</strong>：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/auth.tsx">
+<pre>
+const token = await generateEmailChangeToken(c.var.config.secretKey, user.id, newEmail)
+sendEmail(c, newEmail, '确认你的新邮箱', changeEmailEmail, {
+  username: user.username,
+  url: externalUrl(c, `/auth/change-email/${token}`),
+})
+</pre>
+</div>
+
+<p>对应的测试，完全翻译自原书的 <code>test_user_model.py</code>：</p>
+
+<div class="code" data-lang="ts" data-file="tests/user-model.test.ts">
+<pre>
+it('修改邮箱：有效、别人的、重复的', async () =&gt; {
+  const u1 = await createUser(db, { email: 'john@example.com', username: 'john', password: 'cat' })
+  const u2 = await createUser(db, { email: 'susan@example.org', username: 'susan', password: 'dog' })
+
+  const t1 = await generateEmailChangeToken(SECRET, u1.id, 'david@example.net')
+  expect(await changeEmail(db, SECRET, u2, t1)).toBe(false)        // 拿别人的令牌
+
+  const dup = await generateEmailChangeToken(SECRET, u2.id, 'john@example.com')
+  expect(await changeEmail(db, SECRET, u2, dup)).toBe(false)       // 新邮箱已被占用
+
+  const ok = await generateEmailChangeToken(SECRET, u2.id, 'susan@example.net')
+  expect(await changeEmail(db, SECRET, u2, ok)).toBe(true)
+})
+
+it('过期的确认令牌无效', async () =&gt; {
+  const u = await createUser(db, { email: 'john@example.com', username: 'john', password: 'cat' })
+  const token = await generateConfirmationToken(SECRET, u.id, -10)  // 10 秒前就过期了，不用 sleep
+  expect(await confirmUser(db, SECRET, u, token)).toBe(false)
+})
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>8f</b> 修改密码 · <b>8g</b> 重置密码 · <b>8h</b> 修改邮箱</div>
+
+<p>最后，导航栏的“退出登录”改成一个下拉菜单，放进“修改密码”“修改邮箱”和“退出登录”三项（布局的完整代码见第 9 章之后的版本）。</p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>数据库只存加盐的慢哈希：<code>scrypt</code> + 随机盐，用 <code>timingSafeEqual</code> 比较；明文密码只在 <code>hashPassword()</code> 里出现一次。</li>
+  <li>认证路由放在 <code>routes/auth.tsx</code>，挂载到 <code>/auth</code>。</li>
+  <li>Flask-Login 的本质：登录时 <code>session.userId = id</code>；<code>loadCurrentUser</code> 中间件每次按 ID 查出 <code>c.var.user</code>；<code>loginRequired</code> 中间件保护路由。</li>
+  <li>“保持登录” = 会话 Cookie 带 <code>maxAge</code>；<code>next</code> 参数必须用 <code>safeNext()</code> 验证，防开放重定向。</li>
+  <li>修改状态的操作（包括退出）用 POST；业务规则（邮箱是否已注册）写在处理函数里，最终保证靠数据库的唯一约束。</li>
+  <li>JWT = 头部.载荷.签名，带 <code>exp</code> 过期时间；用 <code>purpose</code> 区分用途；确认、重置、改邮箱三个流程都建立在它之上。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把 <code>hashPassword</code> 生成的字符串打印出来，分析它的三段分别是什么。然后把 scrypt 的参数 <code>N</code> 从 16384 调到 65536，测一下哈希一次要多久。</li>
+    <li>把一个确认令牌粘贴到 <a href="https://jwt.io">jwt.io</a>，看看载荷里有什么。再随便改一个字符，用 <code>readToken</code> 验证，确认返回 <code>null</code>。</li>
+    <li>给登录加上“失败 5 次锁定 15 分钟”的功能（提示：在 <code>users</code> 表加 <code>failedLogins</code> 和 <code>lockedUntil</code> 两列，走一遍迁移）。</li>
+    <li>写一个测试：未登录时访问 <code>/auth/change-password</code>，断言响应是 302，且 <code>Location</code> 是 <code>/auth/login?next=%2Fauth%2Fchange-password</code>。</li>
+    <li>试着访问 <code>/auth/login?next=//example.com</code> 并登录，确认你被送回了首页而不是 example.com。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

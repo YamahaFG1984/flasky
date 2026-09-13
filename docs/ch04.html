@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 4 章 · Web 表单 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="4">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 4 章</span>
+<h1>Web 表单</h1>
+<p class="lede">
+  到目前为止，信息只从服务器流向浏览器。表单让信息反过来流动：用户填写、提交，服务器接收、校验、处理。
+  这一章实现原书的“你叫什么名字”表单，顺带讲清楚三个贯穿全书的机制：
+  <strong>POST/重定向/GET 模式</strong>、<strong>用户会话</strong>和 <strong>Flash 消息</strong>。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>知道浏览器提交表单时到底发送了什么，以及如何在 Hono 里读取</li>
+    <li>用 Zod 描述“什么样的输入才合格”，用 <code>@hono/zod-validator</code> 自动校验</li>
+    <li>把表单渲染成 Bootstrap 样式，并在校验失败时显示错误提示</li>
+    <li>理解 CSRF 攻击，以及 Hono 用什么办法防御它</li>
+    <li>用签名 Cookie 实现会话，理解“签名”为什么能防篡改</li>
+    <li>用 PRG 模式和 Flash 消息做出体验良好的表单</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="how">表单是怎么提交的</h2>
+
+<p>
+  HTML 的 <code>&lt;form&gt;</code> 元素让用户输入数据。点击提交按钮时，浏览器把所有字段打包，
+  通常以 <code>POST</code> 请求发给服务器。原书提到：也可以用 GET 提交，但数据会出现在地址栏里，所以表单几乎都用 POST。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="浏览器提交表单时发送的 HTTP 请求">
+  <rect class="bx" x="20" y="20" width="230" height="190" rx="12"/>
+  <text class="ttl" x="135" y="44" text-anchor="middle">浏览器里的表单</text>
+  <text class="sm" x="40" y="74">你叫什么名字？</text>
+  <rect class="bx-b" x="40" y="84" width="190" height="30" rx="6"/>
+  <text class="mono" x="50" y="104">Dave</text>
+  <rect class="bx-a" x="40" y="130" width="80" height="30" rx="6"/>
+  <text class="sm on-a" x="80" y="150" text-anchor="middle">提交</text>
+  <text class="mono" x="40" y="190">&lt;form method="post"&gt;</text>
+
+  <path class="ln-a" d="M252 115 H320" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-a" x="324" y="30" width="416" height="170" rx="12"/>
+  <text class="ttl on-a" x="340" y="54">浏览器实际发出的请求</text>
+  <text class="mono" x="340" y="82">POST / HTTP/1.1</text>
+  <text class="mono" x="340" y="102">Host: localhost:3000</text>
+  <text class="mono" x="340" y="122">Origin: http://localhost:3000</text>
+  <text class="mono" x="340" y="142">Content-Type: application/x-www-form-urlencoded</text>
+  <line class="ln-d" x1="340" y1="154" x2="720" y2="154"/>
+  <text class="mono on-a" x="340" y="180">name=Dave</text>
+  <text class="sm" x="720" y="180" text-anchor="end">← 请求正文</text>
+</svg>
+<figcaption>图 4-1　表单数据被编码成 <code>名字=值&amp;名字=值</code> 的形式放在请求正文里。注意 <code>Origin</code> 头，后面防 CSRF 时会用到它</figcaption>
+</figure>
+
+<p>Hono 用 <code>c.req.parseBody()</code> 解析表单正文，结果是一个普通对象（相当于 Flask 的 <code>request.form</code>）：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.post('/', async (c) =&gt; {
+  const body = await c.req.parseBody()    // { name: 'Dave' }
+  const name = body.name                  // 类型是 string | File
+  return c.text(`收到：${name}`)
+})
+</pre>
+</div>
+
+<p>
+  注意类型是 <code>string | File</code>：表单也可能上传文件。而且用户可能根本没填、填了一堆空格、填了一万个字……
+  直接用 <code>body.name</code> 是在假设“用户一定会好好填”。原书说得对：表单处理里最繁琐的两件事，
+  就是<strong>生成表单的 HTML</strong> 和<strong>校验提交的数据</strong>。Flask 用 Flask-WTF 解决这两件事，我们分开解决。
+</p>
+
+<h2 id="zod">用 Zod 定义表单</h2>
+
+<p>
+  在 Flask-WTF 里，每个表单是一个类，每个字段带着一组<strong>验证器</strong>（validator）。
+  在 TypeScript 生态里，最流行的校验库是 <a href="https://zod.dev">Zod</a>：你用它描述数据的“形状”，它负责检查真实数据是否符合。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install zod @hono/zod-validator
+</pre>
+</div>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-WTF：表单类</div>
+    <div class="code" data-lang="python"><pre>
+from flask_wtf import FlaskForm
+from wtforms import StringField, SubmitField
+from wtforms.validators import DataRequired
+
+class NameForm(FlaskForm):
+    name = StringField('What is your name?',
+                       validators=[DataRequired()])
+    submit = SubmitField('Submit')
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Zod：数据模式（schema）</div>
+    <div class="code" data-lang="ts"><pre>
+import { z } from 'zod'
+
+const nameSchema = z.object({
+  name: z.string().trim().min(1, '请填写你的名字'),
+})
+
+// 顺便免费得到一个 TypeScript 类型：
+type NameForm = z.infer&lt;typeof nameSchema&gt;
+// → { name: string }
+</pre></div>
+  </div>
+</div>
+
+<p>
+  一个关键区别：WTForms 的表单类<em>同时</em>负责校验和生成 HTML（字段标签、提交按钮都写在类里）；
+  Zod 只管校验。HTML 我们用 JSX 组件自己写 —— 分工更清楚，也更容易改样式。
+</p>
+
+<p>原书表 4-1、4-2 列出了 WTForms 的字段类型和验证器。在我们的方案里，字段类型由 HTML 决定，验证器由 Zod 提供：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>WTForms 字段</th><th>HTML 控件</th><th>对应的 Zod 写法</th></tr></thead>
+  <tbody>
+    <tr><td><code>StringField</code></td><td><code>&lt;input type="text"&gt;</code></td><td><code>z.string()</code></td></tr>
+    <tr><td><code>PasswordField</code></td><td><code>&lt;input type="password"&gt;</code></td><td><code>z.string()</code></td></tr>
+    <tr><td><code>TextAreaField</code></td><td><code>&lt;textarea&gt;</code></td><td><code>z.string()</code></td></tr>
+    <tr><td><code>IntegerField</code> / <code>FloatField</code></td><td><code>&lt;input type="number"&gt;</code></td><td><code>z.coerce.number().int()</code>（表单里一切都是字符串，要“强制转换”）</td></tr>
+    <tr><td><code>BooleanField</code></td><td><code>&lt;input type="checkbox"&gt;</code></td><td>勾选时发 <code>"on"</code>，不勾时不发：<code>z.string().optional().transform(v =&gt; v === 'on')</code></td></tr>
+    <tr><td><code>SelectField</code></td><td><code>&lt;select&gt;</code></td><td><code>z.enum([...])</code> 或 <code>z.coerce.number()</code></td></tr>
+    <tr><td><code>DateField</code></td><td><code>&lt;input type="date"&gt;</code></td><td><code>z.coerce.date()</code></td></tr>
+    <tr><td><code>FileField</code></td><td><code>&lt;input type="file"&gt;</code></td><td><code>z.instanceof(File)</code></td></tr>
+    <tr><td><code>HiddenField</code></td><td><code>&lt;input type="hidden"&gt;</code></td><td><code>z.string()</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="tw">
+<table>
+  <thead><tr><th>WTForms 验证器</th><th>Zod</th></tr></thead>
+  <tbody>
+    <tr><td><code>DataRequired</code> / <code>InputRequired</code></td><td><code>.trim().min(1, '必填')</code></td></tr>
+    <tr><td><code>Length(1, 64)</code></td><td><code>.min(1).max(64)</code></td></tr>
+    <tr><td><code>Email</code></td><td><code>z.email()</code></td></tr>
+    <tr><td><code>Regexp(...)</code></td><td><code>.regex(/^[A-Za-z]…$/, '错误提示')</code></td></tr>
+    <tr><td><code>EqualTo('password2')</code></td><td>对象级别的 <code>.refine(d =&gt; d.password === d.password2)</code>（第 8 章）</td></tr>
+    <tr><td><code>NumberRange</code></td><td><code>z.coerce.number().min(…).max(…)</code></td></tr>
+    <tr><td><code>URL</code> / <code>UUID</code> / <code>IPAddress</code></td><td><code>z.url()</code> / <code>z.uuid()</code> / <code>z.ipv4()</code></td></tr>
+    <tr><td><code>AnyOf</code> / <code>NoneOf</code></td><td><code>z.enum([...])</code> / <code>.refine(v =&gt; !list.includes(v))</code></td></tr>
+    <tr><td><code>Optional</code></td><td><code>.optional()</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>让 Hono 自动校验</h3>
+
+<p>
+  <code>@hono/zod-validator</code> 把 Zod 包装成 Hono 中间件：请求到达处理函数之前，先按 schema 校验表单。
+  校验通过，处理函数里用 <code>c.req.valid('form')</code> 拿到<strong>已经校验过、类型确定</strong>的数据：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { zValidator } from '@hono/zod-validator'
+
+app.post('/', zValidator('form', nameSchema), (c) =&gt; {
+  const { name } = c.req.valid('form')   // name 的类型是 string，而且保证不是空的
+  return c.text(`你好，${name}`)
+})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="zValidator 中间件的两条路径">
+  <rect class="bx" x="20" y="80" width="130" height="50" rx="8"/>
+  <text class="mono" x="85" y="110" text-anchor="middle">POST /</text>
+  <path class="ln" d="M152 105 H200" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="204" y="66" width="190" height="78" rx="10"/>
+  <text class="ttl on-a" x="299" y="92" text-anchor="middle">zValidator('form', …)</text>
+  <text class="sm" x="299" y="112" text-anchor="middle">parseBody() → schema</text>
+  <text class="sm" x="299" y="130" text-anchor="middle">.safeParse()</text>
+
+  <path class="ln-g" d="M396 90 L470 44" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="420" y="56">通过</text>
+  <rect class="bx-g" x="474" y="18" width="266" height="54" rx="8"/>
+  <text class="ttl on-g" x="607" y="40" text-anchor="middle">处理函数</text>
+  <text class="mono" x="607" y="60" text-anchor="middle">c.req.valid('form') → { name }</text>
+
+  <path class="ln-r" d="M396 120 L470 166" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="408" y="160">不通过</text>
+  <rect class="bx-r" x="474" y="140" width="266" height="54" rx="8"/>
+  <text class="ttl on-r" x="607" y="162" text-anchor="middle">钩子函数（hook）</text>
+  <text class="sm" x="607" y="182" text-anchor="middle">默认返回 400 JSON；我们改成“带错误重新渲染表单”</text>
+</svg>
+<figcaption>图 4-2　校验失败时处理函数根本不会执行，所以处理函数里可以放心地使用数据</figcaption>
+</figure>
+
+<p>
+  默认情况下，校验失败会返回一个 400 状态码的 JSON —— 这很适合 API（第 14 章），但对网页表单不友好。
+  我们需要的是 Flask-WTF 那种效果：<em>页面重新显示，出错的字段下面有红字提示</em>。
+  <code>zValidator</code> 的第三个参数是一个钩子函数，校验结束后被调用，可以自己决定返回什么：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.post(
+  '/',
+  zValidator('form', nameSchema, (result, c) =&gt; {
+    if (!result.success) {
+      // 把 Zod 的错误整理成 { name: ['请填写你的名字'] } 这样的结构
+      const errors = z.flattenError(result.error).fieldErrors
+      return c.render(&lt;IndexPage value={String(result.data.name ?? '')} errors={errors} /&gt;)
+    }
+  }),
+  (c) =&gt; { /* 只有校验通过才会来到这里 */ },
+)
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 钩子里的 c 类型比较“宽”</div>
+  <p>
+    钩子函数收到的 <code>c</code> 不带我们自己声明的 <code>Env</code> 类型，所以在钩子里访问 <code>c.var.session</code> 这类自定义变量，TypeScript 会报错
+    （给参数手动标注 <code>c: Context&lt;Env&gt;</code> 也不行）。本章的钩子只用到 <code>c.render()</code>，不受影响；
+    第 7 章会写一个 <code>validateForm()</code> 小工具把这个问题一次性封装掉。
+  </p>
+</div>
+
+<h2 id="render">渲染表单</h2>
+
+<p>
+  原书用 Flask-Bootstrap 的 <code>wtf.quick_form(form)</code> 一行渲染整个表单。
+  我们用 JSX 手写，Bootstrap 5 的表单样式只需要几个 class：<code>form-label</code>、<code>form-control</code>，
+  出错时加上 <code>is-invalid</code>，错误文字放在 <code>invalid-feedback</code> 里：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+type FieldErrors = Record&lt;string, string[] | undefined&gt;
+
+function IndexPage({ name, value = '', errors }: { name?: string; value?: string; errors?: FieldErrors }) {
+  return (
+    &lt;&gt;
+      &lt;div class="page-header"&gt;
+        &lt;h1&gt;你好，{name ?? '陌生人'}！&lt;/h1&gt;
+      &lt;/div&gt;
+      &lt;form method="post"&gt;
+        &lt;div class="mb-3"&gt;
+          &lt;label class="form-label" for="name"&gt;你叫什么名字？&lt;/label&gt;
+          &lt;input class={`form-control${errors?.name ? ' is-invalid' : ''}`} id="name" name="name" value={value} /&gt;
+          {errors?.name &amp;&amp; &lt;div class="invalid-feedback"&gt;{errors.name[0]}&lt;/div&gt;}
+        &lt;/div&gt;
+        &lt;button type="submit" class="btn btn-primary"&gt;提交&lt;/button&gt;
+      &lt;/form&gt;
+    &lt;/&gt;
+  )
+}
+</pre>
+</div>
+
+<p>
+  对比 Jinja2 版本：<code>{% if name %}{{ name }}{% else %}Stranger{% endif %}</code> 变成了 <code>{name ?? '陌生人'}</code>
+  （<code>??</code> 的意思是“左边是 <code>null</code> 或 <code>undefined</code> 时用右边”）。
+</p>
+
+<p>
+  表单字段写多了会重复，后面几章我们会把它提炼成 <code>&lt;Field name label values errors /&gt;</code> 这样的小组件，
+  用起来就和 <code>quick_form</code> 一样省事了。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; name 属性是连接前后端的纽带</div>
+  <p>
+    <code>&lt;input name="name"&gt;</code> 里的 <code>name</code> 属性，决定了提交的数据叫什么名字；
+    它必须和 Zod schema 里的键 <code>name</code> 对上。字段显示给用户看的文字写在 <code>&lt;label&gt;</code> 里，和 <code>name</code> 属性无关。
+  </p>
+</div>
+
+<h2 id="csrf">密钥与 CSRF 防护</h2>
+
+<p>
+  原书这一章花了一段来讲 <code>SECRET_KEY</code> 和 CSRF。它们确实要从第一个表单开始就考虑。
+  <strong>CSRF</strong>（Cross-Site Request Forgery，跨站请求伪造）是这样一种攻击：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="CSRF 攻击的过程与两种防御方式">
+  <rect class="bx" x="20" y="20" width="160" height="80" rx="10"/>
+  <text class="ttl" x="100" y="46" text-anchor="middle">你的浏览器</text>
+  <text class="sm" x="100" y="68" text-anchor="middle">已登录 flasky.com</text>
+  <text class="sm" x="100" y="86" text-anchor="middle">存着它的会话 Cookie</text>
+
+  <rect class="bx-r" x="300" y="20" width="200" height="80" rx="10"/>
+  <text class="ttl on-r" x="400" y="46" text-anchor="middle">恶意网站 evil.com</text>
+  <text class="sm" x="400" y="68" text-anchor="middle">页面里藏着一个自动提交的</text>
+  <text class="mono" x="400" y="86" text-anchor="middle">&lt;form action="flasky.com/…"&gt;</text>
+
+  <rect class="bx-a" x="580" y="20" width="160" height="80" rx="10"/>
+  <text class="ttl on-a" x="660" y="46" text-anchor="middle">flasky.com</text>
+  <text class="sm" x="660" y="68" text-anchor="middle">“这个请求带着</text>
+  <text class="sm" x="660" y="86" text-anchor="middle">合法的 Cookie 啊”</text>
+
+  <path class="ln" d="M182 50 H296" marker-end="url(#ar)"/>
+  <text class="sm" x="240" y="42" text-anchor="middle">① 访问</text>
+  <path class="ln-r" d="M100 102 V130 H660 V104" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="380" y="124" text-anchor="middle">② 浏览器替恶意页面发出 POST，并自动带上 flasky.com 的 Cookie</text>
+
+  <rect class="bx-g" x="20" y="160" width="350" height="96" rx="10"/>
+  <text class="ttl on-g" x="36" y="182">Flask-WTF 的防御：隐藏令牌</text>
+  <text class="sm" x="36" y="204">每个表单里藏一个随机令牌，同时存在会话里。</text>
+  <text class="sm" x="36" y="222">evil.com 读不到 flasky.com 的页面，拿不到令牌，</text>
+  <text class="sm" x="36" y="240">提交时对不上 → 拒绝</text>
+
+  <rect class="bx-g" x="390" y="160" width="350" height="96" rx="10"/>
+  <text class="ttl on-g" x="406" y="182">本教程的防御：检查来源 + SameSite</text>
+  <text class="sm" x="406" y="204">hono/csrf：请求头 Origin 不是自己 → 403。</text>
+  <text class="sm" x="406" y="222">会话 Cookie 设 SameSite=Lax：别的网站</text>
+  <text class="sm" x="406" y="240">发起的 POST 浏览器根本不带这个 Cookie</text>
+</svg>
+<figcaption>图 4-3　CSRF 利用的是“浏览器会自动带上 Cookie”。两种防御思路都能挡住它</figcaption>
+</figure>
+
+<p>
+  现代浏览器在每个 POST 请求上都会带 <code>Origin</code> 头（图 4-1 里见过），而且会给表单请求加上 <code>Sec-Fetch-Site</code> 头，
+  恶意网站无法伪造它们。Hono 内置的 <code>csrf()</code> 中间件就是检查这两个头：
+  对于表单类型的非 GET 请求，来源不是本站就直接返回 403。
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { csrf } from 'hono/csrf'
+
+app.use(csrf())   // 就这一行。不需要在每个表单里放隐藏字段
+</pre>
+</div>
+
+<p>
+  再加上会话 Cookie 的 <code>SameSite=Lax</code> 属性（下一节会设置），就构成了双重保险。
+  这也是 OWASP 目前推荐的做法之一。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 用 curl 或测试代码提交表单会被拦下</div>
+  <p>
+    <code>curl</code>、测试脚本这类“非浏览器”客户端默认不发 <code>Origin</code> 头，所以会被 <code>csrf()</code> 拒绝（403）。
+    手动测试时加上 <code>-H "Origin: http://localhost:3000"</code>。
+    原书的做法是在测试配置里关掉 CSRF（<code>WTF_CSRF_ENABLED = False</code>），第 7 章我们也会这么做。
+  </p>
+</div>
+
+<p>
+  那 <code>SECRET_KEY</code> 呢？在 Flask 里它有两个用途：签名 CSRF 令牌、签名会话 Cookie。
+  我们的 CSRF 方案不需要它，但会话需要 —— 马上就会用到。先像原书那样定义它：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// 开发时用一个默认值；上线时必须通过环境变量设置一个谁都猜不到的随机字符串（第 7 章）
+const SECRET_KEY = process.env.SECRET_KEY ?? 'hard to guess string'
+</pre>
+</div>
+
+<h2 id="handling">在处理函数里处理表单</h2>
+
+<p>
+  Flask 用一个视图函数同时处理 GET（显示表单）和 POST（处理提交），靠 <code>form.validate_on_submit()</code> 区分。
+  Hono 里更自然的写法是<strong>两个路由</strong>：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask：一个函数两种方法</div>
+    <div class="code" data-lang="python"><pre>
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    name = None
+    form = NameForm()
+    if form.validate_on_submit():
+        name = form.name.data
+        form.name.data = ''
+    return render_template('index.html',
+                           form=form, name=name)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono：GET 和 POST 各一个</div>
+    <div class="code" data-lang="ts"><pre>
+app.get('/', (c) =&gt; {
+  return c.render(&lt;IndexPage /&gt;)
+})
+
+app.post('/', zValidator('form', nameSchema, hook), (c) =&gt; {
+  const { name } = c.req.valid('form')
+  return c.render(&lt;IndexPage name={name} /&gt;)
+})
+</pre></div>
+  </div>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>4a</b>：用 Flask-WTF 处理网页表单</div>
+
+<p>试一下：输入名字提交，页面显示“你好，Dave！”；什么都不填直接提交，输入框变红，下面显示“请填写你的名字”。</p>
+
+<h2 id="prg">重定向与用户会话</h2>
+
+<p>
+  这个版本有个体验问题。提交名字后按 <kbd>F5</kbd> 刷新，浏览器会弹出一个奇怪的对话框：“确认重新提交表单？”
+  因为刷新的意思是“重复上一个请求”，而上一个请求是 POST。大多数用户看不懂这个提示，点了确认就会重复提交。
+</p>
+<p>
+  原书的解决办法是一个经典模式 —— <strong>POST / 重定向 / GET</strong>（简称 PRG）：
+  处理完 POST 后不直接返回页面，而是返回一个重定向，让浏览器用 GET 请求结果页。
+  这样浏览器的“上一个请求”永远是 GET，刷新就安全了。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="直接返回页面与 PRG 模式在刷新时的区别">
+  <text class="ttl on-r" x="185" y="22" text-anchor="middle">✘ 直接返回页面</text>
+  <rect class="bx" x="20" y="36" width="80" height="220" rx="8"/>
+  <text class="sm" x="60" y="56" text-anchor="middle">浏览器</text>
+  <rect class="bx" x="270" y="36" width="80" height="220" rx="8"/>
+  <text class="sm" x="310" y="56" text-anchor="middle">服务器</text>
+  <path class="ln" d="M102 90 H266" marker-end="url(#ar)"/>
+  <text class="mono" x="184" y="84" text-anchor="middle">POST / name=Dave</text>
+  <path class="ln" d="M266 120 H104" marker-end="url(#ar)"/>
+  <text class="mono" x="184" y="114" text-anchor="middle">200 页面</text>
+  <text class="sm on-r" x="184" y="152" text-anchor="middle">用户按 F5 ……</text>
+  <path class="ln-r" d="M102 180 H266" marker-end="url(#ar-r)"/>
+  <text class="mono on-r" x="184" y="174" text-anchor="middle">POST（又提交一次！）</text>
+  <text class="sm on-r" x="184" y="210" text-anchor="middle">“确认重新提交表单？”</text>
+  <text class="sm on-r" x="184" y="228" text-anchor="middle">重复下单、重复发帖……</text>
+
+  <path class="ln-d" d="M380 20 V280"/>
+
+  <text class="ttl on-g" x="570" y="22" text-anchor="middle">✔ POST / 重定向 / GET</text>
+  <rect class="bx" x="410" y="36" width="80" height="240" rx="8"/>
+  <text class="sm" x="450" y="56" text-anchor="middle">浏览器</text>
+  <rect class="bx" x="660" y="36" width="80" height="240" rx="8"/>
+  <text class="sm" x="700" y="56" text-anchor="middle">服务器</text>
+  <path class="ln" d="M492 84 H656" marker-end="url(#ar)"/>
+  <text class="mono" x="574" y="78" text-anchor="middle">POST / name=Dave</text>
+  <path class="ln-a" d="M656 110 H494" marker-end="url(#ar-a)"/>
+  <text class="mono on-a" x="574" y="104" text-anchor="middle">302 Location: /</text>
+  <path class="ln" d="M492 136 H656" marker-end="url(#ar)"/>
+  <text class="mono" x="574" y="130" text-anchor="middle">GET /</text>
+  <path class="ln" d="M656 162 H494" marker-end="url(#ar)"/>
+  <text class="mono" x="574" y="156" text-anchor="middle">200 页面</text>
+  <text class="sm on-g" x="574" y="194" text-anchor="middle">用户按 F5 ……</text>
+  <path class="ln-g" d="M492 218 H656" marker-end="url(#ar-g)"/>
+  <text class="mono on-g" x="574" y="212" text-anchor="middle">GET /（无害）</text>
+  <text class="sm on-g" x="574" y="252" text-anchor="middle">多一次往返，换来安全的刷新</text>
+</svg>
+<figcaption>图 4-4　PRG 模式：让 POST 永远不是浏览器的“最后一个请求”</figcaption>
+</figure>
+
+<p>
+  但新问题来了：POST 请求里拿到了名字，重定向之后是一个全新的 GET 请求，名字到哪去了？
+  需要一个能<strong>在请求之间记住东西</strong>的地方 —— 这就是<strong>用户会话</strong>（session）。
+</p>
+
+<h3>会话是怎么实现的</h3>
+
+<p>
+  原书提到：Flask 默认把会话存在浏览器的 Cookie 里，并用 <code>SECRET_KEY</code> 做<strong>加密签名</strong>，
+  内容一旦被篡改，签名就对不上，会话随即作废。Hono 提供了现成的签名 Cookie 工具 <code>setSignedCookie</code> / <code>getSignedCookie</code>，
+  我们用它自己实现一个会话中间件，一共三十行左右，但每一行都值得理解：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="签名 Cookie 如何防篡改">
+  <rect class="bx-b" x="20" y="20" width="200" height="56" rx="8"/>
+  <text class="ttl on-b" x="120" y="42" text-anchor="middle">会话数据</text>
+  <text class="mono" x="120" y="62" text-anchor="middle">{"name":"Dave"}</text>
+  <rect class="bx-d" x="20" y="96" width="200" height="40" rx="8"/>
+  <text class="mono" x="120" y="121" text-anchor="middle">SECRET_KEY（只有服务器知道）</text>
+  <path class="ln-b" d="M222 48 L300 80" marker-end="url(#ar-b)"/>
+  <path class="ln" d="M222 116 L300 92" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="304" y="58" width="130" height="56" rx="8"/>
+  <text class="ttl on-a" x="369" y="82" text-anchor="middle">HMAC-SHA256</text>
+  <text class="sm" x="369" y="100" text-anchor="middle">算出签名</text>
+  <path class="ln-a" d="M436 86 H480" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="484" y="56" width="256" height="60" rx="8"/>
+  <text class="sm" x="496" y="78">Set-Cookie: session=</text>
+  <text class="mono on-a" x="496" y="100">{"name":"Dave"}.k3Jv9Q…</text>
+
+  <rect class="bx-g" x="20" y="160" width="350" height="76" rx="10"/>
+  <text class="ttl on-g" x="36" y="182">下次请求：原样带回 → 重新算签名</text>
+  <text class="sm" x="36" y="204">算出来的和带回来的一致 → 可信，放进 c.var.session</text>
+  <text class="sm" x="36" y="222">内容能看到，但一个字节都改不了</text>
+  <rect class="bx-r" x="390" y="160" width="350" height="76" rx="10"/>
+  <text class="ttl on-r" x="406" y="182">有人把 Dave 改成 Admin</text>
+  <text class="sm" x="406" y="204">没有 SECRET_KEY 就算不出新签名 → 对不上</text>
+  <text class="sm" x="406" y="222">getSignedCookie 返回 false → 当作空会话</text>
+</svg>
+<figcaption>图 4-5　签名不是加密：会话内容用户看得到（所以别往里放密码），但无法篡改</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+import { deleteCookie, getSignedCookie, setSignedCookie } from 'hono/cookie'
+import { createMiddleware } from 'hono/factory'
+
+type SessionData = { name?: string; flashes?: string[] }
+type Env = { Variables: { session: SessionData } }
+
+const session = createMiddleware&lt;Env&gt;(async (c, next) =&gt; {
+  // ① 读：没有 → undefined；签名不对 → false；两种情况都当作空会话
+  const raw = await getSignedCookie(c, SECRET_KEY, 'session')
+  let data: SessionData = {}
+  if (raw) {
+    try { data = JSON.parse(raw) } catch { data = {} }
+  }
+  const before = JSON.stringify(data)
+  c.set('session', data)                 // 处理函数通过 c.var.session 读写
+
+  await next()                           // ② 处理函数在这里运行
+
+  // ③ 写：只有内容变了才重新发 Cookie
+  const after = JSON.stringify(c.var.session)
+  if (after === before) return
+  if (after === '{}') {
+    deleteCookie(c, 'session', { path: '/' })
+    return
+  }
+  await setSignedCookie(c, 'session', after, SECRET_KEY, {
+    path: '/',
+    httpOnly: true,     // 页面上的 JavaScript 读不到它，XSS 偷不走
+    sameSite: 'Lax',    // 别的网站发起的 POST 不带它，防 CSRF
+  })
+})
+
+const app = new Hono&lt;Env&gt;()
+app.use(csrf())
+app.use(session)
+</pre>
+</div>
+
+<p>
+  <code>createMiddleware&lt;Env&gt;</code> 是 Hono 提供的帮手，作用只是让中间件带上正确的类型；
+  <code>Env</code> 里声明了 <code>session</code> 变量的类型，之后所有处理函数里的 <code>c.var.session</code> 都有自动补全。
+</p>
+
+<p>有了会话，PRG 版本的处理函数就很简单了：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    form = NameForm()
+    if form.validate_on_submit():
+        session['name'] = form.name.data
+        return redirect(url_for('index'))
+    return render_template('index.html',
+        form=form, name=session.get('name'))
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+app.get('/', (c) =&gt; {
+  return c.render(&lt;IndexPage name={c.var.session.name} /&gt;)
+})
+
+app.post('/', zValidator('form', nameSchema, hook), (c) =&gt; {
+  c.var.session.name = c.req.valid('form').name
+  return c.redirect('/')
+})
+</pre></div>
+  </div>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>4b</b>：重定向和用户会话</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：Cookie 会话 vs 服务器端会话</div>
+  <p>
+    把会话整个存在 Cookie 里（Flask 和我们都是这样），好处是服务器什么都不用存，多台服务器之间也不用同步。
+    缺点是 Cookie 有大小限制（约 4 KB），而且<strong>服务器无法主动让某个会话失效</strong>（比如“踢掉所有设备”）。
+    需要这些能力时，就改成“Cookie 里只存一个随机 ID，数据存在服务器的数据库或 Redis 里”。
+    原书第 18 章提到的 Flask-Session 就是做这个的。我们的中间件只要改“读”和“写”两段就能切换过去。
+  </p>
+</div>
+
+<h2 id="flash">Flash 消息</h2>
+
+<p>
+  很多时候需要在请求完成后给用户一个状态提示：“保存成功”、“密码错误”、“你已退出登录”。
+  问题是提示常常要在<em>重定向之后的那个页面</em>显示。Flask 内置了 <code>flash()</code> 来做这件事，原理是：
+  <strong>先把消息存进会话，下一次渲染页面时取出来显示，取完就删掉</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="Flash 消息跨越重定向的生命周期">
+  <rect class="bx-a" x="20" y="30" width="220" height="150" rx="10"/>
+  <text class="ttl on-a" x="130" y="54" text-anchor="middle">请求 1：POST /</text>
+  <text class="mono" x="36" y="82">flash(c, '看起来你改了名字！')</text>
+  <text class="sm" x="36" y="106">→ 消息存进会话</text>
+  <text class="mono" x="36" y="130">return c.redirect('/')</text>
+  <text class="sm" x="36" y="154">→ Cookie 里带着这条消息</text>
+
+  <path class="ln-a" d="M242 105 H290" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-b" x="294" y="30" width="220" height="150" rx="10"/>
+  <text class="ttl on-b" x="404" y="54" text-anchor="middle">请求 2：GET /</text>
+  <text class="sm" x="310" y="82">布局调用</text>
+  <text class="mono" x="310" y="104">getFlashedMessages(c)</text>
+  <text class="sm" x="310" y="128">→ 取出消息，渲染成提示框</text>
+  <text class="sm" x="310" y="152">→ 同时从会话里删掉</text>
+
+  <path class="ln-b" d="M516 105 H564" marker-end="url(#ar-b)"/>
+
+  <rect class="bx-g" x="568" y="30" width="172" height="150" rx="10"/>
+  <text class="ttl on-g" x="654" y="54" text-anchor="middle">请求 3：刷新</text>
+  <text class="sm" x="654" y="96" text-anchor="middle">会话里已经没有</text>
+  <text class="sm" x="654" y="114" text-anchor="middle">这条消息了</text>
+  <text class="sm" x="654" y="138" text-anchor="middle">→ 不再显示</text>
+</svg>
+<figcaption>图 4-6　Flash 消息只显示一次：“闪”一下就没了，这就是它名字的由来</figcaption>
+</figure>
+
+<p>在会话之上实现它只需要两个小函数：</p>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+import type { Context } from 'hono'
+
+function flash(c: Context&lt;Env&gt;, message: string) {
+  const s = c.var.session
+  s.flashes = [...(s.flashes ?? []), message]
+}
+
+function getFlashedMessages(c: Context&lt;Env&gt;): string[] {
+  const s = c.var.session
+  const messages = s.flashes ?? []
+  delete s.flashes          // 取一次就没了
+  return messages
+}
+</pre>
+</div>
+
+<p>处理函数里在名字变化时发一条消息：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+if form.validate_on_submit():
+    old_name = session.get('name')
+    if old_name is not None and \
+            old_name != form.name.data:
+        flash('Looks like you have changed your name!')
+    session['name'] = form.name.data
+    return redirect(url_for('index'))
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+(c) =&gt; {
+  const { name } = c.req.valid('form')
+  const oldName = c.var.session.name
+  if (oldName &amp;&amp; oldName !== name) {
+    flash(c, '看起来你改了名字！')
+  }
+  c.var.session.name = name
+  return c.redirect('/')
+}
+</pre></div>
+  </div>
+</div>
+
+<p>
+  原书说：显示 Flash 消息最好的地方是<strong>基础模板</strong>，这样所有页面都能显示。
+  我们的布局是用 <code>jsxRenderer</code> 注册的，布局组件里可以用 <code>useRequestContext()</code> 拿到当前请求的 <code>c</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+import { jsxRenderer, useRequestContext } from 'hono/jsx-renderer'
+
+app.use(jsxRenderer(({ children }) =&gt; {
+  const c = useRequestContext&lt;Env&gt;()
+  const messages = getFlashedMessages(c)
+  return (
+    &lt;html lang="zh-CN"&gt;
+      {/* …head、导航栏与第 3 章相同… */}
+      &lt;body&gt;
+        &lt;main class="container"&gt;
+          {messages.map((m) =&gt; (
+            &lt;div class="alert alert-warning alert-dismissible"&gt;
+              {m}
+              &lt;button type="button" class="btn-close" data-bs-dismiss="alert"&gt;&lt;/button&gt;
+            &lt;/div&gt;
+          ))}
+          {children}
+        &lt;/main&gt;
+      &lt;/body&gt;
+    &lt;/html&gt;
+  )
+}, { docType: true }))
+</pre>
+</div>
+
+<p>
+  这里用循环，是因为上一个请求可能调用了好几次 <code>flash()</code>。
+  注意中间件的顺序：<code>session</code> 必须在 <code>jsxRenderer</code> 之前注册，布局渲染时 <code>c.var.session</code> 才已经就绪；
+  而布局取走消息后会话内容变了，会话中间件在 <code>await next()</code> 之后会发现这一点，自动更新 Cookie。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>4c</b>：Flash 消息</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>表单数据以 <code>application/x-www-form-urlencoded</code> 编码放在 POST 正文里，<code>c.req.parseBody()</code> 读取。</li>
+  <li>Zod schema 描述“合格的输入”，<code>zValidator('form', schema, hook)</code> 在处理函数之前校验；钩子里带着错误重新渲染表单。</li>
+  <li>表单 HTML 用 JSX 写，Bootstrap 的 <code>is-invalid</code> / <code>invalid-feedback</code> 显示错误。</li>
+  <li>CSRF 用 <code>hono/csrf</code>（检查 <code>Origin</code> / <code>Sec-Fetch-Site</code>）加 <code>SameSite=Lax</code> Cookie 防御。</li>
+  <li>会话 = 用 <code>SECRET_KEY</code> 签名的 Cookie：内容可见但不可篡改；我们自己用中间件实现了它。</li>
+  <li>POST 处理完一律重定向（PRG），需要跨请求的数据存会话，提示用 Flash 消息。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给名字加一条规则：最多 20 个字符，超出时提示“名字太长了”。试试提交一个很长的名字。</li>
+    <li>打开浏览器开发者工具的 Application → Cookies，找到 <code>session</code>，看看它的内容；手动改掉其中一个字母再刷新页面，会发生什么？</li>
+    <li>用 <code>curl -X POST -d "name=Dave" http://localhost:3000/</code> 提交，确认被 CSRF 中间件拦截；再加上 <code>-H "Origin: http://localhost:3000"</code> 重试。</li>
+    <li>把 <code>return c.redirect('/')</code> 改回直接渲染页面，亲身体验一下刷新时的“重新提交”对话框，然后改回来。</li>
+    <li>给 <code>flash()</code> 增加一个“类别”参数（<code>'success' | 'warning' | 'danger'</code>），让布局根据类别使用不同颜色的 Bootstrap 提示框。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

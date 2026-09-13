@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 16 章 · 性能 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="16">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 16 章</span>
+<h1>性能</h1>
+<p class="lede">
+  没有人喜欢慢吞吞的应用。页面加载太久会让用户烦躁，所以性能问题一出现就要发现并解决。
+  和原书一样，这一章关注 Web 应用最重要的两类性能问题：<strong>慢的数据库查询</strong>和<strong>吃 CPU 的代码</strong>。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>知道一个请求的时间都花在了哪里，用 Server-Timing 在浏览器里看到它</li>
+    <li>自动记录超过阈值的慢查询，并在生产环境也保持开启</li>
+    <li>用 <code>EXPLAIN ANALYZE</code> 分析查询，发现并补上缺失的索引</li>
+    <li>用 Node.js 自带的 CPU 剖析器找出最耗时的函数</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="where">时间都去哪儿了</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="一个请求的时间构成">
+  <text class="sm" x="20" y="22">一次 GET / 请求（服务器这一侧）</text>
+  <rect class="bx" x="20" y="34" width="60" height="40" rx="4"/><text class="sm" x="50" y="58" text-anchor="middle">中间件</text>
+  <rect class="bx-b" x="82" y="34" width="70" height="40" rx="4"/><text class="sm on-b" x="117" y="58" text-anchor="middle">加载用户</text>
+  <rect class="bx-r" x="154" y="34" width="330" height="40" rx="4"/><text class="sm on-r" x="319" y="58" text-anchor="middle">查询文章（JOIN + 子查询 + COUNT）</text>
+  <rect class="bx-a" x="486" y="34" width="150" height="40" rx="4"/><text class="sm on-a" x="561" y="58" text-anchor="middle">渲染 JSX</text>
+  <rect class="bx" x="638" y="34" width="102" height="40" rx="4"/><text class="sm" x="689" y="58" text-anchor="middle">写 Cookie</text>
+  <path class="ln-r" d="M154 86 H484"/>
+  <text class="sm on-r" x="319" y="104" text-anchor="middle">随着数据增长越来越慢 → 慢查询日志（本章前半）</text>
+  <path class="ln-a" d="M486 86 H636"/>
+  <text class="sm on-a" x="561" y="104" text-anchor="middle">CPU 密集 → 剖析器（本章后半）</text>
+  <rect class="bx-d" x="20" y="130" width="720" height="54" rx="8"/>
+  <text class="lbl" x="380" y="152" text-anchor="middle">原书：应用性能随时间慢慢变差，多半是因为数据库查询随着数据量增长越来越慢</text>
+  <text class="lbl" x="380" y="172" text-anchor="middle">开发时数据很少，问题往往要到线上才暴露</text>
+</svg>
+<figcaption>图 16-1　数据库和 CPU 是两个最常见的瓶颈，要用不同的工具去找</figcaption>
+</figure>
+
+<h3>用 Server-Timing 看到每个请求的时间</h3>
+
+<p>
+  开始优化之前，先要能<em>看到</em>时间。HTTP 有一个标准的响应头 <code>Server-Timing</code>，服务器可以用它报告各个阶段的耗时，
+  浏览器开发者工具的“网络”面板会把它画成时间条。Hono 内置了 <code>hono/timing</code> 中间件：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+import { timing } from 'hono/timing'
+
+if (config.debug) app.use('*', logger(), timing())   // 开发环境打开；它会自动记录总耗时
+</pre>
+</div>
+
+<p>想单独测量某一段代码（比如一次数据库查询），用 <code>startTime</code> / <code>endTime</code> 包起来：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { endTime, setMetric, startTime, type TimingVariables } from 'hono/timing'
+
+// types.ts：让 c 知道 timing 中间件用到的变量
+export type AppEnv = { Variables: TimingVariables &amp; { config: Config; db: Db; /* … */ } }
+
+main.get('/', async (c) =&gt; {
+  startTime(c, 'db', 'fetch posts')
+  const pagination = await getPostsPage(c.var.db, pageParam(c), c.var.config.postsPerPage)
+  endTime(c, 'db')
+  setMetric(c, 'posts', pagination.items.length, 'post count')
+  // …
+})
+
+// 响应头：Server-Timing: db;dur=31.2;desc="fetch posts", posts;dur=20;desc="post count", total;dur=48.5
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 描述文字只能用英文</div>
+  <p>
+    指标的名字和描述会原样写进 HTTP 响应头，而响应头只允许 Latin-1 字符。写成 <code>startTime(c, 'db', '查询文章')</code>，
+    请求会直接抛出异常（<code>Cannot convert argument to a ByteString</code>）。这是本教程在验证代码时真实踩到的坑。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 生产环境要不要开</div>
+  <p>
+    Server-Timing 会把内部的耗时信息暴露给任何访问者。开发时非常方便；生产环境通常关掉，或者只对管理员开放。
+    <code>timing()</code> 中间件也支持通过选项控制是否输出。
+  </p>
+</div>
+
+<h2 id="slow-queries">记录慢查询</h2>
+
+<p>
+  原书指出：优化查询之前，得先知道<strong>哪些</strong>查询值得优化。一个请求可能发出好几条查询，很难凭感觉判断哪条慢。
+  原书借助 Flask-SQLAlchemy 记录每条查询的统计信息（SQL、参数、耗时……），然后在 <code>after_app_request</code> 钩子里把超过阈值的写进日志。
+</p>
+<p>
+  Drizzle 的 <code>logger</code> 选项可以打印每一条 SQL（开发时把 <code>drizzle(client, { schema, logger: true })</code> 打开看看，很有启发），
+  但它不记录耗时。所以我们在更底层动手：<strong>给数据库驱动的 <code>query</code> 方法包一层计时器</strong>。
+  PGlite 和 node-postgres 执行 SQL 最终都会调用这个方法：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/db/index.ts">
+<pre>
+export interface SlowQuery { sql: string; params: unknown; ms: number }
+
+export interface DbOptions {
+  slowQueryMs?: number
+  onSlowQuery?: (q: SlowQuery) =&gt; void
+}
+
+export function createDb(url: string, options: DbOptions = {}): Db {
+  if (/^postgres(ql)?:\/\//.test(url)) {
+    const pool = new pg.Pool({ connectionString: url })
+    watchSlowQueries(pool, options)
+    return drizzlePg(pool, { schema })
+  }
+  // …PGlite 同理：watchSlowQueries(client, options)
+}
+
+function watchSlowQueries(
+  client: { query: (...args: any[]) =&gt; Promise&lt;any&gt; },
+  { slowQueryMs, onSlowQuery }: DbOptions,
+) {
+  if (!slowQueryMs || !onSlowQuery) return
+  const original = client.query.bind(client)
+  client.query = async (...args: any[]) =&gt; {
+    const start = performance.now()
+    try {
+      return await original(...args)
+    } finally {
+      const ms = performance.now() - start
+      if (ms &gt;= slowQueryMs) {
+        const q = args[0]
+        onSlowQuery({ sql: typeof q === 'string' ? q : q?.text, params: args[1] ?? q?.values, ms })
+      }
+    }
+  }
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="包装驱动的 query 方法来计时">
+  <rect class="bx" x="20" y="60" width="140" height="56" rx="8"/>
+  <text class="ttl" x="90" y="84" text-anchor="middle">Drizzle</text>
+  <text class="sm" x="90" y="102" text-anchor="middle">db.select()…</text>
+  <path class="ln" d="M162 88 H210" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="214" y="40" width="260" height="96" rx="10"/>
+  <text class="ttl on-a" x="344" y="64" text-anchor="middle">包装后的 client.query</text>
+  <text class="mono" x="230" y="88">start = performance.now()</text>
+  <text class="mono" x="230" y="108">await 原来的 query(…)</text>
+  <text class="mono" x="230" y="128">ms ≥ 500 → onSlowQuery</text>
+  <path class="ln" d="M476 88 H524" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="528" y="60" width="212" height="56" rx="8"/>
+  <text class="ttl on-b" x="634" y="84" text-anchor="middle">PGlite / node-postgres</text>
+  <text class="sm" x="634" y="102" text-anchor="middle">真正执行 SQL</text>
+  <text class="sm" x="380" y="164" text-anchor="middle">业务代码完全不用改：所有查询都经过这一层</text>
+</svg>
+<figcaption>图 16-2　在驱动这一层计时，比在每个处理函数里手动计时可靠得多</figcaption>
+</figure>
+
+<p>阈值放进配置（原书的 <code>FLASKY_SLOW_DB_QUERY_TIME = 0.5</code> 秒），在入口文件里把慢查询写进日志：</p>
+
+<div class="code" data-lang="ts" data-file="src/index.ts">
+<pre>
+const config = loadConfig()          // config.slowQueryMs = 500
+const db = createDb(config.databaseUrl, {
+  slowQueryMs: config.slowQueryMs,
+  onSlowQuery: ({ sql, params, ms }) =&gt;
+    console.warn(`慢查询 ${ms.toFixed(0)}ms\n  SQL: ${sql}\n  参数: ${JSON.stringify(params)}`),
+})
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 在生产环境也要开着</div>
+  <p>
+    原书特别强调：Flask-SQLAlchemy 默认只在调试模式下记录查询统计，但数据库性能问题很少在开发时出现，因为开发用的数据库小得多。
+    所以原书把记录功能在所有配置里都打开了。我们的计时器开销只是两次 <code>performance.now()</code>，完全可以在生产环境常开。
+    日志去了哪里、怎么保存，取决于部署平台，第 17 章会讲。
+  </p>
+</div>
+
+<h3>让数据库自己记录</h3>
+
+<p>
+  应用这一侧的计时包括了网络往返。PostgreSQL 本身也能记录慢查询，而且更精确，生产环境里两者最好都用上：
+</p>
+
+<div class="code" data-lang="sql">
+<pre>
+-- 执行超过 500 毫秒的语句都写进 PostgreSQL 的日志
+ALTER SYSTEM SET log_min_duration_statement = '500ms';
+SELECT pg_reload_conf();
+
+-- 更进一步：开启 pg_stat_statements 扩展，按“哪类查询累计最耗时”排序
+SELECT query, calls, mean_exec_time FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>16a</b>：记录慢查询</div>
+
+<h2 id="explain">用 EXPLAIN 分析查询</h2>
+
+<p>
+  找到慢查询之后怎么办？原书提到，大多数数据库都有 <code>EXPLAIN</code> 语句，它会显示数据库执行一条查询的步骤，经常能暴露数据库或索引设计上的低效之处。
+  优化可能简单到加一个索引，也可能复杂到在应用和数据库之间加一层缓存。我们来实际分析一次。
+</p>
+<p>
+  打开 shell，先用第 11 章的脚本塞进大量数据，然后看看文章列表那条查询的执行计划：
+</p>
+
+<div class="code" data-lang="sql">
+<pre>
+EXPLAIN ANALYZE
+SELECT count(*) FROM comments WHERE comments.post_id = 42;
+
+-- Seq Scan on comments  (actual time=0.012..8.431 rows=3 loops=1)
+--   Filter: (post_id = 42)
+--   Rows Removed by Filter: 99997
+</pre>
+</div>
+
+<p>
+  <code>Seq Scan</code>（顺序扫描）的意思是：为了找出 3 条评论，数据库把十万行从头到尾看了一遍。
+  而第 11 章的文章列表查询里，<strong>每篇文章</strong>都要算一次评论数 —— 一页 20 篇，就是 20 次全表扫描。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="顺序扫描与索引扫描的对比">
+  <text class="ttl on-r" x="20" y="22">没有索引：Seq Scan</text>
+  <rect class="bx" x="20" y="34" width="340" height="120" rx="8"/>
+  <g>
+    <rect class="bx-r" x="30" y="44" width="320" height="10" rx="2"/><rect class="bx-r" x="30" y="58" width="320" height="10" rx="2"/>
+    <rect class="bx-r" x="30" y="72" width="320" height="10" rx="2"/><rect class="bx-r" x="30" y="86" width="320" height="10" rx="2"/>
+    <rect class="bx-r" x="30" y="100" width="320" height="10" rx="2"/><rect class="bx-r" x="30" y="114" width="320" height="10" rx="2"/>
+    <rect class="bx-r" x="30" y="128" width="320" height="10" rx="2"/>
+  </g>
+  <text class="sm on-r" x="190" y="176" text-anchor="middle">逐行检查 100,000 行，找出 post_id = 42 的</text>
+
+  <text class="ttl on-g" x="400" y="22">有索引：Index Scan</text>
+  <rect class="bx-g" x="400" y="34" width="120" height="120" rx="8"/>
+  <text class="sm on-g" x="460" y="60" text-anchor="middle">B-tree 索引</text>
+  <text class="mono" x="460" y="84" text-anchor="middle">post_id</text>
+  <text class="mono" x="460" y="104" text-anchor="middle">41 → …</text>
+  <text class="mono on-g" x="460" y="124" text-anchor="middle">42 → 3 行</text>
+  <path class="ln-g" d="M522 124 H580" marker-end="url(#ar-g)"/>
+  <rect class="bx" x="584" y="34" width="156" height="120" rx="8"/>
+  <rect class="bx-g" x="594" y="100" width="136" height="10" rx="2"/>
+  <rect class="bx-g" x="594" y="114" width="136" height="10" rx="2"/>
+  <rect class="bx-g" x="594" y="128" width="136" height="10" rx="2"/>
+  <text class="sm on-g" x="570" y="176" text-anchor="middle">直接跳到那 3 行</text>
+  <text class="lbl" x="380" y="208" text-anchor="middle">数据越多，两者差距越大：顺序扫描随行数线性变慢，索引查找几乎不变</text>
+</svg>
+<figcaption>图 16-3　索引就像书后面的索引页：想找某个词，不用把整本书从头翻一遍</figcaption>
+</figure>
+
+<div class="box warn">
+  <div class="t">&#9888; PostgreSQL 不会自动给外键建索引</div>
+  <p>
+    很多人以为定义了外键就有了索引 —— 并没有。PostgreSQL 只会自动给<strong>主键</strong>和<strong>唯一约束</strong>建索引。
+    <code>comments.post_id</code>、<code>comments.author_id</code>、<code>posts.author_id</code> 都是外键，都经常出现在 <code>WHERE</code> 和 <code>JOIN</code> 里，却都没有索引。
+    还有一个更隐蔽的：<code>follows</code> 的主键是 <code>(follower_id, followed_id)</code>，这个复合索引能加速“按 follower_id 查”，
+    但“按 followed_id 查”（算粉丝数、第 12 章的 JOIN）用不上它，因为复合索引只能从第一列开始用。
+  </p>
+</div>
+
+<p>给这些列补上索引：</p>
+
+<div class="code" data-lang="ts" data-file="src/db/schema.ts">
+<pre>
+export const posts = pgTable('posts', { /* … */ }, (t) =&gt; [
+  index('ix_posts_timestamp').on(t.timestamp),
+  index('ix_posts_author_id').on(t.authorId),
+])
+
+export const comments = pgTable('comments', { /* … */ }, (t) =&gt; [
+  index('ix_comments_timestamp').on(t.timestamp),
+  index('ix_comments_post_id').on(t.postId),
+  index('ix_comments_author_id').on(t.authorId),
+])
+
+export const follows = pgTable('follows', { /* … */ }, (t) =&gt; [
+  primaryKey({ columns: [t.followerId, t.followedId] }),
+  index('ix_follows_followed_id').on(t.followedId),      // 反方向的查询也要快
+])
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npm run db:generate -- --name performance_indexes
+npm run db:migrate
+</pre>
+</div>
+
+<p>再看一次执行计划：</p>
+
+<div class="code" data-lang="sql">
+<pre>
+EXPLAIN ANALYZE
+SELECT count(*) FROM comments WHERE comments.post_id = 42;
+
+-- Index Only Scan using ix_comments_post_id on comments  (actual time=0.021..0.023 rows=3 loops=1)
+--   Index Cond: (post_id = 42)
+</pre>
+</div>
+
+<p>从 8 毫秒降到 0.02 毫秒。这类改进在开发时几乎感觉不到，在数据增长之后却是决定性的。</p>
+
+<div class="box tip">
+  <div class="t">&#128161; 索引不是越多越好</div>
+  <p>
+    每个索引都会让 <code>INSERT</code> / <code>UPDATE</code> 变慢一点（索引也要跟着更新），还会占用磁盘。
+    原则是：<strong>经常出现在 <code>WHERE</code>、<code>JOIN</code>、<code>ORDER BY</code> 里的列才加索引</strong>，并且用 <code>EXPLAIN</code> 确认它真的被用上了。
+  </p>
+</div>
+
+<h2 id="profiling">剖析源代码</h2>
+
+<p>
+  另一类性能问题是 CPU 占用过高，原因是某些函数做了繁重的计算。<strong>剖析器</strong>（profiler）观察运行中的应用，
+  记录每个函数被调用了多少次、花了多长时间，最后给出一份报告，指出最慢的函数。
+</p>
+<p>
+  原书用 Werkzeug 的 <code>ProfilerMiddleware</code>，写了一个 <code>flask profile</code> 命令，让开发服务器在剖析器下运行。
+  Node.js 的 V8 引擎自带剖析器，一个命令行参数就能打开：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm run build                                          # 剖析编译后的 JS，结果更接近线上
+node --cpu-prof --cpu-prof-dir=./profiles dist/src/index.js
+# …在浏览器里访问几个页面，或者用压测工具制造一些负载…
+# 按 Ctrl+C 停止，profiles/ 目录下会生成一个 .cpuprofile 文件
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; Ctrl+C 之后没有生成剖析文件？</div>
+  <p>
+    <code>--cpu-prof</code> 只在进程<strong>正常退出</strong>时写文件。服务器被 Ctrl+C（SIGINT 信号）直接杀掉时，文件不会生成。
+    解决办法是在入口文件里处理这个信号，先关闭服务器再正常退出。这段代码第 17 章部署到 Docker 时也需要（<code>docker stop</code> 发的是 SIGTERM）：
+  </p>
+  <div class="code" data-lang="ts" data-file="src/index.ts"><pre>
+const server = serve({ fetch: app.fetch, port }, …)
+
+// 优雅退出：停止接收新请求，等正在处理的请求完成，再退出
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () =&gt; {
+    console.log(`收到 ${signal}，正在关闭……`)
+    server.close(() =&gt; process.exit(0))
+  })
+}
+</pre></div>
+</div>
+
+<p>要制造负载，可以用压测工具 autocannon：20 个并发连接，持续 10 秒访问首页：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npx autocannon -c 20 -d 10 http://localhost:3000/
+</pre>
+</div>
+
+<h3>读懂剖析结果</h3>
+
+<p>
+  <code>.cpuprofile</code> 是 Chrome 开发者工具的标准格式。打开 Chrome 的开发者工具 → Performance 面板 → 加载这个文件，
+  或者直接在 VS Code 里打开它，就能看到<strong>火焰图</strong>：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="火焰图的读法">
+  <rect class="bx-d" x="20" y="190" width="720" height="30" rx="3"/>
+  <text class="sm" x="380" y="210" text-anchor="middle">(program) · 事件循环</text>
+  <rect class="bx" x="20" y="156" width="560" height="30" rx="3"/>
+  <text class="sm" x="300" y="176" text-anchor="middle">app.fetch → 中间件链</text>
+  <rect class="bx-b" x="20" y="122" width="160" height="30" rx="3"/>
+  <text class="sm on-b" x="100" y="142" text-anchor="middle">scrypt（登录）</text>
+  <rect class="bx" x="184" y="122" width="210" height="30" rx="3"/>
+  <text class="sm" x="289" y="142" text-anchor="middle">getPostsPage</text>
+  <rect class="bx-a" x="398" y="122" width="182" height="30" rx="3"/>
+  <text class="sm on-a" x="489" y="142" text-anchor="middle">JSX 渲染</text>
+  <rect class="bx" x="184" y="88" width="120" height="30" rx="3"/>
+  <text class="sm" x="244" y="108" text-anchor="middle">pg 结果解析</text>
+  <rect class="bx-a" x="398" y="88" width="110" height="30" rx="3"/>
+  <text class="sm on-a" x="453" y="108" text-anchor="middle">escape</text>
+  <rect class="bx" x="584" y="156" width="156" height="30" rx="3"/>
+  <text class="sm" x="662" y="176" text-anchor="middle">GC（垃圾回收）</text>
+
+  <text class="sm" x="20" y="36">↑ 越往上，调用层级越深（上面的函数是被下面的函数调用的）</text>
+  <text class="sm" x="20" y="56">↔ 越宽，占用的 CPU 时间越多 —— 找那些又宽又在顶上的“平台”</text>
+  <text class="sm on-b" x="20" y="76">scrypt 很宽？这是故意的：密码哈希本来就该慢（第 8 章），而且只在登录注册时出现</text>
+</svg>
+<figcaption>图 16-4　火焰图：横向是时间占比，纵向是调用栈。优化要从“宽而平的顶部”下手</figcaption>
+</figure>
+
+<p>比命令行参数更方便的几种方式：</p>
+<ul>
+  <li><strong>实时剖析：</strong><code>node --inspect dist/src/index.js</code>，然后在 Chrome 地址栏打开 <code>chrome://inspect</code>，点“inspect”，在 Performance 面板里随时开始、停止录制。</li>
+  <li><strong>一键生成火焰图：</strong><code>npx 0x dist/src/index.js</code>，停止后自动在浏览器里打开交互式火焰图。</li>
+  <li><strong>综合诊断：</strong><code>clinic</code> 工具集（<code>clinic doctor</code>、<code>clinic flame</code>）会结合 CPU、事件循环延迟、内存给出诊断建议。</li>
+</ul>
+
+<div class="box warn">
+  <div class="t">&#9888; 剖析只在开发环境做</div>
+  <p>
+    原书提醒：剖析器要实时观察、记录程序的一举一动，会让应用明显变慢，所以一般只在开发环境使用。
+    除非使用专门为生产环境设计的轻量级采样剖析器（很多 APM 监控服务都提供），否则不要在生产服务器上剖析。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>16b</b>：源代码剖析</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：Node.js 单线程带来的特殊问题</div>
+  <p>
+    Node.js 用一个线程处理所有请求（第 2 章）。这意味着：一段 CPU 密集的同步代码运行时，<strong>其他所有请求都在等</strong>。
+    在多线程的 Flask 里，一个慢请求只拖慢自己；在 Node.js 里，它可能拖慢整个服务器。
+    所以要特别小心同步的重计算：比如我们用的是异步版本的 <code>scrypt</code>（它在线程池里执行，不阻塞主线程），而不是 <code>scryptSync</code>。
+    剖析器里如果看到一个很宽的同步函数，就要考虑把它挪到 <code>worker_threads</code> 里，或者干脆换个算法。
+  </p>
+</div>
+
+<p>原书说：部署前的准备工作到这里就完成了。下一章，我们来看看把应用部署上线时会遇到什么。</p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>先测量再优化：<code>hono/timing</code> 用 Server-Timing 头把耗时展示在浏览器开发者工具里。</li>
+  <li>在数据库驱动的 <code>query</code> 方法外包一层计时器，超过阈值（500 毫秒）就记日志；生产环境也要开着，配合 PostgreSQL 自己的 <code>log_min_duration_statement</code>。</li>
+  <li><code>EXPLAIN ANALYZE</code> 显示执行计划；<code>Seq Scan</code> 往往意味着缺索引。PostgreSQL 不会自动给外键建索引，复合索引只能从第一列开始用。</li>
+  <li><code>node --cpu-prof</code> 生成 <code>.cpuprofile</code>，在 Chrome 或 VS Code 里看火焰图；进程要优雅退出才会写文件。</li>
+  <li>Node.js 单线程：同步的 CPU 密集代码会阻塞所有请求，尽量用异步 API 或 worker 线程。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>临时把 <code>slowQueryMs</code> 设成 1，浏览几个页面，看看日志里出现了哪些查询。哪个页面发出的查询最多？</li>
+    <li>生成 10 万条假评论，对第 11 章的文章列表查询运行 <code>EXPLAIN ANALYZE</code>，加索引前后各跑一次，对比结果。</li>
+    <li>给首页加上 <code>startTime</code> / <code>endTime</code>，分别测量“查询”和“渲染”两部分，在浏览器的网络面板里查看 Server-Timing。</li>
+    <li>用 autocannon 压测登录接口（POST <code>/auth/login</code>），同时录制 CPU 剖析，确认 scrypt 是最宽的那一块。再想一想：为什么这不是需要“优化掉”的问题，而登录接口需要的是限流？</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

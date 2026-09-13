@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 1 章 · 安装 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="1">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 1 章</span>
+<h1>安装</h1>
+<p class="lede">
+  Flask 自称“微框架”：核心很小，其他功能靠扩展。Hono 也是这个思路，而且更小。
+  这一章我们把工具装好：Node.js、包管理器、TypeScript，最后建出一个空的 Hono 项目，为下一章的“Hello World”做准备。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>知道 Hono 由哪几块组成，和 Flask 的组成方式有什么异同</li>
+    <li>装好 Node.js，并理解“版本管理器”是干什么的</li>
+    <li>理解 Node.js 为什么不需要 Python 那样的虚拟环境</li>
+    <li>会用 npm 安装依赖、查看已装的包，读懂 <code>package.json</code> 和 <code>package-lock.json</code></li>
+    <li>配好 TypeScript，让 JSX 能够编译成 Hono 的 HTML</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="what">Hono 是由什么组成的</h2>
+
+<p>
+  原书开篇说：Flask 有三个主要依赖 —— 路由、调试和 WSGI 来自 <strong>Werkzeug</strong>，
+  模板来自 <strong>Jinja2</strong>，命令行来自 <strong>Click</strong>。
+  数据库、表单校验、用户认证这些“高级功能”Flask 一概不管，交给扩展。
+</p>
+<p>
+  Hono 的哲学一样，但它连依赖都没有 —— <strong>零依赖</strong>，核心只有十几 KB。
+  它把自己需要的东西都建立在 JavaScript 运行时已经提供的 <em>Web 标准 API</em> 之上：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="Flask 与 Hono 的组成对比">
+  <text class="ttl" x="185" y="24" text-anchor="middle">Flask = 核心 + 三个依赖 + 扩展</text>
+  <rect class="bx-b" x="110" y="40" width="150" height="46" rx="10"/>
+  <text class="ttl on-b" x="185" y="68" text-anchor="middle">Flask 核心</text>
+  <rect class="bx" x="20" y="116" width="100" height="56" rx="8"/>
+  <text class="ttl" x="70" y="140" text-anchor="middle">Werkzeug</text>
+  <text class="sm" x="70" y="158" text-anchor="middle">路由 · WSGI</text>
+  <rect class="bx" x="135" y="116" width="100" height="56" rx="8"/>
+  <text class="ttl" x="185" y="140" text-anchor="middle">Jinja2</text>
+  <text class="sm" x="185" y="158" text-anchor="middle">模板</text>
+  <rect class="bx" x="250" y="116" width="100" height="56" rx="8"/>
+  <text class="ttl" x="300" y="140" text-anchor="middle">Click</text>
+  <text class="sm" x="300" y="158" text-anchor="middle">命令行</text>
+  <path class="ln" d="M160 88 L80 114"/>
+  <path class="ln" d="M185 88 V114"/>
+  <path class="ln" d="M210 88 L290 114"/>
+  <rect class="bx-d" x="20" y="200" width="330" height="80" rx="10"/>
+  <text class="ttl" x="36" y="222">Flask 扩展</text>
+  <text class="sm" x="36" y="244">Flask-SQLAlchemy · Flask-WTF · Flask-Login</text>
+  <text class="sm" x="36" y="262">Flask-Mail · Flask-Migrate · Flask-Moment …</text>
+
+  <path class="ln-d" d="M380 20 V285"/>
+
+  <text class="ttl on-a" x="575" y="24" text-anchor="middle">Hono = 核心（零依赖）+ 生态包</text>
+  <rect class="bx-a" x="500" y="40" width="150" height="46" rx="10"/>
+  <text class="ttl on-a" x="575" y="68" text-anchor="middle">hono</text>
+  <rect class="bx-g" x="410" y="116" width="100" height="56" rx="8"/>
+  <text class="ttl on-g" x="460" y="140" text-anchor="middle">路由器</text>
+  <text class="sm" x="460" y="158" text-anchor="middle">URL → 函数</text>
+  <rect class="bx-g" x="525" y="116" width="100" height="56" rx="8"/>
+  <text class="ttl on-g" x="575" y="140" text-anchor="middle">Context</text>
+  <text class="sm" x="575" y="158" text-anchor="middle">请求 + 响应</text>
+  <rect class="bx-g" x="640" y="116" width="100" height="56" rx="8"/>
+  <text class="ttl on-g" x="690" y="140" text-anchor="middle">中间件</text>
+  <text class="sm" x="690" y="158" text-anchor="middle">洋葱模型</text>
+  <path class="ln" d="M550 88 L470 114"/>
+  <path class="ln" d="M575 88 V114"/>
+  <path class="ln" d="M600 88 L680 114"/>
+  <rect class="bx-d" x="410" y="200" width="330" height="80" rx="10"/>
+  <text class="ttl" x="426" y="222">内置模块 + 生态包</text>
+  <text class="sm" x="426" y="244">hono/jsx · hono/cookie · hono/jwt · hono/csrf …</text>
+  <text class="sm" x="426" y="262">Drizzle · Zod · Nodemailer · Vitest …</text>
+</svg>
+<figcaption>图 1-1　两者都是“小核心 + 按需组合”。区别是 Hono 的核心自带了更多常用模块，而且都不依赖第三方包</figcaption>
+</figure>
+
+<p>
+  和 Flask 一样，Hono <strong>不管数据库、不管表单校验、不管用户认证</strong>。
+  好处是你能自己挑最合适的工具：本教程会用 Drizzle 管数据库、Zod 管校验、自己写几十行代码管登录。
+  坏处是你得知道该挑什么 —— 这正是这套教程要帮你做的事。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 关于 Windows</div>
+  <p>
+    原书建议 Windows 用户使用 WSL（Windows Subsystem for Linux）来获得和 Linux/macOS 一致的命令行体验，这条建议今天依然成立。
+    不过 Node.js 在 Windows 原生环境下也运行得很好，本教程的代码在两种方式下都能跑。
+    命令有差异的地方（主要是设置环境变量）会单独标出来。
+  </p>
+</div>
+
+<h2 id="node">安装 Node.js</h2>
+
+<p>
+  Flask 应用运行在 Python 解释器里；Hono 应用运行在 <strong>JavaScript 运行时</strong>里。
+  可选的运行时有 Node.js、Bun、Deno 等，本教程选用最普及的 <strong>Node.js</strong>（需要 20 以上的版本，推荐最新的 LTS 长期支持版）。
+</p>
+
+<h3>方式一：官方安装包</h3>
+<p>
+  去 <a href="https://nodejs.org">nodejs.org</a> 下载 LTS 版安装包，一路下一步即可。最省事，适合只想先跑起来的人。
+</p>
+
+<h3>方式二：版本管理器（推荐）</h3>
+<p>
+  做久了你会遇到“这个老项目要 Node 18，那个新项目要 Node 24”的情况。
+  <strong>版本管理器</strong>能在一台电脑上装多个 Node 版本并随时切换，相当于 Python 世界的 pyenv。
+  常用的有 <a href="https://github.com/nvm-sh/nvm">nvm</a>（macOS/Linux）和 <a href="https://github.com/Schniz/fnm">fnm</a>（跨平台，更快）：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 以 fnm 为例（macOS 可以用 brew install fnm，Windows 可以用 winget install Schniz.fnm）
+fnm install --lts
+fnm use lts-latest
+
+# 确认装好了
+node -v    # v24.x.x
+npm -v     # 11.x.x
+</pre>
+</div>
+
+<p>
+  装 Node.js 时会顺带装上 <strong>npm</strong>（Node Package Manager），它相当于 Python 的 pip。
+  社区里还有 pnpm、yarn、bun 等替代品，命令大同小异；本教程统一用 npm。
+</p>
+
+<h2 id="dir">创建项目目录</h2>
+
+<p>原书第一步是从 GitHub 克隆示例代码。我们从零开始建一个新目录，顺手初始化 Git：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+mkdir flasky
+cd flasky
+git init
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 从第一天就用 Git</div>
+  <p>
+    原书作者强烈建议读者学会 Git，并把示例代码的每个阶段都打上了标签（<code>1a</code>、<code>2a</code>、<code>2b</code>……），
+    用 <code>git checkout 2a</code> 就能回到某一章的状态。你自己跟着做的时候，也可以在每一节结束时
+    <code>git commit</code> 一次，出了错随时能退回去。第 17 章的部署也要依赖 Git。
+  </p>
+</div>
+
+<h2 id="venv">为什么 Node.js 不需要“虚拟环境”</h2>
+
+<p>
+  原书花了不少篇幅讲 Python 虚拟环境：<code>python3 -m venv venv</code>、<code>source venv/bin/activate</code>……
+  它要解决的问题是：<strong>Python 默认把包装到全局</strong>，两个项目需要同一个包的不同版本时就会打架。
+  虚拟环境给每个项目复制一份“私有的”Python 解释器和包目录。
+</p>
+<p>
+  Node.js 从设计之初就换了一种做法：<strong>包默认装在当前项目的 <code>node_modules</code> 文件夹里</strong>。
+  每个项目天然有自己的一份依赖，互不干扰，所以不需要“激活”任何东西。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="Python 虚拟环境与 Node.js node_modules 的对比">
+  <text class="ttl" x="190" y="22" text-anchor="middle">Python：默认全局，需要虚拟环境隔离</text>
+  <rect class="bx-r" x="30" y="36" width="320" height="56" rx="8"/>
+  <text class="ttl on-r" x="190" y="58" text-anchor="middle">系统 Python 的 site-packages</text>
+  <text class="sm" x="190" y="78" text-anchor="middle">所有项目共用一份 → 版本冲突</text>
+  <rect class="bx" x="30" y="120" width="150" height="150" rx="8"/>
+  <text class="ttl" x="105" y="142" text-anchor="middle">项目 A</text>
+  <rect class="bx-b" x="44" y="154" width="122" height="102" rx="6"/>
+  <text class="sm on-b" x="105" y="174" text-anchor="middle">venv/</text>
+  <text class="sm" x="105" y="196" text-anchor="middle">python（副本）</text>
+  <text class="sm" x="105" y="216" text-anchor="middle">flask 0.12</text>
+  <text class="sm" x="105" y="240" text-anchor="middle">需要 activate</text>
+  <rect class="bx" x="200" y="120" width="150" height="150" rx="8"/>
+  <text class="ttl" x="275" y="142" text-anchor="middle">项目 B</text>
+  <rect class="bx-b" x="214" y="154" width="122" height="102" rx="6"/>
+  <text class="sm on-b" x="275" y="174" text-anchor="middle">venv/</text>
+  <text class="sm" x="275" y="196" text-anchor="middle">python（副本）</text>
+  <text class="sm" x="275" y="216" text-anchor="middle">flask 3.0</text>
+  <text class="sm" x="275" y="240" text-anchor="middle">需要 activate</text>
+
+  <path class="ln-d" d="M380 20 V280"/>
+
+  <text class="ttl on-a" x="575" y="22" text-anchor="middle">Node.js：默认就装在项目里</text>
+  <rect class="bx-g" x="420" y="36" width="310" height="56" rx="8"/>
+  <text class="ttl on-g" x="575" y="58" text-anchor="middle">全局只有 node 和 npm 本身</text>
+  <text class="sm" x="575" y="78" text-anchor="middle">（版本由 fnm / nvm 管理）</text>
+  <rect class="bx" x="420" y="120" width="145" height="150" rx="8"/>
+  <text class="ttl" x="492" y="142" text-anchor="middle">项目 A</text>
+  <rect class="bx-a" x="432" y="154" width="121" height="102" rx="6"/>
+  <text class="sm on-a" x="492" y="174" text-anchor="middle">node_modules/</text>
+  <text class="sm" x="492" y="196" text-anchor="middle">hono 3.x</text>
+  <text class="sm" x="492" y="216" text-anchor="middle">zod 3.x</text>
+  <text class="sm" x="492" y="240" text-anchor="middle">不需要激活</text>
+  <rect class="bx" x="585" y="120" width="145" height="150" rx="8"/>
+  <text class="ttl" x="657" y="142" text-anchor="middle">项目 B</text>
+  <rect class="bx-a" x="597" y="154" width="121" height="102" rx="6"/>
+  <text class="sm on-a" x="657" y="174" text-anchor="middle">node_modules/</text>
+  <text class="sm" x="657" y="196" text-anchor="middle">hono 4.x</text>
+  <text class="sm" x="657" y="216" text-anchor="middle">zod 4.x</text>
+  <text class="sm" x="657" y="240" text-anchor="middle">不需要激活</text>
+</svg>
+<figcaption>图 1-2　Python 要手动“隔离”，Node.js 天生隔离。Node 本身的多版本共存交给 fnm / nvm</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Python（原书）</th><th>Node.js（本教程）</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>python3 -m venv venv</code></td><td><code>npm init -y</code></td><td>在项目里建立依赖清单</td></tr>
+    <tr><td><code>source venv/bin/activate</code></td><td>（不需要）</td><td>npm 会自动找当前目录的 <code>node_modules</code></td></tr>
+    <tr><td><code>pip install flask</code></td><td><code>npm install hono</code></td><td>安装包</td></tr>
+    <tr><td><code>pip freeze</code></td><td><code>npm ls</code></td><td>查看已安装的包</td></tr>
+    <tr><td><code>requirements.txt</code></td><td><code>package.json</code> + <code>package-lock.json</code></td><td>依赖清单 + 精确版本锁定</td></tr>
+    <tr><td><code>pip install -r requirements.txt</code></td><td><code>npm install</code>（或 <code>npm ci</code>）</td><td>按清单还原依赖</td></tr>
+    <tr><td><code>venv/bin/python</code></td><td><code>npx 命令名</code></td><td>运行项目里安装的命令行工具</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="npm">用 npm 初始化项目</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+npm init -y
+</pre>
+</div>
+
+<p>这会生成一个 <code>package.json</code>，它是项目的“身份证”：名字、版本、依赖、以及常用命令。先改一处：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm pkg set type=module
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; "type": "module" 是什么</div>
+  <p>
+    JavaScript 历史上有两套模块语法：老的 CommonJS（<code>require()</code>）和新的 ES Module（<code>import</code> / <code>export</code>）。
+    加上 <code>"type": "module"</code> 表示“这个项目用 ES Module”，这是现在的标准写法，Hono 的所有文档也是这么写的。
+  </p>
+</div>
+
+<h3>安装 Hono</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+# 运行时依赖：上线时也需要
+npm install hono @hono/node-server
+
+# 开发依赖：只在写代码、编译、测试时需要
+npm install -D typescript tsx @types/node
+</pre>
+</div>
+
+<p>这几个包各自负责什么：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>包</th><th>作用</th><th>大致对应原书的</th></tr></thead>
+  <tbody>
+    <tr><td><code>hono</code></td><td>框架本体：路由、Context、中间件、JSX、Cookie、JWT……</td><td>Flask</td></tr>
+    <tr><td><code>@hono/node-server</code></td><td>把 Hono 应用接到 Node.js 的 HTTP 服务器上</td><td>Werkzeug 的 WSGI 服务器部分</td></tr>
+    <tr><td><code>typescript</code></td><td>TypeScript 编译器，负责类型检查和编译</td><td>（Python 不需要编译）</td></tr>
+    <tr><td><code>tsx</code></td><td>直接运行 <code>.ts</code> / <code>.tsx</code> 文件，改代码自动重启</td><td><code>flask run</code> + 重载器</td></tr>
+    <tr><td><code>@types/node</code></td><td>Node.js 内置模块的类型声明</td><td>—</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>装完后看看 <code>package.json</code>：</p>
+
+<div class="code" data-lang="ts" data-file="package.json">
+<pre>
+{
+  "name": "flasky",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
+</pre>
+</div>
+
+<p>
+  版本号前面的 <code>^</code> 表示“允许自动升级到兼容的新版本”（比如 <code>^4.13.7</code> 允许 4.14、4.20，但不允许 5.0）。
+  那么怎么保证你和同事、和服务器装的<em>一模一样</em>？靠同时生成的 <code>package-lock.json</code>：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="package.json、package-lock.json 与 node_modules 的关系">
+  <rect class="bx-a" x="20" y="30" width="200" height="120" rx="10"/>
+  <text class="ttl on-a" x="120" y="54" text-anchor="middle">package.json</text>
+  <text class="sm" x="120" y="78" text-anchor="middle">你写的“愿望清单”</text>
+  <text class="mono" x="120" y="102" text-anchor="middle">"hono": "^4.13.7"</text>
+  <text class="sm" x="120" y="126" text-anchor="middle">提交到 Git ✔</text>
+
+  <rect class="bx-b" x="280" y="30" width="200" height="120" rx="10"/>
+  <text class="ttl on-b" x="380" y="54" text-anchor="middle">package-lock.json</text>
+  <text class="sm" x="380" y="78" text-anchor="middle">npm 算出的“精确清单”</text>
+  <text class="mono" x="380" y="102" text-anchor="middle">hono@4.13.7 + 哈希</text>
+  <text class="sm" x="380" y="126" text-anchor="middle">提交到 Git ✔</text>
+
+  <rect class="bx-g" x="540" y="30" width="200" height="120" rx="10"/>
+  <text class="ttl on-g" x="640" y="54" text-anchor="middle">node_modules/</text>
+  <text class="sm" x="640" y="78" text-anchor="middle">真正下载下来的代码</text>
+  <text class="mono" x="640" y="102" text-anchor="middle">几千个文件</text>
+  <text class="sm on-r" x="640" y="126" text-anchor="middle">不要提交到 Git ✘</text>
+
+  <path class="ln-a" d="M222 90 H276" marker-end="url(#ar-a)"/>
+  <text class="sm" x="249" y="82" text-anchor="middle">解析</text>
+  <path class="ln-b" d="M482 90 H536" marker-end="url(#ar-b)"/>
+  <text class="sm" x="509" y="82" text-anchor="middle">下载</text>
+
+  <text class="lbl" x="380" y="186" text-anchor="middle">别人拿到你的代码后，一句 npm install（或 npm ci）就能按 lock 文件还原出完全一样的 node_modules</text>
+</svg>
+<figcaption>图 1-3　三者的关系。lock 文件相当于原书用 <code>pip freeze &gt; requirements.txt</code> 生成的精确版本清单</figcaption>
+</figure>
+
+<p>立刻建一个 <code>.gitignore</code>，把不该提交的东西排除掉：</p>
+
+<div class="code" data-lang="text" data-file=".gitignore">
+<pre>
+node_modules/
+dist/
+data/
+coverage/
+.env
+</pre>
+</div>
+
+<p>想看装了哪些包，用 <code>npm ls</code>（相当于 <code>pip freeze</code>）：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm ls
+# flasky@1.0.0 /home/you/flasky
+# ├── @hono/node-server@2.1.1
+# ├── @types/node@24.x.x
+# ├── hono@4.13.7
+# ├── tsx@4.23.13
+# └── typescript@7.0.2
+</pre>
+</div>
+
+<h2 id="ts">配置 TypeScript</h2>
+
+<p>
+  本教程全程使用 TypeScript —— 就是加了类型的 JavaScript。
+  你可以把类型理解成“写给编辑器看的注释”：写错字段名、传错参数，还没运行编辑器就会标红。
+  在项目根目录创建 <code>tsconfig.json</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="tsconfig.json">
+<pre>
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "hono/jsx",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": ["src", "scripts", "tests"]
+}
+</pre>
+</div>
+
+<p>几个值得解释的选项：</p>
+<ul>
+  <li><strong><code>strict: true</code></strong>：开启严格检查。比如一个值可能是 <code>null</code>，你不先判断就用，编译器会提醒你。刚开始会觉得烦，但它能挡掉大量线上 bug。</li>
+  <li><strong><code>jsx</code> + <code>jsxImportSource</code></strong>：第 3 章会用 JSX 写页面。这两行告诉 TypeScript：“遇到 <code>&lt;div&gt;</code> 这样的语法，交给 <code>hono/jsx</code> 处理”，而不是交给 React。</li>
+  <li><strong><code>module: "NodeNext"</code></strong>：按 Node.js 的规则解析模块。它的一个副作用是：导入自己写的文件时要写 <code>.js</code> 后缀（第 7 章会解释为什么）。</li>
+  <li><strong><code>outDir</code></strong>：上线前用 <code>tsc</code> 编译出的 JavaScript 放到 <code>dist/</code>（第 17 章）。开发时我们用 <code>tsx</code> 直接运行 <code>.ts</code>，不需要先编译。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="开发时与上线时运行 TypeScript 的两条路径">
+  <rect class="bx-a" x="20" y="70" width="130" height="56" rx="8"/>
+  <text class="ttl on-a" x="85" y="94" text-anchor="middle">src/*.ts(x)</text>
+  <text class="sm" x="85" y="112" text-anchor="middle">你写的代码</text>
+
+  <text class="sm" x="330" y="24" text-anchor="middle">开发时：边改边跑</text>
+  <path class="ln-a" d="M152 88 L240 40" marker-end="url(#ar-a)"/>
+  <rect class="bx" x="244" y="30" width="170" height="40" rx="8"/>
+  <text class="ttl" x="329" y="55" text-anchor="middle">tsx watch</text>
+  <path class="ln" d="M416 50 H492" marker-end="url(#ar)"/>
+  <text class="sm" x="454" y="42" text-anchor="middle">即时转换</text>
+
+  <text class="sm" x="330" y="186" text-anchor="middle">上线时：先编译，再运行</text>
+  <path class="ln-b" d="M152 110 L240 150" marker-end="url(#ar-b)"/>
+  <rect class="bx-b" x="244" y="130" width="170" height="40" rx="8"/>
+  <text class="ttl on-b" x="329" y="155" text-anchor="middle">tsc → dist/*.js</text>
+  <path class="ln-b" d="M416 150 H492" marker-end="url(#ar-b)"/>
+
+  <rect class="bx-g" x="496" y="70" width="244" height="56" rx="10"/>
+  <text class="ttl on-g" x="618" y="94" text-anchor="middle">Node.js 运行时</text>
+  <text class="sm" x="618" y="112" text-anchor="middle">执行 JavaScript，监听端口</text>
+  <path class="ln" d="M494 50 L560 68"/>
+  <path class="ln-b" d="M494 150 L560 128"/>
+</svg>
+<figcaption>图 1-4　同一份 TypeScript 代码的两种运行方式：开发时用 tsx 直接跑，上线前用 tsc 编译成 JS</figcaption>
+</figure>
+
+<h2 id="verify">验证安装</h2>
+
+<p>原书最后在 Python 交互环境里 <code>import flask</code>，没报错就算成功。我们做同样的事：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+node --input-type=module -e "import { Hono } from 'hono'; console.log(typeof Hono)"
+# function
+</pre>
+</div>
+
+<p>看到 <code>function</code> 就说明 Hono 装好了，可以进入下一章写第一个应用了。</p>
+
+<div class="box tip">
+  <div class="t">&#128161; 一条命令生成项目骨架</div>
+  <p>
+    Hono 官方提供了脚手架：<code>npm create hono@latest flasky</code>，选择 <code>nodejs</code> 模板，
+    它会把上面这些步骤一次做完。本教程手动一步步来，是为了让你知道每个文件是干什么的。
+    以后开新项目，直接用脚手架就好。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 编辑器</div>
+  <p>
+    强烈推荐 <a href="https://code.visualstudio.com">VS Code</a>：它对 TypeScript 的支持是内置的，
+    打开项目文件夹就能看到类型提示、自动补全和错误标红，不用装任何插件。第 18 章会介绍更多工具。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>Hono 和 Flask 一样是“小核心 + 按需组合”，但核心零依赖，且建立在 Web 标准 API 上。</li>
+  <li>Node.js 用 fnm / nvm 管理版本；npm 负责装包，相当于 pip。</li>
+  <li>Node 的依赖默认装在项目的 <code>node_modules</code> 里，天然隔离，不需要虚拟环境。</li>
+  <li><code>package.json</code> 记录“想要什么”，<code>package-lock.json</code> 记录“精确装了什么”，两者都提交到 Git；<code>node_modules</code> 不提交。</li>
+  <li><code>tsconfig.json</code> 里的 <code>jsxImportSource: "hono/jsx"</code> 为第 3 章的 JSX 模板做好了准备。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 fnm 或 nvm 同时装上两个不同的 Node 版本，练习来回切换，并用 <code>node -v</code> 确认。</li>
+    <li>删掉 <code>node_modules</code> 文件夹，然后运行 <code>npm ci</code>，观察它是怎样按 lock 文件完整还原的。</li>
+    <li>打开 <code>node_modules/hono/package.json</code>，找到 <code>"dependencies"</code> 字段 —— 验证一下 Hono 是不是真的零依赖。</li>
+    <li>试试 <code>npm create hono@latest</code>，对比它生成的文件和我们手动建的有什么不同。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

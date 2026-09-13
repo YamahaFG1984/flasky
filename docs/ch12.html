@@ -1,0 +1,751 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 12 章 · 关注 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="12">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 12 章</span>
+<h1>关注</h1>
+<p class="lede">
+  社交网站让用户之间建立联系：有的叫关注，有的叫好友、联系人、人脉……名字不同，本质都是“用户与用户之间的有向链接”。
+  这一章实现关注功能，并让首页可以只显示关注的人写的文章。它会带你深入理解数据库里最复杂的一种关系 —— 多对多，以及 JOIN 查询。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解四种关系类型，以及为什么多对多需要一张关联表</li>
+    <li>理解“自引用”的多对多：两端都是用户</li>
+    <li>给关联表加上自己的数据（关注时间），并用级联删除保持数据干净</li>
+    <li>在资料页上实现关注 / 取消关注、粉丝列表、“关注了你”</li>
+    <li>一步一步看懂 JOIN，用一条查询取出“我关注的人写的文章”</li>
+    <li>理解“自己关注自己”这个技巧带来的方便与副作用</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="relations">再谈数据库关系</h2>
+
+<p>
+  第 5 章介绍过：关系型数据库用关系把记录链接起来，最常见的是一对多 —— “多”的那一方有一个外键，指向“一”的那一方。
+  目前的 Flasky 里就有两个一对多：角色 → 用户、用户 → 文章。其他关系类型大多是一对多的变体：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="四种关系类型">
+  <rect class="bx" x="20" y="20" width="170" height="200" rx="10"/>
+  <text class="ttl" x="105" y="44" text-anchor="middle">一对多</text>
+  <circle class="dot-b" cx="60" cy="130" r="10"/>
+  <circle class="dot-a" cx="150" cy="80" r="8"/><circle class="dot-a" cx="150" cy="130" r="8"/><circle class="dot-a" cx="150" cy="180" r="8"/>
+  <path class="ln" d="M70 128 L142 82"/><path class="ln" d="M70 130 H142"/><path class="ln" d="M70 132 L142 178"/>
+  <text class="sm" x="105" y="212" text-anchor="middle">外键在“多”的一边</text>
+
+  <rect class="bx" x="206" y="20" width="170" height="200" rx="10"/>
+  <text class="ttl" x="291" y="44" text-anchor="middle">多对一</text>
+  <circle class="dot-a" cx="246" cy="80" r="8"/><circle class="dot-a" cx="246" cy="130" r="8"/><circle class="dot-a" cx="246" cy="180" r="8"/>
+  <circle class="dot-b" cx="336" cy="130" r="10"/>
+  <path class="ln" d="M254 82 L326 128"/><path class="ln" d="M254 130 H326"/><path class="ln" d="M254 178 L326 132"/>
+  <text class="sm" x="291" y="212" text-anchor="middle">从“多”那边看的一对多</text>
+
+  <rect class="bx" x="392" y="20" width="170" height="200" rx="10"/>
+  <text class="ttl" x="477" y="44" text-anchor="middle">一对一</text>
+  <circle class="dot-b" cx="432" cy="100" r="9"/><circle class="dot-a" cx="522" cy="100" r="9"/>
+  <circle class="dot-b" cx="432" cy="160" r="9"/><circle class="dot-a" cx="522" cy="160" r="9"/>
+  <path class="ln" d="M441 100 H513"/><path class="ln" d="M441 160 H513"/>
+  <text class="sm" x="477" y="212" text-anchor="middle">“多”最多只有一个</text>
+
+  <rect class="bx-a" x="578" y="20" width="162" height="200" rx="10"/>
+  <text class="ttl on-a" x="659" y="44" text-anchor="middle">多对多</text>
+  <circle class="dot-b" cx="614" cy="80" r="8"/><circle class="dot-b" cx="614" cy="130" r="8"/><circle class="dot-b" cx="614" cy="180" r="8"/>
+  <circle class="dot-g" cx="704" cy="80" r="8"/><circle class="dot-g" cx="704" cy="130" r="8"/><circle class="dot-g" cx="704" cy="180" r="8"/>
+  <path class="ln-a" d="M622 80 L696 130"/><path class="ln-a" d="M622 80 L696 180"/><path class="ln-a" d="M622 130 L696 80"/>
+  <path class="ln-a" d="M622 180 L696 130"/><path class="ln-a" d="M622 130 L696 180"/>
+  <text class="sm on-a" x="659" y="212" text-anchor="middle">两边都是“多”</text>
+</svg>
+<figcaption>图 12-1　只有多对多无法用“一个外键”表示</figcaption>
+</figure>
+
+<h2 id="m2m">多对多关系</h2>
+
+<p>
+  原书用的经典例子：学生和课程。一个学生选很多门课，一门课有很多学生。
+  在 <code>students</code> 表里放一个“课程外键”不够（一个学生不止一门课）；在 <code>classes</code> 表里放“学生外键”也不够。两边都需要一个外键<em>列表</em>。
+</p>
+<p>
+  解决办法是加第三张表，叫<strong>关联表</strong>（association table，也叫连接表 junction table）。于是一个多对多被拆成了两个一对多：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="用关联表 registrations 实现学生与课程的多对多">
+  <rect class="bx-b" x="20" y="40" width="190" height="150" rx="10"/>
+  <text class="ttl on-b" x="115" y="64" text-anchor="middle">students</text>
+  <line class="ln" x1="20" y1="76" x2="210" y2="76"/>
+  <text class="mono" x="36" y="100">1 · 小明</text>
+  <text class="mono" x="36" y="124">2 · 小红</text>
+  <text class="mono" x="36" y="148">3 · 小刚</text>
+
+  <rect class="bx-a" x="285" y="20" width="190" height="190" rx="10"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">registrations</text>
+  <text class="sm" x="380" y="62" text-anchor="middle">student_id · class_id</text>
+  <line class="ln" x1="285" y1="72" x2="475" y2="72"/>
+  <text class="mono" x="301" y="96">1 · 10</text><text class="sm" x="459" y="96" text-anchor="end">小明-数学</text>
+  <text class="mono" x="301" y="120">1 · 20</text><text class="sm" x="459" y="120" text-anchor="end">小明-英语</text>
+  <text class="mono" x="301" y="144">2 · 10</text><text class="sm" x="459" y="144" text-anchor="end">小红-数学</text>
+  <text class="mono" x="301" y="168">3 · 20</text><text class="sm" x="459" y="168" text-anchor="end">小刚-英语</text>
+  <text class="mono" x="301" y="192">3 · 30</text><text class="sm" x="459" y="192" text-anchor="end">小刚-物理</text>
+
+  <rect class="bx-g" x="550" y="40" width="190" height="150" rx="10"/>
+  <text class="ttl on-g" x="645" y="64" text-anchor="middle">classes</text>
+  <line class="ln" x1="550" y1="76" x2="740" y2="76"/>
+  <text class="mono" x="566" y="100">10 · 数学</text>
+  <text class="mono" x="566" y="124">20 · 英语</text>
+  <text class="mono" x="566" y="148">30 · 物理</text>
+
+  <path class="ln-b" d="M212 115 H281"/>
+  <text class="sm on-b" x="226" y="108">1</text><text class="sm on-b" x="266" y="108">多</text>
+  <path class="ln-g" d="M479 115 H546"/>
+  <text class="sm on-g" x="486" y="108">多</text><text class="sm on-g" x="532" y="108">1</text>
+</svg>
+<figcaption>图 12-2　关联表的每一行代表一次“选课”。查“小明选了哪些课”：先在关联表里找 student_id=1 的行，再按 class_id 找到课程</figcaption>
+</figure>
+
+<p>用 Drizzle 定义这三张表。关联表的主键由两列共同组成（<strong>复合主键</strong>），这样同一个学生不可能重复选同一门课：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+export const students = pgTable('students', { id: serial('id').primaryKey(), name: text('name') })
+export const classes = pgTable('classes', { id: serial('id').primaryKey(), name: text('name') })
+
+export const registrations = pgTable('registrations', {
+  studentId: integer('student_id').notNull().references(() =&gt; students.id),
+  classId: integer('class_id').notNull().references(() =&gt; classes.id),
+}, (t) =&gt; [primaryKey({ columns: [t.studentId, t.classId] })])
+
+// 小明选了哪些课？一次 JOIN 查出来：
+await db.select({ name: classes.name })
+  .from(registrations)
+  .innerJoin(classes, eq(registrations.classId, classes.id))
+  .where(eq(registrations.studentId, 1))
+</pre>
+</div>
+
+<p>
+  原书里 SQLAlchemy 可以用 <code>secondary=registrations</code> 把关联表“藏”起来，让你写 <code>s.classes.append(c)</code> 这样的代码。
+  Drizzle 的哲学是不藏：关联表就是一张普通的表，选课就是往里插一行，退课就是删一行。多写一点点，但数据库里发生了什么一目了然。
+</p>
+
+<h2 id="self">自引用关系：用户关注用户</h2>
+
+<p>
+  关注也是多对多：一个人关注很多人，也被很多人关注。但和学生/课程不同，<strong>两端都是用户</strong> —— 这叫<strong>自引用</strong>关系。
+  概念上没有任何区别，只是更难在脑子里想清楚。原书把左边的用户叫“关注者”（follower），右边的叫“被关注者”（followed）：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="自引用的多对多：follows 表的两个外键都指向 users">
+  <rect class="bx-b" x="20" y="60" width="200" height="130" rx="10"/>
+  <text class="ttl on-b" x="120" y="84" text-anchor="middle">users（作为关注者）</text>
+  <text class="mono" x="36" y="112">1 · john</text>
+  <text class="mono" x="36" y="136">2 · susan</text>
+  <text class="mono" x="36" y="160">3 · david</text>
+
+  <rect class="bx-a" x="280" y="40" width="200" height="170" rx="10"/>
+  <text class="ttl on-a" x="380" y="64" text-anchor="middle">follows</text>
+  <text class="sm" x="380" y="82" text-anchor="middle">follower_id → followed_id · timestamp</text>
+  <line class="ln" x1="280" y1="92" x2="480" y2="92"/>
+  <text class="mono" x="296" y="118">1 → 3</text><text class="sm" x="464" y="118" text-anchor="end">john 关注 david</text>
+  <text class="mono" x="296" y="144">2 → 1</text><text class="sm" x="464" y="144" text-anchor="end">susan 关注 john</text>
+  <text class="mono" x="296" y="170">2 → 3</text><text class="sm" x="464" y="170" text-anchor="end">susan 关注 david</text>
+  <text class="sm" x="380" y="198" text-anchor="middle">（原书表 12-3）</text>
+
+  <rect class="bx-g" x="540" y="60" width="200" height="130" rx="10"/>
+  <text class="ttl on-g" x="640" y="84" text-anchor="middle">users（作为被关注者）</text>
+  <text class="mono" x="556" y="112">1 · john</text>
+  <text class="mono" x="556" y="136">2 · susan</text>
+  <text class="mono" x="556" y="160">3 · david</text>
+
+  <path class="ln-b" d="M222 125 H276"/>
+  <path class="ln-g" d="M484 125 H536"/>
+  <text class="sm" x="380" y="236" text-anchor="middle">左右两张“users”其实是同一张表。follows 的两个外键都指向它</text>
+</svg>
+<figcaption>图 12-3　自引用关系：同一张 users 表出现在关联表的两端</figcaption>
+</figure>
+
+<h3>带额外数据的关联表</h3>
+
+<p>
+  原书还希望记录“什么时候开始关注的”，这样粉丝列表可以按时间排序。这个信息只能存在关联表里。
+  在 SQLAlchemy 里，要做到这一点得把关联表“升级”成一个完整的模型，再把多对多拆回两个一对多，配置相当繁琐。
+  在 Drizzle 里，关联表本来就是普通的表，直接加一列就行了：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+class Follow(db.Model):
+    __tablename__ = 'follows'
+    follower_id = db.Column(db.Integer,
+        db.ForeignKey('users.id'), primary_key=True)
+    followed_id = db.Column(db.Integer,
+        db.ForeignKey('users.id'), primary_key=True)
+    timestamp = db.Column(db.DateTime,
+                          default=datetime.utcnow)
+
+class User(UserMixin, db.Model):
+    followed = db.relationship('Follow',
+        foreign_keys=[Follow.follower_id],
+        backref=db.backref('follower', lazy='joined'),
+        lazy='dynamic', cascade='all, delete-orphan')
+    followers = db.relationship('Follow',
+        foreign_keys=[Follow.followed_id],
+        backref=db.backref('followed', lazy='joined'),
+        lazy='dynamic', cascade='all, delete-orphan')
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+export const follows = pgTable('follows', {
+  followerId: integer('follower_id').notNull()
+    .references(() =&gt; users.id, { onDelete: 'cascade' }),
+  followedId: integer('followed_id').notNull()
+    .references(() =&gt; users.id, { onDelete: 'cascade' }),
+  timestamp: timestamp('timestamp', { withTimezone: true })
+    .notNull().defaultNow(),
+}, (t) =&gt; [primaryKey({ columns: [t.followerId, t.followedId] })])
+</pre></div>
+  </div>
+</div>
+
+<p>原书花了不少篇幅解释 <code>relationship()</code> 的几个参数，在 Drizzle 里它们对应的是：</p>
+<ul>
+  <li><strong><code>foreign_keys=[…]</code></strong>：两个外键都指向 <code>users</code>，SQLAlchemy 需要你说明每个关系用哪个。Drizzle 里查询时自己写 <code>eq(follows.followerId, …)</code> 还是 <code>eq(follows.followedId, …)</code>，天然就不会混淆。</li>
+  <li><strong><code>lazy='joined'</code> / <code>lazy='dynamic'</code></strong>：控制关联数据什么时候加载、要不要生成一次查询。原书特别指出，如果用默认的 <code>select</code> 模式，列出 100 个关注的人需要额外 100 次查询 —— 又是第 11 章的 N+1 问题。Drizzle 不做任何自动加载，你写出来的 JOIN 就是实际执行的查询。</li>
+  <li><strong><code>cascade='all, delete-orphan'</code></strong>：删除用户时，把指向他的关注记录也删掉，而不是留下指向不存在用户的“孤儿”行。这正是数据库外键的 <code>ON DELETE CASCADE</code> 做的事，由数据库保证，比 ORM 层面的级联更可靠。</li>
+  <li><strong>复合主键</strong>：<code>(follower_id, followed_id)</code> 作为主键，同一对用户不可能出现两条关注记录。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="删除用户时关注记录被级联删除">
+  <rect class="bx-r" x="20" y="60" width="160" height="60" rx="10"/>
+  <text class="ttl on-r" x="100" y="86" text-anchor="middle">DELETE users</text>
+  <text class="sm" x="100" y="106" text-anchor="middle">WHERE id = 2（susan）</text>
+  <path class="ln-r" d="M182 90 H240" marker-end="url(#ar-r)"/>
+  <rect class="bx" x="244" y="20" width="300" height="140" rx="10"/>
+  <text class="ttl" x="394" y="44" text-anchor="middle">follows</text>
+  <text class="mono" x="260" y="72">1 → 3  john 关注 david</text>
+  <text class="mono on-r" x="260" y="98">2 → 1  ✘ 自动删除</text>
+  <text class="mono on-r" x="260" y="124">2 → 3  ✘ 自动删除</text>
+  <text class="sm" x="260" y="148">ON DELETE CASCADE：数据库替你清理</text>
+  <rect class="bx-g" x="570" y="50" width="170" height="80" rx="10"/>
+  <text class="ttl on-g" x="655" y="76" text-anchor="middle">结果</text>
+  <text class="sm" x="655" y="98" text-anchor="middle">没有孤儿记录</text>
+  <text class="sm" x="655" y="116" text-anchor="middle">john 的粉丝数自动减 1</text>
+</svg>
+<figcaption>图 12-4　级联删除 = 原书的 <code>delete-orphan</code>。文章、评论的外键也设置了同样的规则</figcaption>
+</figure>
+
+<h3>操作关注关系的函数</h3>
+
+<p>原书给 <code>User</code> 模型加了四个方法，我们写成四个函数。每个都只是对 <code>follows</code> 表的一次简单操作：</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export async function follow(db: Db, followerId: number, followedId: number) {
+  // 已经关注过就什么都不做（主键冲突时忽略），不用先查一遍
+  await db.insert(follows).values({ followerId, followedId }).onConflictDoNothing()
+}
+
+export async function unfollow(db: Db, followerId: number, followedId: number) {
+  await db.delete(follows).where(and(eq(follows.followerId, followerId), eq(follows.followedId, followedId)))
+}
+
+export async function isFollowing(db: Db, followerId: number, followedId: number) {
+  const n = await db.$count(follows, and(eq(follows.followerId, followerId), eq(follows.followedId, followedId)))
+  return n &gt; 0
+}
+
+export const isFollowedBy = (db: Db, userId: number, otherId: number) =&gt; isFollowing(db, otherId, userId)
+</pre>
+</div>
+
+<p>
+  原书的 <code>is_following()</code> 还专门检查了 <code>user.id is None</code> 的情况 —— 在 SQLAlchemy 里，一个还没提交的用户对象没有 id。
+  我们的用户对象都是从数据库里查出来的，<code>id</code> 一定存在，不需要这个检查。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>12a</b>：在数据库中表示关注关系（含迁移）</div>
+
+<h2 id="profile">资料页上的关注功能</h2>
+
+<p>
+  资料页需要显示：“关注”或“取消关注”按钮、粉丝数和关注数、以及当对方关注了你时显示“关注了你”。
+  这些数字一次算好传给页面：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export async function getProfileStats(db: Db, userId: number, viewerId?: number) {
+  const [postCount, commentCount, followerCount, followingCount] = await Promise.all([
+    db.$count(posts, eq(posts.authorId, userId)),
+    db.$count(comments, eq(comments.authorId, userId)),      // 第 13 章
+    db.$count(follows, eq(follows.followedId, userId)),       // 有多少人关注他
+    db.$count(follows, eq(follows.followerId, userId)),       // 他关注了多少人
+  ])
+  const isSelf = viewerId === userId
+  return {
+    postCount,
+    commentCount,
+    followers: followerCount - 1,       // 减掉“自己关注自己”那一条，见本章最后
+    following: followingCount - 1,
+    viewerFollows: viewerId !== undefined &amp;&amp; !isSelf &amp;&amp; await isFollowing(db, viewerId, userId),
+    followsViewer: viewerId !== undefined &amp;&amp; !isSelf &amp;&amp; await isFollowing(db, userId, viewerId),
+  }
+}
+</pre>
+</div>
+
+<p><code>Promise.all</code> 让四个计数查询同时发出，而不是一个等一个。页面上的按钮是小表单（关注会改变数据，所以用 POST，理由见第 8 章的“退出登录”）：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/pages.tsx">
+<pre>
+&lt;p&gt;
+  {can(viewer, Permission.FOLLOW) &amp;&amp; !isSelf &amp;&amp; (
+    &lt;form method="post" action={`/${stats.viewerFollows ? 'unfollow' : 'follow'}/${profile.username}`} class="d-inline"&gt;
+      {stats.viewerFollows
+        ? &lt;button class="btn btn-outline-secondary"&gt;取消关注&lt;/button&gt;
+        : &lt;button class="btn btn-primary"&gt;关注&lt;/button&gt;}
+    &lt;/form&gt;
+  )}
+  &lt;a href={`/followers/${profile.username}`}&gt;粉丝 &lt;span class="badge text-bg-secondary"&gt;{stats.followers}&lt;/span&gt;&lt;/a&gt;
+  &lt;a href={`/followed-by/${profile.username}`}&gt;关注 &lt;span class="badge text-bg-secondary"&gt;{stats.following}&lt;/span&gt;&lt;/a&gt;
+  {stats.followsViewer &amp;&amp; &lt;&gt; | &lt;span class="badge text-bg-light"&gt;关注了你&lt;/span&gt;&lt;/&gt;}
+&lt;/p&gt;
+</pre>
+</div>
+
+<p>关注的路由（原书例 12-5），取消关注的完全对称：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+main.post('/follow/:username', loginRequired, permissionRequired(Permission.FOLLOW), async (c) =&gt; {
+  const db = c.var.db
+  const me = requireUser(c)
+  const username = c.req.param('username')
+  const target = await findUserByUsername(db, username)
+  if (!target) {
+    flash(c, '用户不存在。')
+    return c.redirect('/')
+  }
+  if (await isFollowing(db, me.id, target.id)) {
+    flash(c, '你已经关注过这个用户了。')
+  } else {
+    await follow(db, me.id, target.id)
+    flash(c, `你关注了 ${username}。`)
+  }
+  return c.redirect(`/user/${username}`)
+})
+</pre>
+</div>
+
+<h3>粉丝列表和关注列表</h3>
+
+<p>
+  点击资料页上的数字，进入粉丝列表或关注列表，两者都要分页。原书用 <code>user.followers.paginate()</code> 得到 <code>Follow</code> 对象，
+  再在 Python 里转换成 <code>{user, timestamp}</code> 的列表方便模板使用。我们直接用 JOIN 查出这个形状：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="粉丝列表与关注列表分别用 follows 表的哪一列">
+  <rect class="bx-a" x="250" y="20" width="260" height="70" rx="10"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">follows</text>
+  <text class="mono" x="380" y="70" text-anchor="middle">follower_id → followed_id</text>
+
+  <rect class="bx-b" x="20" y="120" width="340" height="76" rx="10"/>
+  <text class="ttl on-b" x="36" y="144">/followers/john（john 的粉丝）</text>
+  <text class="mono" x="36" y="166">WHERE followed_id = john</text>
+  <text class="mono" x="36" y="186">JOIN users ON users.id = follower_id</text>
+
+  <rect class="bx-g" x="400" y="120" width="340" height="76" rx="10"/>
+  <text class="ttl on-g" x="416" y="144">/followed-by/john（john 关注的人）</text>
+  <text class="mono" x="416" y="166">WHERE follower_id = john</text>
+  <text class="mono" x="416" y="186">JOIN users ON users.id = followed_id</text>
+
+  <path class="ln-b" d="M300 92 L190 118" marker-end="url(#ar-b)"/>
+  <path class="ln-g" d="M460 92 L570 118" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 12-5　同一张表，两个方向：用一列筛选“是谁的列表”，用另一列 JOIN 出“列表里的人”</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+function followList(direction: 'followers' | 'following') {
+  return async (c: Context&lt;AppEnv&gt;) =&gt; {
+    const db = c.var.db
+    const profile = await findUserByUsername(db, c.req.param('username') ?? '')
+    if (!profile) {
+      flash(c, '用户不存在。')
+      return c.redirect('/')
+    }
+    const isFollowers = direction === 'followers'
+    const mine = isFollowers ? follows.followedId : follows.followerId     // 这一列 = 资料页的主人
+    const theirs = isFollowers ? follows.followerId : follows.followedId   // 这一列 = 列表里要显示的人
+    const where = and(eq(mine, profile.id), ne(theirs, profile.id))      // 顺便去掉“自己关注自己”
+    const pagination = await paginate(
+      pageParam(c),
+      c.var.config.followersPerPage,
+      () =&gt; db.$count(follows, where),
+      (limit, offset) =&gt; db
+        .select({
+          user: { id: users.id, username: users.username, email: users.email, avatarHash: users.avatarHash },
+          timestamp: follows.timestamp,
+        })
+        .from(follows)
+        .innerJoin(users, eq(users.id, theirs))
+        .where(where)
+        .orderBy(desc(follows.timestamp))
+        .limit(limit)
+        .offset(offset),
+    )
+    const title = isFollowers ? `${profile.username} 的粉丝` : `${profile.username} 关注的人`
+    return c.render(
+      &lt;FollowersPage title={title} profile={profile} pagination={pagination}
+        basePath={isFollowers ? '/followers' : '/followed-by'} /&gt;,
+      { title },
+    )
+  }
+}
+
+main.get('/followers/:username', followList('followers'))
+main.get('/followed-by/:username', followList('following'))
+</pre>
+</div>
+
+<p>
+  两个路由逻辑几乎一样，所以写成一个返回处理函数的函数。原书也用同一个 <code>followers.html</code> 模板渲染两种列表，只是传入不同的标题和端点。
+  页面是一个两列的表格：左边头像和用户名，右边关注时间。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>12b</b>：资料页上的关注功能</div>
+
+<h2 id="join">用 JOIN 查询关注的人的文章</h2>
+
+<p>
+  现在首页显示的是所有人的文章。有了关注功能，用户会希望只看关注的人写的。
+  最直接的想法是：先查出我关注的人，再查每个人的文章，最后合并排序。原书指出这正是 N+1 问题，而且没法高效地分页。
+  正确的做法是用一条 <strong>JOIN</strong> 查询。原书用一组具体的数据一步步演示了 JOIN，我们照着走一遍。三张表：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="示例数据：users、posts、follows 三张表">
+  <rect class="bx-b" x="20" y="20" width="200" height="170" rx="10"/>
+  <text class="ttl on-b" x="120" y="44" text-anchor="middle">users</text>
+  <text class="sm" x="36" y="68">id · username</text>
+  <text class="mono" x="36" y="94">1 · john</text>
+  <text class="mono" x="36" y="118">2 · susan</text>
+  <text class="mono" x="36" y="142">3 · david</text>
+
+  <rect class="bx-a" x="240" y="20" width="280" height="170" rx="10"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">posts</text>
+  <text class="sm" x="256" y="68">id · author_id · body</text>
+  <text class="mono" x="256" y="94">1 · 2 · susan 的文章</text>
+  <text class="mono" x="256" y="118">2 · 1 · john 的文章</text>
+  <text class="mono" x="256" y="142">3 · 3 · david 的文章</text>
+  <text class="mono" x="256" y="166">4 · 1 · john 的第二篇</text>
+
+  <rect class="bx-g" x="540" y="20" width="200" height="170" rx="10"/>
+  <text class="ttl on-g" x="640" y="44" text-anchor="middle">follows</text>
+  <text class="sm" x="556" y="68">follower_id · followed_id</text>
+  <text class="mono" x="556" y="94">1 · 3</text><text class="sm" x="724" y="94" text-anchor="end">john→david</text>
+  <text class="mono" x="556" y="118">2 · 1</text><text class="sm" x="724" y="118" text-anchor="end">susan→john</text>
+  <text class="mono" x="556" y="142">2 · 3</text><text class="sm" x="724" y="142" text-anchor="end">susan→david</text>
+</svg>
+<figcaption>图 12-6　原书表 12-1 到 12-3。问题：susan 关注的人写了哪些文章？</figcaption>
+</figure>
+
+<p>要回答“susan 关注的人写了哪些文章”，数据库做了这样两步：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="JOIN 的执行过程">
+  <text class="ttl" x="20" y="22">① 只保留 follows 里 follower_id = 2（susan）的行</text>
+  <rect class="bx-g" x="20" y="34" width="220" height="64" rx="8"/>
+  <text class="mono" x="36" y="60">2 · 1   susan→john</text>
+  <text class="mono" x="36" y="84">2 · 3   susan→david</text>
+
+  <text class="ttl" x="20" y="130">② 把 posts 的每一行，和“author_id = followed_id”的 follows 行拼在一起</text>
+  <rect class="bx-a" x="20" y="142" width="720" height="118" rx="10"/>
+  <text class="sm" x="36" y="164">posts.id · author_id* · body</text>
+  <text class="sm" x="460" y="164">follower_id · followed_id*</text>
+  <line class="ln" x1="20" y1="172" x2="740" y2="172"/>
+  <text class="mono" x="36" y="194">2 · 1 · john 的文章</text>
+  <text class="mono" x="460" y="194">2 · 1</text>
+  <text class="mono" x="36" y="218">3 · 3 · david 的文章</text>
+  <text class="mono" x="460" y="218">2 · 3</text>
+  <text class="mono" x="36" y="242">4 · 1 · john 的第二篇</text>
+  <text class="mono" x="460" y="242">2 · 1</text>
+  <text class="sm on-a" x="724" y="218" text-anchor="end">带 * 的两列相等才拼</text>
+  <text class="sm" x="380" y="284" text-anchor="middle">susan 的文章（author_id=2）没有匹配的行，被排除了；结果恰好是 susan 关注的人写的全部文章</text>
+</svg>
+<figcaption>图 12-7　原书表 12-4：JOIN 的结果。整个过程在数据库内部完成，而且可以直接加上排序和分页</figcaption>
+</figure>
+
+<p>
+  原书先写出了一个 “从 Follow 开始、再 JOIN Post” 的版本，然后指出把顺序反过来更简洁：从 <code>posts</code> 开始，JOIN <code>follows</code>，再按关注者过滤。
+  数据库会把两种写法优化成同样的执行计划。Drizzle 里就是在第 11 章的 <code>getPostsPage</code> 里加一个分支：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+@property
+def followed_posts(self):
+    return Post.query.join(
+        Follow, Follow.followed_id == Post.author_id
+    ).filter(Follow.follower_id == self.id)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+if (filter.followedBy !== undefined) {
+  const on = eq(follows.followedId, posts.authorId)
+  const where = eq(follows.followerId, filter.followedBy)
+  query = query.innerJoin(follows, on).where(where)
+  countQuery = countQuery.innerJoin(follows, on).where(where)
+}
+</pre></div>
+  </div>
+</div>
+
+<p>它生成的 SQL（用 <code>.toSQL()</code> 可以看到）：</p>
+
+<div class="code" data-lang="sql">
+<pre>
+select "posts"."id", "posts"."body", …, "users"."username", …
+from "posts"
+inner join "users" on "posts"."author_id" = "users"."id"
+inner join "follows" on "follows"."followed_id" = "posts"."author_id"
+where "follows"."follower_id" = $1
+order by "posts"."timestamp" desc, "posts"."id" desc
+limit $2 offset $3
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 原书说：JOIN 很难一下子想明白</div>
+  <p>
+    “你可能需要在 shell 里多试几次，才能真正理解它。”这句话同样适用于你。打开 <code>npm run shell</code>，
+    手动插入图 12-6 里的数据，分别执行“只 JOIN 不 WHERE”和“JOIN 加 WHERE”，看看结果有什么不同。亲眼看到中间结果，比读十遍解释都管用。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>12c</b>：用 JOIN 查询关注的人的文章</div>
+
+<h2 id="home">在首页显示关注的人的文章</h2>
+
+<p>
+  首页顶部加两个标签页：“全部”和“关注的人”。用户的选择要被记住，原书把它存在一个名为 <code>show_followed</code> 的 Cookie 里，有效期 30 天。
+  两个新路由负责设置 Cookie，然后重定向回首页：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+@main.route('/all')
+@login_required
+def show_all():
+    resp = make_response(redirect(url_for('.index')))
+    resp.set_cookie('show_followed', '',
+                    max_age=30*24*60*60)
+    return resp
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+const THIRTY_DAYS = 60 * 60 * 24 * 30
+
+main.get('/all', loginRequired, (c) =&gt; {
+  setCookie(c, 'show_followed', '',
+            { maxAge: THIRTY_DAYS, path: '/' })
+  return c.redirect('/')
+})
+
+main.get('/followed', loginRequired, (c) =&gt; {
+  setCookie(c, 'show_followed', '1',
+            { maxAge: THIRTY_DAYS, path: '/' })
+  return c.redirect('/')
+})
+</pre></div>
+  </div>
+</div>
+
+<p>
+  原书解释了为什么这里要 <code>make_response()</code>：Cookie 只能设置在响应对象上。Hono 的 <code>setCookie(c, …)</code> 先把 Cookie 记在 <code>c</code> 上，<code>c.redirect()</code> 生成响应时会自动带上，所以不需要额外的步骤。
+</p>
+
+<p>首页读取这个 Cookie，决定用哪个查询：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+async function renderIndex(c: Context&lt;AppEnv&gt;, extra = {}) {
+  const user = c.var.user
+  const showFollowed = !!user &amp;&amp; !!getCookie(c, 'show_followed')    // 空字符串 → false
+  const pagination = await getPostsPage(c.var.db, pageParam(c), c.var.config.postsPerPage,
+    showFollowed &amp;&amp; user ? { followedBy: user.id } : {})
+  return c.render(
+    &lt;IndexPage user={user} pagination={pagination} showFollowed={showFollowed} {...extra} /&gt;,
+    { scripts: &lt;MarkdownPreviewScripts /&gt; },
+  )
+}
+
+main.get('/', (c) =&gt; renderIndex(c))
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/views/pages.tsx">
+<pre>
+&lt;ul class="nav nav-tabs"&gt;
+  &lt;li class="nav-item"&gt;&lt;a class={`nav-link${showFollowed ? '' : ' active'}`} href="/all"&gt;全部&lt;/a&gt;&lt;/li&gt;
+  {user &amp;&amp; (
+    &lt;li class="nav-item"&gt;&lt;a class={`nav-link${showFollowed ? ' active' : ''}`} href="/followed"&gt;关注的人&lt;/a&gt;&lt;/li&gt;
+  )}
+&lt;/ul&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么这里用普通 Cookie，而不是会话？</div>
+  <p>
+    “只看关注的人”只是一个显示偏好，被人改了也无所谓，不需要签名；而且它应该在退出登录后依然保留，所以不放进会话。
+    这体现了一个原则：<strong>只有需要防篡改或需要和登录状态绑定的数据，才放进签名会话</strong>。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>12d</b>：在首页显示关注的人的文章</div>
+
+<h2 id="self-follow">自己关注自己</h2>
+
+<p>
+  切换到“关注的人”之后你会发现：自己写的文章不见了。查询没有错 —— 你并没有关注自己。但大多数用户会希望在好友动态里也看到自己的文章。
+  原书的解决办法很简单：<strong>让每个用户在创建时就关注自己</strong>。
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export async function createUser(db: Db, input: NewUser, adminEmail?: string): Promise&lt;User&gt; {
+  // …确定角色、哈希密码…
+  return db.transaction(async (tx) =&gt; {
+    const [user] = await tx.insert(users).values({ /* … */ }).returning()
+    await tx.insert(follows).values({ followerId: user.id, followedId: user.id })   // 关注自己
+    return user
+  })
+}
+</pre>
+</div>
+
+<p>
+  两次插入包在一个<strong>事务</strong>里（第 5 章）：要么用户和“自己关注自己”都创建成功，要么都不创建，不会出现“有用户但没有自关注”的半成品。
+</p>
+
+<p>
+  那已经存在的老用户呢？原书写了一个 <code>add_self_follows()</code> 函数，循环所有用户逐个补上。和第 9 章补角色一样，SQL 可以一条语句搞定：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export async function addSelfFollows(db: Db) {
+  await db.execute(sql`
+    insert into ${follows} (follower_id, followed_id)
+    select id, id from ${users}
+    on conflict do nothing`)          // 已经关注过自己的，跳过
+}
+</pre>
+</div>
+
+<p>
+  <code>INSERT … SELECT</code> 把查询结果直接插入另一张表；<code>ON CONFLICT DO NOTHING</code> 让它可以反复执行。
+  原书提到，这种“修正数据的函数”会被放进部署脚本（第 17 章），每次部署都运行一次也不会出问题。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="自关注带来的好处与需要处理的副作用">
+  <rect class="bx-g" x="20" y="20" width="350" height="160" rx="10"/>
+  <text class="ttl on-g" x="36" y="44">✔ 好处</text>
+  <text class="sm" x="36" y="72">“关注的人”的时间线里有自己的文章</text>
+  <text class="sm" x="36" y="94">不需要改任何查询</text>
+  <text class="sm" x="36" y="116">第 14 章 API 的 /timeline 也自动包含自己</text>
+  <rect class="bx-a" x="390" y="20" width="350" height="160" rx="10"/>
+  <text class="ttl on-a" x="406" y="44">⚠ 副作用（原书也列出了）</text>
+  <text class="sm" x="406" y="72">粉丝数、关注数都多了 1 → 显示时减 1</text>
+  <text class="sm" x="406" y="94">粉丝列表里会出现自己 → 查询里用 ne() 排除</text>
+  <text class="sm" x="406" y="116">资料页“关注”按钮对自己不显示 → 判断 isSelf</text>
+  <text class="sm" x="406" y="138">测试里断言关注数时要算上自关注</text>
+</svg>
+<figcaption>图 12-8　一个小技巧换来了简洁的查询，代价是几处需要“减一”。这类权衡在真实项目里很常见</figcaption>
+</figure>
+
+<p>这些副作用我们在前面的代码里都已经处理了：<code>getProfileStats</code> 里的 <code>- 1</code>，粉丝列表查询里的 <code>ne(theirs, profile.id)</code>。对应的单元测试：</p>
+
+<div class="code" data-lang="ts" data-file="tests/user-model.test.ts">
+<pre>
+it('关注与取消关注', async () =&gt; {
+  const u1 = await createUser(db, { email: 'john@example.com', username: 'john', password: 'cat' })
+  const u2 = await createUser(db, { email: 'susan@example.org', username: 'susan', password: 'dog' })
+  expect(await isFollowing(db, u1.id, u2.id)).toBe(false)
+
+  await follow(db, u1.id, u2.id)
+  expect(await isFollowing(db, u1.id, u2.id)).toBe(true)
+  expect(await isFollowedBy(db, u2.id, u1.id)).toBe(true)
+  expect(await isFollowedBy(db, u1.id, u2.id)).toBe(false)
+  expect(await db.$count(follows, eq(follows.followerId, u1.id))).toBe(2)   // 自己 + susan
+
+  await unfollow(db, u1.id, u2.id)
+  expect(await db.$count(follows)).toBe(2)            // 只剩两条“自己关注自己”
+
+  await follow(db, u2.id, u1.id)
+  await db.delete(users).where(eq(users.id, u2.id))   // 删用户 → 相关关注被级联删除
+  expect(await db.$count(follows)).toBe(1)
+})
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>12e</b>：自己关注自己</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>多对多需要一张关联表，把它拆成两个一对多；复合主键防止重复关联。</li>
+  <li>关注是自引用的多对多：<code>follows</code> 的两个外键都指向 <code>users</code>。Drizzle 里关联表就是普通表，加一列关注时间毫不费力。</li>
+  <li><code>ON DELETE CASCADE</code> 相当于原书的 <code>delete-orphan</code>；<code>onConflictDoNothing</code> 让“关注”天然幂等。</li>
+  <li>粉丝列表和关注列表用 <code>follows</code> 的不同列筛选和 JOIN；同一逻辑写成返回处理函数的函数。</li>
+  <li>“关注的人的文章”= <code>posts JOIN follows ON followed_id = author_id WHERE follower_id = 我</code>，一条查询，可以直接分页。</li>
+  <li>显示偏好存普通 Cookie；自关注让时间线包含自己的文章，计数和列表要相应地排除自己。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在 shell 里造出图 12-6 的数据，分别执行“<code>posts JOIN follows</code> 不加 WHERE”和“加上 <code>follower_id = 2</code>”，对比结果。</li>
+    <li>实现“可能认识的人”：推荐我关注的人所关注的、但我还没关注的用户（提示：<code>follows</code> 表自己 JOIN 自己，需要用 Drizzle 的 <code>alias()</code> 给表起别名）。</li>
+    <li>把关注 / 取消关注改成用 <code>fetch()</code> 在后台提交、不刷新页面（提示：成功后只更新按钮文字和粉丝数）。</li>
+    <li>在首页的“关注的人”标签下，如果一篇文章都没有，显示一句“你关注的人还没有发过文章，去发现一些有趣的人吧”。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,851 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 3 章 · 模板 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="3">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 3 章</span>
+<h1>模板</h1>
+<p class="lede">
+  上一章把 HTML 直接写在处理函数的字符串里，既难维护又不安全。
+  这一章把“页面长什么样”搬到单独的 JSX 组件里：变量自动转义、布局可以复用、错误页面统一风格，
+  再加上静态文件和“按用户本地时区显示时间”。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解为什么要把业务逻辑和表现逻辑分开</li>
+    <li>用 Hono JSX 写页面组件：变量、条件、循环、组件复用</li>
+    <li>知道 JSX 如何防止 XSS，以及什么时候（极少）需要 <code>raw()</code></li>
+    <li>用 <code>jsxRenderer</code> 做一个所有页面共用的布局（相当于 Jinja2 的模板继承）</li>
+    <li>接入 Bootstrap，做出自定义的 404 / 500 错误页</li>
+    <li>提供静态文件，并在浏览器里把 UTC 时间换算成本地时间</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">为什么需要模板</h2>
+
+<p>
+  原书这样开篇：处理函数其实身兼两职。以用户注册为例，它既要<strong>把新用户写进数据库</strong>，
+  又要<strong>生成一个告诉用户“注册成功”的页面</strong>。前者叫<em>业务逻辑</em>，后者叫<em>表现逻辑</em>。
+  把两者混在一起，想象一下用字符串拼接出一个几百行的表格 —— 那会是维护的噩梦。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="业务逻辑与表现逻辑分离">
+  <rect class="bx-b" x="20" y="40" width="220" height="150" rx="12"/>
+  <text class="ttl on-b" x="130" y="64" text-anchor="middle">处理函数（业务逻辑）</text>
+  <text class="sm" x="36" y="92">· 读取请求参数</text>
+  <text class="sm" x="36" y="114">· 查询 / 修改数据库</text>
+  <text class="sm" x="36" y="136">· 决定渲染哪个页面</text>
+  <text class="sm" x="36" y="158">· 准备好数据</text>
+
+  <path class="ln-a" d="M242 115 H300" marker-end="url(#ar-a)"/>
+  <text class="mono on-a" x="271" y="106" text-anchor="middle">数据</text>
+
+  <rect class="bx-a" x="304" y="40" width="200" height="150" rx="12"/>
+  <text class="ttl on-a" x="404" y="64" text-anchor="middle">JSX 组件（表现逻辑）</text>
+  <text class="sm" x="320" y="92">· 页面结构和样式</text>
+  <text class="sm" x="320" y="114">· 把数据填进占位符</text>
+  <text class="sm" x="320" y="136">· 简单的条件和循环</text>
+  <text class="sm" x="320" y="158">· 自动转义特殊字符</text>
+
+  <path class="ln-g" d="M506 115 H564" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="535" y="106" text-anchor="middle">渲染</text>
+
+  <rect class="bx-g" x="568" y="60" width="172" height="110" rx="12"/>
+  <text class="ttl on-g" x="654" y="86" text-anchor="middle">HTML 字符串</text>
+  <text class="mono" x="654" y="112" text-anchor="middle">&lt;h1&gt;你好，Dave&lt;/h1&gt;</text>
+  <text class="sm" x="654" y="140" text-anchor="middle">作为响应发给浏览器</text>
+</svg>
+<figcaption>图 3-1　处理函数只准备数据，页面长什么样交给组件。这个“填数据生成最终文本”的过程叫<strong>渲染</strong></figcaption>
+</figure>
+
+<p>
+  Flask 用的模板引擎是 <strong>Jinja2</strong>：一种带 <code>{{ 变量 }}</code> 和 <code>{% 语句 %}</code> 的 HTML 文件。
+  Hono 提供了两种选择：
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128196;</span><h4><code>hono/html</code></h4><p>带自动转义的模板字符串 <code>html`…`</code>。轻量，适合很小的片段。上一章已经见过。</p></div>
+  <div class="card"><span class="ic">&#9883;</span><h4><code>hono/jsx</code>（本教程采用）</h4><p>用 JSX 写组件。有类型检查、编辑器补全，组件可以像函数一样组合。它<strong>只在服务器上运行</strong>，输出纯 HTML 字符串，不是 React。</p></div>
+</div>
+
+<h2 id="jsx">第一个 JSX 模板</h2>
+
+<p>
+  因为文件里要写 JSX，先把入口文件改名为 <code>src/index.tsx</code>（后缀 <code>.tsx</code> 表示“包含 JSX 的 TypeScript”），
+  并把 <code>package.json</code> 里 <code>dev</code> 脚本的路径也改一下。然后建一个 <code>src/views</code> 目录放组件：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Jinja2：templates/user.html</div>
+    <div class="code" data-lang="jinja"><pre>
+&lt;h1&gt;Hello, {{ name }}!&lt;/h1&gt;
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono JSX：src/views/user.tsx</div>
+    <div class="code" data-lang="ts"><pre>
+export function UserPage({ name }: { name: string }) {
+  return &lt;h1&gt;Hello, {name}!&lt;/h1&gt;
+}
+</pre></div>
+  </div>
+</div>
+
+<p>
+  JSX 组件就是一个<strong>函数</strong>：参数（叫 <em>props</em>）是要填进页面的数据，返回值是一段标记。
+  <code>{name}</code> 就相当于 Jinja2 的 <code>{{ name }}</code>。
+  <code>{ name }: { name: string }</code> 这段是 TypeScript：从参数对象里取出 <code>name</code>，并声明它是字符串。
+</p>
+
+<p>在处理函数里渲染它：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+from flask import render_template
+
+@app.route('/user/&lt;name&gt;')
+def user(name):
+    return render_template('user.html', name=name)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+import { UserPage } from './views/user.js'
+
+app.get('/user/:name', (c) =&gt; {
+  return c.html(&lt;UserPage name={c.req.param('name')} /&gt;)
+})
+</pre></div>
+  </div>
+</div>
+
+<p>
+  Flask 的 <code>render_template('user.html', name=name)</code> 用文件名找模板、用关键字参数传数据；
+  JSX 里组件是被 <code>import</code> 进来的函数，<code>name={…}</code> 就是传参。
+  文件名写错了？TypeScript 在编译期就会告诉你，而不是等到运行时抛 <code>TemplateNotFound</code>。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>3a</b>：用模板渲染 index 和 user 两个页面</div>
+
+<h2 id="vars">变量与“过滤器”</h2>
+
+<p>JSX 的花括号里可以放任何 JavaScript 表达式，所以 Jinja2 能写的变量形式在这里都有对应：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Jinja2</div>
+    <div class="code" data-lang="jinja"><pre>
+&lt;p&gt;{{ mydict['key'] }}&lt;/p&gt;
+&lt;p&gt;{{ mylist[3] }}&lt;/p&gt;
+&lt;p&gt;{{ mylist[myintvar] }}&lt;/p&gt;
+&lt;p&gt;{{ myobj.somemethod() }}&lt;/p&gt;
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">JSX</div>
+    <div class="code" data-lang="ts"><pre>
+&lt;p&gt;{mydict['key']}&lt;/p&gt;
+&lt;p&gt;{mylist[3]}&lt;/p&gt;
+&lt;p&gt;{mylist[myintvar]}&lt;/p&gt;
+&lt;p&gt;{myobj.somemethod()}&lt;/p&gt;
+</pre></div>
+  </div>
+</div>
+
+<p>
+  Jinja2 有一套<strong>过滤器</strong>，用竖线调用：<code>{{ name|capitalize }}</code>。
+  JSX 不需要专门的过滤器语法 —— 直接调用 JavaScript 的字符串方法或你自己写的函数就行：
+</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Jinja2 过滤器</th><th>JSX 里的写法</th></tr></thead>
+  <tbody>
+    <tr><td><code>{{ name|upper }}</code> / <code>lower</code></td><td><code>{name.toUpperCase()}</code> / <code>toLowerCase()</code></td></tr>
+    <tr><td><code>{{ name|trim }}</code></td><td><code>{name.trim()}</code></td></tr>
+    <tr><td><code>{{ name|capitalize }}</code></td><td><code>{capitalize(name)}</code>（自己写个两行的函数）</td></tr>
+    <tr><td><code>{{ html|striptags }}</code></td><td><code>{html.replace(/&lt;[^&gt;]*&gt;/g, '')}</code></td></tr>
+    <tr><td><code>{{ html|safe }}</code></td><td><code>{raw(html)}</code>（来自 <code>hono/html</code>，见下文）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>自动转义：模板最重要的安全功能</h3>
+
+<p>
+  原书特别强调了 <code>safe</code> 过滤器：Jinja2 默认会<strong>转义</strong>所有变量，
+  把 <code>&lt;</code> 变成 <code>&amp;lt;</code>，这样用户输入的 HTML 会被原样显示成文字，而不会被浏览器执行。
+  Hono JSX 也一样：<code>{变量}</code> 里的内容永远会被转义。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="自动转义如何阻止 XSS">
+  <rect class="bx-r" x="20" y="20" width="230" height="56" rx="8"/>
+  <text class="ttl on-r" x="135" y="42" text-anchor="middle">恶意用户把名字填成</text>
+  <text class="mono" x="135" y="62" text-anchor="middle">&lt;script&gt;偷Cookie()&lt;/script&gt;</text>
+
+  <path class="ln-r" d="M252 48 L310 48 L310 112 L350 112" marker-end="url(#ar-r)"/>
+  <path class="ln-g" d="M252 48 L310 48 L310 182 L350 182" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-r" x="354" y="86" width="386" height="52" rx="8"/>
+  <text class="ttl on-r" x="370" y="106">字符串拼接 / raw()</text>
+  <text class="mono" x="370" y="126">&lt;h1&gt;&lt;script&gt;偷Cookie()&lt;/script&gt;&lt;/h1&gt;</text>
+  <text class="sm on-r" x="730" y="106" text-anchor="end">浏览器执行了脚本 ✘</text>
+
+  <rect class="bx-g" x="354" y="156" width="386" height="52" rx="8"/>
+  <text class="ttl on-g" x="370" y="176">JSX 的 {name}</text>
+  <text class="mono" x="370" y="196">&lt;h1&gt;&amp;lt;script&amp;gt;偷Cookie()&amp;lt;/script&amp;gt;&lt;/h1&gt;</text>
+  <text class="sm on-g" x="730" y="176" text-anchor="end">只是显示成文字 ✔</text>
+</svg>
+<figcaption>图 3-2　转义把“代码”变回“文字”。这是防御 XSS（跨站脚本攻击）的第一道防线</figcaption>
+</figure>
+
+<p>有时候你确实需要输出一段 HTML（比如第 11 章里 Markdown 转换出的文章正文），这时用 <code>raw()</code>：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { raw } from 'hono/html'
+
+&lt;div class="post-body"&gt;{raw(post.bodyHtml)}&lt;/div&gt;
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 只对你确认安全的内容用 raw()</div>
+  <p>
+    原书原话：“永远不要对不可信的值使用 <code>safe</code> 过滤器，比如用户在表单里输入的文字。”
+    <code>raw()</code> 同理。第 11 章会看到正确的做法：用户写的 Markdown 先在服务器上转成 HTML，
+    再用白名单<em>清洗</em>一遍，清洗后的结果才能交给 <code>raw()</code>。
+  </p>
+</div>
+
+<h2 id="control">控制结构</h2>
+
+<p>Jinja2 有自己的 <code>{% if %}</code>、<code>{% for %}</code> 语法。JSX 没有发明新语法，用的全是普通 JavaScript：</p>
+
+<h3>条件</h3>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Jinja2</div>
+    <div class="code" data-lang="jinja"><pre>
+{% if user %}
+    Hello, {{ user }}!
+{% else %}
+    Hello, Stranger!
+{% endif %}
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">JSX</div>
+    <div class="code" data-lang="ts"><pre>
+{user ? &lt;&gt;Hello, {user}!&lt;/&gt; : &lt;&gt;Hello, Stranger!&lt;/&gt;}
+
+{/* 只有“如果”没有“否则”时，用 &amp;&amp; 更简洁 */}
+{isAdmin &amp;&amp; &lt;a href="/admin"&gt;管理后台&lt;/a&gt;}
+</pre></div>
+  </div>
+</div>
+
+<p><code>&lt;&gt;…&lt;/&gt;</code> 叫 <em>Fragment</em>（片段），用来把几段内容包成一个整体，本身不会输出任何标签。</p>
+
+<h3>循环</h3>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Jinja2</div>
+    <div class="code" data-lang="jinja"><pre>
+&lt;ul&gt;
+  {% for comment in comments %}
+    &lt;li&gt;{{ comment }}&lt;/li&gt;
+  {% endfor %}
+&lt;/ul&gt;
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">JSX</div>
+    <div class="code" data-lang="ts"><pre>
+&lt;ul&gt;
+  {comments.map((comment) =&gt; (
+    &lt;li&gt;{comment}&lt;/li&gt;
+  ))}
+&lt;/ul&gt;
+</pre></div>
+  </div>
+</div>
+
+<h3>宏、导入、包含 → 组件</h3>
+
+<p>
+  Jinja2 用<strong>宏</strong>（macro）定义可复用的模板片段，用 <code>import</code> 从别的文件引入宏，用 <code>include</code> 插入另一个文件。
+  在 JSX 里，这三件事都是同一个东西 —— <strong>组件</strong>：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Jinja2：macros.html + 使用</div>
+    <div class="code" data-lang="jinja"><pre>
+{% macro render_comment(comment) %}
+  &lt;li&gt;{{ comment }}&lt;/li&gt;
+{% endmacro %}
+
+{% import 'macros.html' as macros %}
+&lt;ul&gt;
+  {% for comment in comments %}
+    {{ macros.render_comment(comment) }}
+  {% endfor %}
+&lt;/ul&gt;
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">JSX：一个组件 + import</div>
+    <div class="code" data-lang="ts"><pre>
+// src/views/components.tsx
+export function Comment({ text }: { text: string }) {
+  return &lt;li&gt;{text}&lt;/li&gt;
+}
+
+// 使用的地方
+import { Comment } from './components.js'
+&lt;ul&gt;
+  {comments.map((c) =&gt; &lt;Comment text={c} /&gt;)}
+&lt;/ul&gt;
+</pre></div>
+  </div>
+</div>
+
+<h2 id="layout">模板继承 → 布局组件</h2>
+
+<p>
+  Jinja2 最强大的复用方式是<strong>模板继承</strong>：基础模板 <code>base.html</code> 定义若干个
+  <code>{% block %}</code>，子模板用 <code>{% extends %}</code> 继承它，再填充这些块。
+  JSX 没有继承，但用<strong>组合</strong>能做到同样的事：布局组件接收 <code>children</code>（子内容）和其他 props：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Jinja2：继承</div>
+    <div class="code" data-lang="jinja"><pre>
+{# base.html #}
+&lt;html&gt;
+&lt;head&gt;
+  &lt;title&gt;{% block title %}{% endblock %} - My App&lt;/title&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  {% block body %}{% endblock %}
+&lt;/body&gt;
+&lt;/html&gt;
+
+{# index.html #}
+{% extends "base.html" %}
+{% block title %}Index{% endblock %}
+{% block body %}
+  &lt;h1&gt;Hello, World!&lt;/h1&gt;
+{% endblock %}
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">JSX：组合</div>
+    <div class="code" data-lang="ts"><pre>
+import type { PropsWithChildren } from 'hono/jsx'
+
+function Base({ title, children }:
+  PropsWithChildren&lt;{ title: string }&gt;) {
+  return (
+    &lt;html&gt;
+      &lt;head&gt;&lt;title&gt;{title} - My App&lt;/title&gt;&lt;/head&gt;
+      &lt;body&gt;{children}&lt;/body&gt;
+    &lt;/html&gt;
+  )
+}
+
+function Index() {
+  return (
+    &lt;Base title="Index"&gt;
+      &lt;h1&gt;Hello, World!&lt;/h1&gt;
+    &lt;/Base&gt;
+  )
+}
+</pre></div>
+  </div>
+</div>
+
+<p>
+  <code>{% block title %}</code> 变成了 <code>title</code> 属性，<code>{% block body %}</code> 变成了 <code>children</code>。
+  一个布局需要几个“可填充的位置”，就定义几个 props。Jinja2 的 <code>{{ super() }}</code>（保留父模板的内容再追加）在这里也很自然：
+  布局里先写固定内容，再输出 props 传进来的额外内容就行。
+</p>
+
+<h3>用 jsxRenderer 让每个页面自动套上布局</h3>
+
+<p>
+  每个处理函数都写 <code>&lt;Base title="…"&gt;…&lt;/Base&gt;</code> 很啰嗦。
+  Hono 提供了 <code>jsxRenderer</code> 中间件：注册一次布局，之后所有处理函数用 <code>c.render()</code> 只渲染“页面内容”部分，布局会自动包在外面。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="jsxRenderer 布局与页面内容的嵌套关系">
+  <rect class="bx-a" x="20" y="20" width="440" height="230" rx="12"/>
+  <text class="ttl on-a" x="36" y="44">布局（jsxRenderer 注册一次）</text>
+  <rect class="bx" x="36" y="56" width="408" height="30" rx="6"/>
+  <text class="mono" x="48" y="76">&lt;head&gt; 标题 · Bootstrap CSS · favicon</text>
+  <rect class="bx" x="36" y="94" width="408" height="30" rx="6"/>
+  <text class="mono" x="48" y="114">&lt;nav&gt; 导航栏：首页 · 登录 / 用户菜单</text>
+  <rect class="bx" x="36" y="132" width="408" height="24" rx="6"/>
+  <text class="sm" x="48" y="149">Flash 消息（第 4 章）</text>
+  <rect class="bx-g" x="36" y="162" width="408" height="48" rx="6"/>
+  <text class="ttl on-g" x="240" y="184" text-anchor="middle">{children}</text>
+  <text class="sm" x="240" y="200" text-anchor="middle">每个页面各自的内容插在这里</text>
+  <rect class="bx" x="36" y="216" width="408" height="24" rx="6"/>
+  <text class="sm" x="48" y="233">&lt;script&gt; Bootstrap JS · 本地化时间</text>
+
+  <path class="ln-g" d="M560 70 L470 180" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M560 140 L470 186" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M560 210 L470 192" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="562" y="48" width="178" height="44" rx="8"/>
+  <text class="mono" x="651" y="75" text-anchor="middle">c.render(&lt;IndexPage/&gt;)</text>
+  <rect class="bx-g" x="562" y="118" width="178" height="44" rx="8"/>
+  <text class="mono" x="651" y="145" text-anchor="middle">c.render(&lt;UserPage/&gt;)</text>
+  <rect class="bx-g" x="562" y="188" width="178" height="44" rx="8"/>
+  <text class="mono" x="651" y="215" text-anchor="middle">c.render(&lt;ErrorPage/&gt;)</text>
+</svg>
+<figcaption>图 3-3　布局只写一次；每个处理函数只关心自己那块内容。这正是 Jinja2 里 <code>base.html</code> + <code>{% block page_content %}</code> 的作用</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/views/layout.tsx">
+<pre>
+import { jsxRenderer } from 'hono/jsx-renderer'
+
+// 告诉 TypeScript：c.render() 的第二个参数可以带一个 title
+declare module 'hono' {
+  interface ContextRenderer {
+    (content: string | Promise&lt;string&gt;, props?: { title?: string }): Response | Promise&lt;Response&gt;
+  }
+}
+
+export const renderer = jsxRenderer(({ children, title }) =&gt; {
+  return (
+    &lt;html lang="zh-CN"&gt;
+      &lt;head&gt;
+        &lt;meta charset="utf-8" /&gt;
+        &lt;meta name="viewport" content="width=device-width, initial-scale=1" /&gt;
+        &lt;title&gt;{title ? `Flasky - ${title}` : 'Flasky'}&lt;/title&gt;
+      &lt;/head&gt;
+      &lt;body&gt;
+        &lt;main class="container"&gt;{children}&lt;/main&gt;
+      &lt;/body&gt;
+    &lt;/html&gt;
+  )
+}, { docType: true })   // 自动在最前面加上 &lt;!DOCTYPE html&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+import { renderer } from './views/layout.js'
+
+app.use(renderer)   // 注册成中间件
+
+app.get('/user/:name', (c) =&gt; {
+  const name = c.req.param('name')
+  return c.render(&lt;h1&gt;你好，{name}！&lt;/h1&gt;, { title: name })
+})
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 那段 declare module 是什么</div>
+  <p>
+    <code>c.render()</code> 是 Hono 定义的方法，它默认不知道你的布局要接收 <code>title</code>。
+    <code>declare module 'hono'</code> 这几行是在“扩充”Hono 的类型声明，告诉编译器：<code>c.render</code> 的第二个参数可以带 <code>title</code>。
+    这只影响类型检查，不产生任何运行时代码。以后布局要加新参数（比如第 11 章要额外插入脚本），就在这里加一个字段。
+  </p>
+</div>
+
+<h2 id="bootstrap">接入 Bootstrap</h2>
+
+<p>
+  <a href="https://getbootstrap.com">Bootstrap</a> 是一个 CSS 框架，提供现成的按钮、导航栏、表单、提示框样式。
+  原书用 Flask-Bootstrap 扩展来接入它。其实 Bootstrap 纯粹是浏览器端的东西，服务器只需要在 HTML 里引用它的 CSS 和 JS 文件 ——
+  在布局组件里加两行就够了，不需要任何扩展：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/layout.tsx">
+<pre>
+&lt;head&gt;
+  …
+  &lt;link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" /&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;nav class="navbar navbar-expand-md navbar-dark bg-dark mb-4"&gt;
+    &lt;div class="container"&gt;
+      &lt;a class="navbar-brand" href="/"&gt;Flasky&lt;/a&gt;
+      &lt;button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav"&gt;
+        &lt;span class="navbar-toggler-icon"&gt;&lt;/span&gt;
+      &lt;/button&gt;
+      &lt;div class="collapse navbar-collapse" id="nav"&gt;
+        &lt;ul class="navbar-nav me-auto"&gt;
+          &lt;li class="nav-item"&gt;&lt;a class="nav-link" href="/"&gt;首页&lt;/a&gt;&lt;/li&gt;
+        &lt;/ul&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/nav&gt;
+
+  &lt;main class="container"&gt;{children}&lt;/main&gt;
+
+  &lt;script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"&gt;&lt;/script&gt;
+&lt;/body&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; JSX 里写 class 还是 className？</div>
+  <p>
+    React 要求写 <code>className</code>，Hono JSX 两种都支持。因为最终输出的是 HTML，本教程直接写 <code>class</code>，
+    这样从 Bootstrap 文档里复制过来的代码几乎不用改。另一个区别：JSX 里标签必须闭合，<code>&lt;meta&gt;</code>、<code>&lt;img&gt;</code> 要写成 <code>&lt;meta /&gt;</code>、<code>&lt;img /&gt;</code>。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>3b</b>：用 Flask-Bootstrap 的模板加上导航栏</div>
+
+<h2 id="errors">自定义错误页面</h2>
+
+<p>
+  访问一个不存在的地址时，默认的 404 页面只有一行字，和网站其他页面风格完全不搭。
+  原书用 <code>@app.errorhandler(404)</code> 和 <code>@app.errorhandler(500)</code> 注册自定义错误页。Hono 里对应的是 <code>app.notFound()</code> 和 <code>app.onError()</code>：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+@app.errorhandler(404)
+def page_not_found(e):
+    return render_template('404.html'), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    return render_template('500.html'), 500
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+app.notFound((c) =&gt; {
+  c.status(404)
+  return c.render(&lt;ErrorPage status={404} /&gt;)
+})
+
+app.onError((err, c) =&gt; {
+  console.error(err)          // 调用栈只写进日志
+  c.status(500)
+  return c.render(&lt;ErrorPage status={500} /&gt;)
+})
+</pre></div>
+  </div>
+</div>
+
+<p>错误页本身就是个普通组件，因为用了 <code>c.render()</code>，它自动套上了布局，风格和其他页面一致：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/pages.tsx">
+<pre>
+const ERROR_TITLES: Record&lt;number, string&gt; = { 403: '禁止访问', 404: '页面不存在', 500: '服务器内部错误' }
+
+export function ErrorPage({ status }: { status: number }) {
+  return (
+    &lt;div class="page-header"&gt;
+      &lt;h1&gt;{ERROR_TITLES[status] ?? '出错了'}&lt;/h1&gt;
+      &lt;p class="text-muted"&gt;HTTP {status}&lt;/p&gt;
+    &lt;/div&gt;
+  )
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="Hono 中请求走向错误处理的路径">
+  <rect class="bx" x="20" y="96" width="120" height="48" rx="8"/>
+  <text class="ttl" x="80" y="125" text-anchor="middle">请求</text>
+  <path class="ln" d="M142 120 H192" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="196" y="86" width="140" height="68" rx="10"/>
+  <text class="ttl on-a" x="266" y="114" text-anchor="middle">路由匹配</text>
+  <text class="sm" x="266" y="134" text-anchor="middle">+ 中间件</text>
+
+  <path class="ln-g" d="M338 104 L420 40" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="360" y="62">匹配到</text>
+  <rect class="bx-g" x="424" y="16" width="150" height="48" rx="8"/>
+  <text class="ttl on-g" x="499" y="45" text-anchor="middle">处理函数</text>
+  <path class="ln-g" d="M576 40 H640" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="690" y="45" text-anchor="middle">正常响应</text>
+
+  <path class="ln-b" d="M338 120 H420" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="372" y="112">没匹配</text>
+  <rect class="bx-b" x="424" y="96" width="150" height="48" rx="8"/>
+  <text class="ttl on-b" x="499" y="125" text-anchor="middle">app.notFound</text>
+  <path class="ln-b" d="M576 120 H640" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="690" y="125" text-anchor="middle">404 页面</text>
+
+  <path class="ln-r" d="M499 66 L499 94" stroke-dasharray="4 3"/>
+  <path class="ln-r" d="M338 138 L420 198" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="330" y="180">抛出异常</text>
+  <text class="sm on-r" x="520" y="84">处理函数里 throw</text>
+  <rect class="bx-r" x="424" y="176" width="150" height="48" rx="8"/>
+  <text class="ttl on-r" x="499" y="205" text-anchor="middle">app.onError</text>
+  <path class="ln-r" d="M576 200 H640" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="690" y="196" text-anchor="middle">500 页面</text>
+  <text class="sm" x="690" y="212" text-anchor="middle">（或异常自带的状态码）</text>
+</svg>
+<figcaption>图 3-4　没有匹配的路由 → <code>notFound</code>；任何地方抛出的异常 → <code>onError</code></figcaption>
+</figure>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>3c</b>：自定义 404 / 500 错误页，以及用模板继承精简 user.html</div>
+
+<h2 id="links">链接</h2>
+
+<p>
+  原书介绍了 <code>url_for()</code>：根据视图函数名生成 URL，而不是在模板里写死路径。
+  这样以后调整路由，模板里的链接会自动跟着变。例如 <code>url_for('user', name='john', page=2)</code> 返回 <code>/user/john?page=2</code>。
+</p>
+<p>
+  Hono 没有“给路由起名字”的机制，所以也没有 <code>url_for()</code>。日常开发中直接写路径就好，
+  多个地方用到同一个带参数的地址时，写个小函数集中管理：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// 需要拼接查询字符串时，用标准的 URLSearchParams，它会正确转义特殊字符
+const userUrl = (name: string, page?: number) =&gt;
+  `/user/${encodeURIComponent(name)}` + (page ? `?${new URLSearchParams({ page: String(page) })}` : '')
+
+&lt;a href={userUrl('john', 2)}&gt;john 的第 2 页&lt;/a&gt;   // → /user/john?page=2
+</pre>
+</div>
+
+<p>
+  原书还提到 <code>_external=True</code>：生成带协议和域名的<em>完整</em>网址（<code>http://localhost:5000/user/john</code>）。
+  页面内的链接用相对路径就够了，但发邮件时必须用完整网址（第 8 章）。标准的 <code>URL</code> 类可以做到：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+new URL('/user/john', c.req.url).href   // → 'http://localhost:3000/user/john'
+</pre>
+</div>
+
+<h2 id="static">静态文件</h2>
+
+<p>
+  除了动态生成的 HTML，网站还有图片、CSS、JavaScript 这类原样发给浏览器的<strong>静态文件</strong>。
+  Flask 自动提供一个 <code>/static/&lt;filename&gt;</code> 路由；Hono 需要显式注册 <code>serveStatic</code> 中间件：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+import { serveStatic } from '@hono/node-server/serve-static'
+
+// 请求 /static/styles.css → 读取 ./static/styles.css
+app.use('/static/*', serveStatic({ root: './' }))
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="静态文件请求与动态请求走不同的路径">
+  <rect class="bx" x="20" y="20" width="200" height="40" rx="8"/>
+  <text class="mono" x="120" y="45" text-anchor="middle">GET /static/styles.css</text>
+  <rect class="bx" x="20" y="106" width="200" height="40" rx="8"/>
+  <text class="mono" x="120" y="131" text-anchor="middle">GET /user/john</text>
+  <path class="ln-b" d="M222 40 H320" marker-end="url(#ar-b)"/>
+  <path class="ln-a" d="M222 126 H320" marker-end="url(#ar-a)"/>
+  <rect class="bx-b" x="324" y="16" width="190" height="48" rx="8"/>
+  <text class="ttl on-b" x="419" y="37" text-anchor="middle">serveStatic 中间件</text>
+  <text class="sm" x="419" y="54" text-anchor="middle">路径以 /static/ 开头</text>
+  <rect class="bx-a" x="324" y="102" width="190" height="48" rx="8"/>
+  <text class="ttl on-a" x="419" y="123" text-anchor="middle">路由 + 处理函数</text>
+  <text class="sm" x="419" y="140" text-anchor="middle">其余请求</text>
+  <path class="ln-b" d="M516 40 H600" marker-end="url(#ar-b)"/>
+  <path class="ln-a" d="M516 126 H600" marker-end="url(#ar-a)"/>
+  <rect class="bx-d" x="604" y="16" width="136" height="48" rx="8"/>
+  <text class="sm" x="672" y="37" text-anchor="middle">读磁盘文件</text>
+  <text class="mono" x="672" y="54" text-anchor="middle">./static/…</text>
+  <rect class="bx-d" x="604" y="102" width="136" height="48" rx="8"/>
+  <text class="sm" x="672" y="123" text-anchor="middle">渲染 JSX</text>
+  <text class="sm" x="672" y="140" text-anchor="middle">生成 HTML</text>
+</svg>
+<figcaption>图 3-5　静态文件中间件拦下 <code>/static/*</code> 的请求，直接返回文件内容；上线后这部分通常交给 Nginx 或 CDN（第 17 章）</figcaption>
+</figure>
+
+<p>在项目根目录建一个 <code>static/</code> 文件夹，放进 <code>favicon.ico</code> 和 <code>styles.css</code>，然后在布局里引用它们：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/layout.tsx">
+<pre>
+&lt;link rel="icon" href="/static/favicon.ico" /&gt;
+&lt;link rel="stylesheet" href="/static/styles.css" /&gt;
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>3d</b>：添加 favicon</div>
+
+<h2 id="moment">把时间换算成用户的本地时间</h2>
+
+<p>
+  用户分布在世界各地。服务器需要一个统一的时间标准，所以通常存储和处理的都是 <strong>UTC</strong>（协调世界时）。
+  但用户希望看到的是自己所在时区、自己习惯格式的时间。
+</p>
+<p>
+  原书的办法很聪明：服务器只输出 UTC 时间，由<strong>浏览器</strong>用 JavaScript 换算成本地时间 ——
+  因为只有浏览器知道用户电脑的时区和语言设置。原书用的是 Flask-Moment 扩展（封装了 Moment.js 库）。
+  如今浏览器内置的 <code>Intl</code> API 已经能完成全部工作，一个库都不用装。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="服务器输出 UTC 时间，由各地浏览器换算为本地时间">
+  <rect class="bx-a" x="20" y="80" width="230" height="90" rx="12"/>
+  <text class="ttl on-a" x="135" y="106" text-anchor="middle">服务器（只认 UTC）</text>
+  <text class="mono" x="135" y="132" text-anchor="middle">&lt;time datetime=</text>
+  <text class="mono" x="135" y="150" text-anchor="middle">"2025-03-06T02:27:46Z"&gt;</text>
+
+  <path class="ln" d="M252 110 L380 44" marker-end="url(#ar)"/>
+  <path class="ln" d="M252 125 H380" marker-end="url(#ar)"/>
+  <path class="ln" d="M252 140 L380 206" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="384" y="20" width="356" height="52" rx="8"/>
+  <text class="ttl on-b" x="400" y="42">北京的浏览器（UTC+8, zh-CN）</text>
+  <text class="mono" x="400" y="62">2025年3月6日 10:27 · 3 分钟前</text>
+  <rect class="bx-g" x="384" y="100" width="356" height="52" rx="8"/>
+  <text class="ttl on-g" x="400" y="122">伦敦的浏览器（UTC+0, en-GB）</text>
+  <text class="mono" x="400" y="142">6 March 2025 at 02:27 · 3 minutes ago</text>
+  <rect class="bx-p" x="384" y="180" width="356" height="52" rx="8"/>
+  <text class="ttl on-p" x="400" y="202">波特兰的浏览器（UTC−8, en-US）</text>
+  <text class="mono" x="400" y="222">March 5, 2025 at 6:27 PM · 3 minutes ago</text>
+</svg>
+<figcaption>图 3-6　同一个 UTC 时间点，由各地的浏览器按各自的时区和语言显示</figcaption>
+</figure>
+
+<p>第一步，服务器端组件只负责把时间以标准格式输出，并标记要用哪种显示方式：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+export function Moment({ ts, format = 'fromNow' }: { ts: Date; format?: 'fromNow' | 'L' | 'LLL' }) {
+  const iso = ts.toISOString()   // '2025-03-06T02:27:46.000Z'，末尾的 Z 表示 UTC
+  // 先输出 UTC 时间作为兜底（浏览器禁用 JS 时也能看到），再由脚本替换成本地时间
+  return &lt;time datetime={iso} data-format={format}&gt;{iso}&lt;/time&gt;
+}
+</pre>
+</div>
+
+<p>第二步，一小段浏览器脚本找到所有 <code>&lt;time data-format&gt;</code>，把内容换成本地时间：</p>
+
+<div class="code" data-lang="js" data-file="src/views/moment.ts（放进布局的 &lt;script&gt;）">
+<pre>
+(function () {
+  var rtf = new Intl.RelativeTimeFormat(navigator.language, { numeric: 'auto' });
+  var units = [['year', 31536000], ['month', 2592000], ['week', 604800],
+               ['day', 86400], ['hour', 3600], ['minute', 60], ['second', 1]];
+
+  function fromNow(date) {                    // 相当于 moment(t).fromNow()
+    var diff = (date.getTime() - Date.now()) / 1000;
+    for (var i = 0; i &lt; units.length; i++) {
+      var sec = units[i][1];
+      if (Math.abs(diff) &gt;= sec || units[i][0] === 'second')
+        return rtf.format(Math.round(diff / sec), units[i][0]);
+    }
+  }
+
+  var styles = { L: { dateStyle: 'short' }, LLL: { dateStyle: 'long', timeStyle: 'short' } };
+
+  function render() {
+    document.querySelectorAll('time[data-format]').forEach(function (el) {
+      var date = new Date(el.getAttribute('datetime'));
+      var f = el.getAttribute('data-format');
+      el.textContent = f === 'fromNow' ? fromNow(date) : date.toLocaleString(undefined, styles[f]);
+    });
+  }
+
+  render();
+  setInterval(render, 60 * 1000);   // 相当于 fromNow(refresh=True)：“3 分钟前”会自己变成“4 分钟前”
+})();
+</pre>
+</div>
+
+<p>把这段脚本作为字符串导出，在布局底部输出。注意要用 <code>raw()</code>，否则 JSX 会把脚本里的 <code>&lt;</code>、<code>&amp;</code> 转义掉：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/layout.tsx">
+<pre>
+import { raw } from 'hono/html'
+import { momentScript } from './moment.js'
+
+// …布局的 &lt;body&gt; 末尾：
+&lt;script&gt;{raw(momentScript)}&lt;/script&gt;
+</pre>
+</div>
+
+<p>最后在首页上试试，对应原书的例 3-13 和 3-14：</p>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+app.get('/', (c) =&gt; {
+  const now = new Date()     // JavaScript 的 Date 内部就是 UTC 时间戳
+  return c.render(
+    &lt;&gt;
+      &lt;h1&gt;Hello World!&lt;/h1&gt;
+      &lt;p&gt;本地日期和时间是 &lt;Moment ts={now} format="LLL" /&gt;。&lt;/p&gt;
+      &lt;p&gt;那是 &lt;Moment ts={now} /&gt;。&lt;/p&gt;
+    &lt;/&gt;,
+  )
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 这里用 raw() 是安全的</div>
+  <p>
+    <code>momentScript</code> 是我们自己写死在代码里的字符串，不包含任何用户输入，所以可以原样输出。
+    判断能否使用 <code>raw()</code> 的标准永远是：<em>这段内容里，有没有可能混进别人控制的文字？</em>
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>3e</b>：用 Flask-Moment 本地化日期和时间</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>处理函数负责业务逻辑、准备数据；JSX 组件负责表现逻辑。组件就是返回标记的函数，props 是它的参数。</li>
+  <li><code>{变量}</code> 自动转义，能挡住 XSS；<code>raw()</code> 相当于 Jinja2 的 <code>|safe</code>，只能用于可信内容。</li>
+  <li>Jinja2 的 <code>if</code>/<code>for</code> 在 JSX 里是 <code>? :</code>、<code>&amp;&amp;</code> 和 <code>.map()</code>；宏、导入、包含统一成组件。</li>
+  <li>模板继承在 JSX 里变成组合：布局组件接收 <code>children</code>；<code>jsxRenderer</code> + <code>c.render()</code> 让所有页面自动套上布局。</li>
+  <li><code>app.notFound()</code> 和 <code>app.onError()</code> 定义自定义错误页；调用栈只写日志，不回给浏览器。</li>
+  <li>静态文件用 <code>serveStatic</code>；时间在服务器上统一用 UTC，由浏览器的 <code>Intl</code> API 换算成本地时间。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>写一个 <code>Base</code> 布局，让它除了 <code>title</code> 之外再接收一个可选的 <code>head</code> prop（用于某些页面追加额外的 <code>&lt;style&gt;</code>），体会“用 props 代替 block”的做法。</li>
+    <li>给 403 错误也做一个页面：新增路由 <code>/secret</code>，里面 <code>throw new HTTPException(403)</code>，并在 <code>onError</code> 里根据 <code>err.status</code> 渲染不同的标题。</li>
+    <li>在首页显示一个 3 天前的时间（<code>new Date(Date.now() - 3 * 86400_000)</code>），分别用 <code>fromNow</code> 和 <code>L</code> 格式。然后把电脑的系统语言或时区改一下，刷新页面观察变化。</li>
+    <li>故意在一个组件里不用 <code>raw()</code> 输出 <code>'&lt;b&gt;粗体&lt;/b&gt;'</code>，再用 <code>raw()</code> 输出一次，查看网页源代码里两者的区别。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,688 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 10 章 · 用户资料 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="10">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 10 章</span>
+<h1>用户资料</h1>
+<p class="lede">
+  每个社交网站都会给用户一个资料页，展示这个人在网站上的活动。用户也会把自己资料页的链接分享出去，所以地址要短、要好记。
+  这一章做出资料页、两个资料编辑器（用户自己的、管理员的），再加上 Gravatar 头像。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>给用户表加上姓名、所在地、自我介绍、注册时间、最后访问时间</li>
+    <li>理解“列默认值”的三种写法，以及为什么最后访问时间要限制写入频率</li>
+    <li>做出 <code>/user/:username</code> 资料页，找不到用户时返回 404</li>
+    <li>实现用户级和管理员级两个资料编辑器，处理好“下拉框的值是字符串”和“改了才查重”</li>
+    <li>用 Gravatar 生成头像，并把邮箱的 MD5 哈希缓存进数据库</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="info">资料信息</h2>
+
+<p>原书给 <code>User</code> 模型加了五个新字段（例 10-1）：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+name = db.Column(db.String(64))
+location = db.Column(db.String(64))
+about_me = db.Column(db.Text())
+member_since = db.Column(db.DateTime(),
+                         default=datetime.utcnow)
+last_seen = db.Column(db.DateTime(),
+                      default=datetime.utcnow)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+name: varchar('name', { length: 64 }),
+location: varchar('location', { length: 64 }),
+aboutMe: text('about_me'),
+memberSince: timestamp('member_since', { withTimezone: true })
+  .notNull().defaultNow(),
+lastSeen: timestamp('last_seen', { withTimezone: true })
+  .notNull().defaultNow(),
+</pre></div>
+  </div>
+</div>
+
+<ul>
+  <li><code>varchar</code> 有长度上限，<code>text</code> 没有 —— 自我介绍可能很长，所以用 <code>text</code>（原书用 <code>db.Text</code>，道理一样）。</li>
+  <li><code>timestamp(…, { withTimezone: true })</code> 对应 PostgreSQL 的 <code>timestamptz</code>：存储时统一换算成 UTC，读出来是 JavaScript 的 <code>Date</code>。第 3 章说过，服务器端一律用 UTC。</li>
+</ul>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：列默认值的三种写法</div>
+  <p>
+    原书特别解释了 <code>default=datetime.utcnow</code> 后面<strong>没有括号</strong>：传的是函数本身，SQLAlchemy 每次插入时调用它。
+    Drizzle 里有三种选择：
+  </p>
+  <ul>
+    <li><code>.default(值)</code>：固定值，写进数据库的表定义里，如 <code>.default(false)</code>。</li>
+    <li><code>.defaultNow()</code>：数据库端的 <code>DEFAULT now()</code>，由数据库在插入时取当前时间。最推荐 —— 即使有人绕过应用直接写 SQL，也能得到正确的默认值。</li>
+    <li><code>.$defaultFn(() =&gt; …)</code>：由 Drizzle 在应用端每次插入时调用函数计算，最接近原书的写法，适合生成 UUID 这类数据库不方便算的值。</li>
+  </ul>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npm run db:generate -- --name user_information
+npm run db:migrate
+</pre>
+</div>
+
+<h3>刷新“最后访问时间”</h3>
+
+<p>
+  <code>memberSince</code> 靠默认值就够了，但 <code>lastSeen</code> 需要在用户每次访问时刷新。原书写了一个 <code>ping()</code> 方法，
+  在第 8 章那个每个请求都会运行的 <code>before_app_request</code> 钩子里调用它。我们对应地放进 <code>confirmedGuard</code> 中间件：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export async function ping(db: Db, userId: number) {
+  await db.update(users).set({ lastSeen: new Date() }).where(eq(users.id, userId))
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/lib/auth.ts">
+<pre>
+export const confirmedGuard = createMiddleware&lt;AppEnv&gt;(async (c, next) =&gt; {
+  const user = c.var.user
+  if (user) {
+    // 刷新最后访问时间，但一分钟内最多写一次数据库
+    if (Date.now() - user.lastSeen.getTime() &gt; 60_000) await ping(c.var.db, user.id)
+
+    const path = c.req.path
+    const exempt = path.startsWith('/auth/') || path.startsWith('/static/') || path.startsWith('/api/')
+    if (!user.confirmed &amp;&amp; !exempt) return c.redirect('/auth/unconfirmed')
+  }
+  await next()
+})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="每个请求都写库与限频写库的对比">
+  <text class="ttl on-r" x="20" y="22">原书：每个请求都 UPDATE 一次</text>
+  <line class="ln" x1="20" y1="54" x2="740" y2="54"/>
+  <circle class="dot-r" cx="60" cy="54" r="7"/><circle class="dot-r" cx="90" cy="54" r="7"/>
+  <circle class="dot-r" cx="110" cy="54" r="7"/><circle class="dot-r" cx="170" cy="54" r="7"/>
+  <circle class="dot-r" cx="200" cy="54" r="7"/><circle class="dot-r" cx="215" cy="54" r="7"/>
+  <circle class="dot-r" cx="300" cy="54" r="7"/><circle class="dot-r" cx="330" cy="54" r="7"/>
+  <circle class="dot-r" cx="420" cy="54" r="7"/><circle class="dot-r" cx="450" cy="54" r="7"/>
+  <circle class="dot-r" cx="470" cy="54" r="7"/><circle class="dot-r" cx="560" cy="54" r="7"/>
+  <circle class="dot-r" cx="620" cy="54" r="7"/><circle class="dot-r" cx="700" cy="54" r="7"/>
+  <text class="sm on-r" x="20" y="84">一个用户浏览 14 个页面 = 14 次写入；页面里的图片、样式也走中间件时更多</text>
+
+  <text class="ttl on-g" x="20" y="124">本教程：距离上次超过 60 秒才写</text>
+  <line class="ln" x1="20" y1="156" x2="740" y2="156"/>
+  <circle class="dot" cx="60" cy="156" r="5"/><circle class="dot" cx="90" cy="156" r="5"/>
+  <circle class="dot" cx="110" cy="156" r="5"/><circle class="dot" cx="170" cy="156" r="5"/>
+  <circle class="dot" cx="200" cy="156" r="5"/><circle class="dot" cx="215" cy="156" r="5"/>
+  <circle class="dot" cx="300" cy="156" r="5"/><circle class="dot" cx="330" cy="156" r="5"/>
+  <circle class="dot" cx="420" cy="156" r="5"/><circle class="dot" cx="450" cy="156" r="5"/>
+  <circle class="dot" cx="470" cy="156" r="5"/><circle class="dot" cx="560" cy="156" r="5"/>
+  <circle class="dot" cx="620" cy="156" r="5"/><circle class="dot" cx="700" cy="156" r="5"/>
+  <circle class="dot-g" cx="60" cy="156" r="8"/><circle class="dot-g" cx="300" cy="156" r="8"/>
+  <circle class="dot-g" cx="560" cy="156" r="8"/>
+  <text class="sm on-g" x="20" y="186">同样的 14 个请求只写 3 次；“最后访问：3 分钟前”这种显示，精确到分钟就足够了</text>
+</svg>
+<figcaption>图 10-1　“每个请求都写一次数据库”在用户多起来之后会成为负担。<code>c.var.user.lastSeen</code> 本来就查出来了，判断它几乎不花成本</figcaption>
+</figure>
+
+<h2 id="page">资料页</h2>
+
+<p>资料页的路由没什么新东西（原书例 10-4）：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+@main.route('/user/&lt;username&gt;')
+def user(username):
+    user = User.query.filter_by(
+        username=username).first_or_404()
+    return render_template('user.html', user=user)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+main.get('/user/:username', async (c) =&gt; {
+  const profile = await findUserByUsername(
+    c.var.db, c.req.param('username'))
+  if (!profile) throw new HTTPException(404)
+  return c.render(
+    &lt;UserPage profile={profile} viewer={c.var.user} /&gt;,
+    { title: profile.username })
+})
+</pre></div>
+  </div>
+</div>
+
+<p>
+  <code>first_or_404()</code> 把“查询”和“找不到就 404”合成了一步。Drizzle 没有这个便捷方法，两行代码写得也很清楚。
+  注意变量名：页面上有两个用户 —— 被查看的人（<code>profile</code>）和正在看的人（<code>viewer</code>，即当前登录用户，可能是 <code>null</code>），
+  起不同的名字能避免很多混淆。原书模板里的 <code>user</code> 和 <code>current_user</code> 就是这两个。
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/pages.tsx">
+<pre>
+export function UserPage({ profile, viewer }: { profile: User; viewer: CurrentUser | null }) {
+  const isSelf = viewer?.id === profile.id
+  return (
+    &lt;div class="page-header"&gt;
+      &lt;h1&gt;{profile.username}&lt;/h1&gt;
+      {(profile.name || profile.location) &amp;&amp; (
+        &lt;p&gt;
+          {profile.name}{profile.name &amp;&amp; &lt;br /&gt;}
+          {profile.location &amp;&amp; (
+            &lt;&gt;来自 &lt;a href={`https://www.openstreetmap.org/search?query=${encodeURIComponent(profile.location)}`}&gt;
+              {profile.location}&lt;/a&gt;&lt;/&gt;
+          )}
+        &lt;/p&gt;
+      )}
+      {isAdministrator(viewer) &amp;&amp; &lt;p&gt;&lt;a href={`mailto:${profile.email}`}&gt;{profile.email}&lt;/a&gt;&lt;/p&gt;}
+      {profile.aboutMe &amp;&amp; &lt;p&gt;{profile.aboutMe}&lt;/p&gt;}
+      &lt;p&gt;
+        注册于 &lt;Moment ts={profile.memberSince} format="L" /&gt;。
+        最后访问 &lt;Moment ts={profile.lastSeen} /&gt;。
+      &lt;/p&gt;
+      {isSelf &amp;&amp; &lt;a class="btn btn-outline-secondary" href="/edit-profile"&gt;编辑资料&lt;/a&gt;}
+    &lt;/div&gt;
+  )
+}
+</pre>
+</div>
+
+<p>原书指出了这个模板的几个细节，在 JSX 里一一对应：</p>
+<ul>
+  <li>姓名和所在地放在同一个 <code>&lt;p&gt;</code> 里，只有至少一个有值时才输出这个段落（<code>(a || b) &amp;&amp; …</code>）。</li>
+  <li>所在地做成地图链接。原书链接到 Google 地图，这里换成了开放的 OpenStreetMap。注意用 <code>encodeURIComponent</code> 把地名编进 URL。</li>
+  <li>只有管理员能看到用户的邮箱（<code>isAdministrator(viewer)</code>），方便管理员联系用户。</li>
+  <li>两个时间用第 3 章的 <code>&lt;Moment&gt;</code> 组件，由浏览器按本地时区显示。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="资料页的布局">
+  <rect class="bx" x="20" y="20" width="720" height="226" rx="12"/>
+  <rect class="bx-d" x="40" y="40" width="160" height="160" rx="10"/>
+  <text class="ttl" x="120" y="116" text-anchor="middle">Gravatar</text>
+  <text class="sm" x="120" y="136" text-anchor="middle">256×256</text>
+  <text class="ttl" x="230" y="60">john</text>
+  <text class="sm" x="230" y="84">John Smith</text>
+  <text class="sm" x="230" y="102">来自 <tspan class="on-a">Portland</tspan>（地图链接）</text>
+  <text class="sm on-p" x="230" y="122">john@example.com（仅管理员可见）</text>
+  <text class="sm" x="230" y="142">“喜欢写 Python，也喜欢写 TypeScript。”</text>
+  <text class="sm" x="230" y="162">注册于 2024/3/6。最后访问 3 分钟前。</text>
+  <text class="sm" x="230" y="182">12 篇文章，40 条评论。（第 11、13 章）</text>
+  <rect class="bx-b" x="230" y="194" width="90" height="28" rx="6"/>
+  <text class="sm on-b" x="275" y="213" text-anchor="middle">关注</text>
+  <text class="sm" x="330" y="213">粉丝 8 · 关注 5（第 12 章）</text>
+  <rect class="bx" x="560" y="194" width="80" height="28" rx="6"/>
+  <text class="sm" x="600" y="213" text-anchor="middle">编辑资料</text>
+  <rect class="bx-r" x="648" y="194" width="80" height="28" rx="6"/>
+  <text class="sm on-r" x="688" y="213" text-anchor="middle">[管理员]</text>
+  <text class="sm" x="600" y="240" text-anchor="middle">本人才有</text>
+  <text class="sm" x="688" y="240" text-anchor="middle">管理员才有</text>
+</svg>
+<figcaption>图 10-2　本章结束时的资料页。后面几章还会往上面添加文章列表、关注按钮等</figcaption>
+</figure>
+
+<p>大多数用户会想快速打开自己的资料页，所以在导航栏里加一个链接（原书例 10-6）。登录了才显示：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/layout.tsx">
+<pre>
+{user &amp;&amp; &lt;li class="nav-item"&gt;&lt;a class="nav-link" href={`/user/${user.username}`}&gt;个人资料&lt;/a&gt;&lt;/li&gt;}
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>10a</b>：用户资料页（这一版包含数据库迁移）</div>
+
+<h2 id="editor">资料编辑器</h2>
+
+<p>
+  原书分析了两种不同的编辑需求：用户要编辑自己的公开信息；管理员要能编辑任何人的资料，包括用户自己不能碰的字段（邮箱、用户名、确认状态、角色）。
+  需求差别很大，所以做成两个表单。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="两个资料编辑器可以修改的字段">
+  <rect class="bx-b" x="20" y="20" width="340" height="164" rx="12"/>
+  <text class="ttl on-b" x="190" y="44" text-anchor="middle">/edit-profile（本人）</text>
+  <text class="sm" x="190" y="62" text-anchor="middle">loginRequired</text>
+  <rect class="bx" x="40" y="76" width="300" height="28" rx="6"/><text class="mono" x="52" y="95">name 真实姓名</text>
+  <rect class="bx" x="40" y="110" width="300" height="28" rx="6"/><text class="mono" x="52" y="129">location 所在地</text>
+  <rect class="bx" x="40" y="144" width="300" height="28" rx="6"/><text class="mono" x="52" y="163">aboutMe 自我介绍</text>
+
+  <rect class="bx-r" x="400" y="20" width="340" height="164" rx="12"/>
+  <text class="ttl on-r" x="570" y="44" text-anchor="middle">/edit-profile/:id（管理员）</text>
+  <text class="sm" x="570" y="62" text-anchor="middle">loginRequired + adminRequired</text>
+  <text class="mono" x="420" y="90">email · username</text>
+  <text class="sm" x="720" y="90" text-anchor="end">改了才查重</text>
+  <text class="mono" x="420" y="114">confirmed</text>
+  <text class="sm" x="720" y="114" text-anchor="end">复选框</text>
+  <text class="mono" x="420" y="138">roleId</text>
+  <text class="sm" x="720" y="138" text-anchor="end">下拉框，字符串→数字</text>
+  <text class="mono" x="420" y="162">name · location · aboutMe</text>
+  <text class="sm" x="720" y="162" text-anchor="end">同左</text>
+</svg>
+<figcaption>图 10-3　两个编辑器：本人只能改公开信息；管理员可以改一切</figcaption>
+</figure>
+
+<h3>用户自己的编辑器</h3>
+
+<p>三个字段都是可选的，所以只限制最大长度（原书用 <code>Length(0, 64)</code>）：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+const profileSchema = z.object({
+  name: z.string().trim().max(64, '最多 64 个字符'),
+  location: z.string().trim().max(64, '最多 64 个字符'),
+  aboutMe: z.string().trim(),
+})
+
+main.get('/edit-profile', loginRequired, (c) =&gt; {
+  const user = requireUser(c)
+  // 用现有的值预先填好表单（原书：form.name.data = current_user.name）
+  const values = { name: user.name ?? '', location: user.location ?? '', aboutMe: user.aboutMe ?? '' }
+  return c.render(&lt;EditProfilePage values={values} /&gt;, { title: '编辑资料' })
+})
+
+main.post(
+  '/edit-profile',
+  loginRequired,
+  validateForm(profileSchema, (c, values, errors) =&gt; c.render(&lt;EditProfilePage values={values} errors={errors} /&gt;)),
+  async (c) =&gt; {
+    const user = requireUser(c)
+    const data = c.req.valid('form')                      // { name, location, aboutMe }
+    await c.var.db.update(users).set(data).where(eq(users.id, user.id))
+    flash(c, '个人资料已更新。')
+    return c.redirect(`/user/${user.username}`)
+  },
+)
+</pre>
+</div>
+
+<p>
+  原书用同一个视图函数处理 GET 和 POST，并通过 <code>form.xxx.data</code> 在两个方向上传递数据：GET 时把用户的现有值放进表单，POST 时从表单取出新值。
+  我们拆成了两个路由，数据流更直观：GET 把现有值作为 <code>values</code> 传给页面；POST 从 <code>c.req.valid('form')</code> 拿到新值。
+  而且因为 schema 的键和表的列名一致，<code>set(data)</code> 一行就能完成更新。
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/pages.tsx">
+<pre>
+export function EditProfilePage({ values, errors }: FormState) {
+  return (
+    &lt;&gt;
+      &lt;div class="page-header"&gt;&lt;h1&gt;编辑个人资料&lt;/h1&gt;&lt;/div&gt;
+      &lt;form method="post" class="col-md-6"&gt;
+        &lt;Field name="name" label="真实姓名" values={values} errors={errors} /&gt;
+        &lt;Field name="location" label="所在地" values={values} errors={errors} /&gt;
+        &lt;TextArea name="aboutMe" label="自我介绍" values={values} errors={errors} /&gt;
+        &lt;Submit /&gt;
+      &lt;/form&gt;
+    &lt;/&gt;
+  )
+}
+</pre>
+</div>
+
+<p><code>TextArea</code> 和第 8 章的 <code>Field</code> 是一个模式，只是输出 <code>&lt;textarea&gt;</code>。资料页上“编辑资料”按钮只在查看自己的资料时显示，前面的 <code>UserPage</code> 里已经写了。</p>
+
+<h3>管理员的编辑器</h3>
+
+<p>管理员的表单多了四个字段，其中两个需要特别处理：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+const adminProfileSchema = profileSchema.extend({
+  email: z.email('请输入有效的邮箱地址').max(64),
+  username: z.string().trim().min(1).max(64)
+    .regex(/^[A-Za-z][A-Za-z0-9_.]*$/, '用户名只能包含字母、数字、点和下划线，并以字母开头'),
+  confirmed: checkbox(),
+  roleId: z.coerce.number().int(),          // 相当于 SelectField(coerce=int)
+})
+</pre>
+</div>
+
+<p>
+  <strong>角色下拉框</strong>：原书用 <code>SelectField</code>，选项是 <code>(角色 id, 角色名)</code> 的列表，并用 <code>coerce=int</code> 把提交上来的值转成整数。
+  问题的根源在于：HTML 表单提交的一切都是字符串，<code>&lt;option value="3"&gt;</code> 提交上来就是 <code>"3"</code>。
+  Zod 的 <code>z.coerce.number()</code> 做的就是同一件事：先 <code>Number("3")</code>，再校验是不是整数。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="下拉框的值从数据库到 HTML 再回到数据库">
+  <rect class="bx-b" x="20" y="50" width="150" height="66" rx="10"/>
+  <text class="ttl on-b" x="95" y="76" text-anchor="middle">roles 表</text>
+  <text class="mono" x="95" y="98" text-anchor="middle">{ id: 3, name: 'User' }</text>
+  <path class="ln" d="M172 83 H214" marker-end="url(#ar)"/>
+  <rect class="bx" x="218" y="50" width="200" height="66" rx="10"/>
+  <text class="ttl" x="318" y="76" text-anchor="middle">渲染成 HTML</text>
+  <text class="mono" x="318" y="98" text-anchor="middle">&lt;option value="3"&gt;User</text>
+  <path class="ln" d="M420 83 H462" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="466" y="50" width="130" height="66" rx="10"/>
+  <text class="ttl on-a" x="531" y="76" text-anchor="middle">提交</text>
+  <text class="mono" x="531" y="98" text-anchor="middle">roleId="3"</text>
+  <path class="ln" d="M598 83 H636" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="640" y="50" width="100" height="66" rx="10"/>
+  <text class="ttl on-g" x="690" y="76" text-anchor="middle">coerce</text>
+  <text class="mono" x="690" y="98" text-anchor="middle">roleId: 3</text>
+  <text class="sm" x="380" y="150" text-anchor="middle">HTML 世界里只有字符串；进入数据库之前要变回数字</text>
+</svg>
+<figcaption>图 10-4　<code>z.coerce.number()</code> = 原书的 <code>coerce=int</code></figcaption>
+</figure>
+
+<p>下拉框的选项来自数据库，按名字排序（原书在表单的构造函数里查询）：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+async function roleOptions(c: { var: AppEnv['Variables'] }): Promise&lt;[number, string][]&gt; {
+  const rows = await c.var.db.select({ id: roles.id, name: roles.name }).from(roles).orderBy(roles.name)
+  return rows.map((r) =&gt; [r.id, r.name])
+}
+</pre>
+</div>
+
+<p>
+  <strong>邮箱和用户名的查重</strong>：原书在 <code>EditProfileAdminForm</code> 的 <code>validate_email</code> 里先判断<em>值有没有变</em>，
+  只有变了才去检查新值是否被别人占用 —— 否则管理员不改邮箱直接保存，会因为“邮箱已被注册”（被他自己）而失败。为此原书的表单构造函数还要接收被编辑的用户。
+  在处理函数里写这个逻辑就简单多了：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+main.post(
+  '/edit-profile/:id{[0-9]+}',
+  loginRequired,
+  adminRequired,
+  validateForm(adminProfileSchema, async (c, values, errors) =&gt;
+    c.render(&lt;EditProfileAdminPage values={values} errors={errors} roles={await roleOptions(c)} /&gt;)),
+  async (c) =&gt; {
+    const db = c.var.db
+    const id = Number(c.req.param('id'))
+    const target = await findUserById(db, id)
+    if (!target) throw new HTTPException(404)            // 相当于 get_or_404(id)
+    const data = c.req.valid('form')
+    const email = data.email.toLowerCase()
+
+    // 改了才需要查重
+    const errors: Record&lt;string, string[]&gt; = {}
+    if (email !== target.email &amp;&amp; (await db.$count(users, eq(users.email, email)))) errors.email = ['该邮箱已被注册']
+    if (data.username !== target.username &amp;&amp; (await db.$count(users, eq(users.username, data.username)))) {
+      errors.username = ['该用户名已被使用']
+    }
+    if (Object.keys(errors).length) {
+      return c.render(&lt;EditProfileAdminPage values={data} errors={errors} roles={await roleOptions(c)} /&gt;)
+    }
+
+    await db.update(users).set({ ...data, email, avatarHash: gravatarHash(email) }).where(eq(users.id, id))
+    flash(c, '资料已更新。')
+    return c.redirect(`/user/${data.username}`)
+  },
+)
+</pre>
+</div>
+
+<p>GET 路由用被编辑用户的现有值填好表单，<code>roleId</code> 决定下拉框默认选中哪一项：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+main.get('/edit-profile/:id{[0-9]+}', loginRequired, adminRequired, async (c) =&gt; {
+  const target = await findUserById(c.var.db, Number(c.req.param('id')))
+  if (!target) throw new HTTPException(404)
+  const values = {
+    email: target.email, username: target.username, confirmed: target.confirmed, roleId: target.roleId,
+    name: target.name ?? '', location: target.location ?? '', aboutMe: target.aboutMe ?? '',
+  }
+  return c.render(&lt;EditProfileAdminPage values={values} roles={await roleOptions(c)} /&gt;)
+})
+</pre>
+</div>
+
+<p>下拉框组件，比对字符串来决定哪一项 <code>selected</code>：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+export function Select({ name, label, values, errors, options }: FieldProps &amp; { options: [string | number, string][] }) {
+  const current = String(values?.[name] ?? '')
+  return (
+    &lt;div class="mb-3"&gt;
+      &lt;label class="form-label" for={name}&gt;{label}&lt;/label&gt;
+      &lt;select class="form-select" id={name} name={name}&gt;
+        {options.map(([value, text]) =&gt; (
+          &lt;option value={String(value)} selected={String(value) === current}&gt;{text}&lt;/option&gt;
+        ))}
+      &lt;/select&gt;
+    &lt;/div&gt;
+  )
+}
+</pre>
+</div>
+
+<p>资料页上给管理员一个醒目的红色按钮，链接到这个编辑器（原书例 10-12）：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/pages.tsx">
+<pre>
+{isAdministrator(viewer) &amp;&amp; &lt;a class="btn btn-danger" href={`/edit-profile/${profile.id}`}&gt;编辑资料 [管理员]&lt;/a&gt;}
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>10b</b>：资料编辑器</div>
+
+<h2 id="avatars">用户头像</h2>
+
+<p>
+  资料页有了文字，还缺一张头像。原书用的是 <a href="https://gravatar.com">Gravatar</a>：用户在 Gravatar 网站上把头像和邮箱绑定，
+  任何网站只要知道用户的邮箱，就能拼出头像的地址 —— 地址里用的是邮箱的 MD5 哈希，而不是邮箱本身。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="Gravatar 头像地址的组成">
+  <rect class="bx" x="20" y="30" width="170" height="50" rx="8"/>
+  <text class="mono" x="105" y="60" text-anchor="middle">John@Example.com</text>
+  <path class="ln" d="M192 55 H236" marker-end="url(#ar)"/>
+  <text class="sm" x="214" y="47" text-anchor="middle">小写</text>
+  <rect class="bx" x="240" y="30" width="170" height="50" rx="8"/>
+  <text class="mono" x="325" y="60" text-anchor="middle">john@example.com</text>
+  <path class="ln-a" d="M412 55 H456" marker-end="url(#ar-a)"/>
+  <text class="sm" x="434" y="47" text-anchor="middle">MD5</text>
+  <rect class="bx-a" x="460" y="30" width="280" height="50" rx="8"/>
+  <text class="mono on-a" x="600" y="60" text-anchor="middle">d4c74594d841139328695756648b6bd6</text>
+
+  <text class="mono" x="380" y="120" text-anchor="middle">https://secure.gravatar.com/avatar/<tspan class="on-a">d4c7…6bd6</tspan>?<tspan class="on-b">s=256</tspan>&amp;<tspan class="on-g">d=identicon</tspan>&amp;<tspan class="on-p">r=g</tspan></text>
+  <text class="sm on-b" x="250" y="150" text-anchor="middle">s 尺寸</text>
+  <text class="sm on-g" x="390" y="150" text-anchor="middle">d 没有头像时的默认图</text>
+  <text class="sm on-p" x="530" y="150" text-anchor="middle">r 分级</text>
+</svg>
+<figcaption>图 10-5　Gravatar 要求先把邮箱转成小写再计算哈希</figcaption>
+</figure>
+
+<p>原书表 10-1 列出了 Gravatar 的查询参数：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>参数</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>s</code></td><td>图片尺寸（像素）</td></tr>
+    <tr><td><code>r</code></td><td>图片分级：<code>g</code>、<code>pg</code>、<code>r</code>、<code>x</code></td></tr>
+    <tr><td><code>d</code></td><td>没有注册头像时的默认图：<code>404</code>（返回 404 错误）、一个图片 URL，或者 <code>mp</code>、<code>identicon</code>、<code>monsterid</code>、<code>wavatar</code>、<code>retro</code>、<code>blank</code> 等生成器</td></tr>
+    <tr><td><code>f</code></td><td>强制使用默认头像</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Node.js 的 <code>crypto</code> 模块可以直接算 MD5：</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+import { createHash } from 'node:crypto'
+
+export function gravatarHash(email: string) {
+  return createHash('md5').update(email.trim().toLowerCase()).digest('hex')
+}
+
+export function gravatar(
+  user: { email: string; avatarHash: string | null }, size = 100, defaultImage = 'identicon', rating = 'g',
+) {
+  const hash = user.avatarHash ?? gravatarHash(user.email)
+  return `https://secure.gravatar.com/avatar/${hash}?s=${size}&amp;d=${defaultImage}&amp;r=${rating}`
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; MD5 在这里是安全的吗？</div>
+  <p>
+    MD5 早已不能用于密码哈希（太快、有碰撞攻击），但这里它只是生成一个“邮箱的代号”，用不着抗碰撞。
+    Gravatar 近年也开始支持 SHA-256 哈希，把 <code>'md5'</code> 换成 <code>'sha256'</code> 同样可用，列的长度要相应改成 64。
+    本教程保持和原书一致。另外要知道：邮箱的 MD5 可以被字典攻击反推，所以严格注重隐私的网站会让用户自己上传头像。
+  </p>
+</div>
+
+<p>在资料页上显示 256 像素的大头像，导航栏里显示 18 像素的小头像：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// src/views/pages.tsx —— 资料页
+&lt;img class="rounded profile-thumbnail" src={gravatar(profile, 256)} alt="" /&gt;
+&lt;div class="profile-header"&gt;…&lt;/div&gt;
+
+// src/views/layout.tsx —— 导航栏里的账户菜单
+&lt;a class="nav-link dropdown-toggle" href="#" data-bs-toggle="dropdown"&gt;
+  &lt;img src={gravatar(user, 18)} alt="" /&gt; 账户
+&lt;/a&gt;
+</pre>
+</div>
+
+<p>头像的定位靠 <code>static/styles.css</code> 里的两个 CSS 类（和原书一样）：</p>
+
+<div class="code" data-lang="text" data-file="static/styles.css">
+<pre>
+.profile-thumbnail { position: absolute; }
+.profile-header { min-height: 260px; margin-left: 280px; }
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>10c</b>：用户头像</div>
+
+<h3>缓存头像哈希</h3>
+
+<p>
+  原书指出：MD5 是 CPU 密集的运算，一个页面要显示几十个头像时，这些计算会累积起来。
+  而用户的邮箱不变，哈希就不会变，所以可以<strong>算一次，存进数据库</strong>。给 <code>users</code> 表加一列：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/db/schema.ts">
+<pre>
+avatarHash: varchar('avatar_hash', { length: 32 }),     // MD5 的十六进制是 32 个字符
+</pre>
+</div>
+
+<p>然后在所有“邮箱可能改变”的地方同步更新它：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="三处写入 avatarHash 的地方">
+  <rect class="bx-a" x="280" y="60" width="200" height="60" rx="12"/>
+  <text class="ttl on-a" x="380" y="86" text-anchor="middle">users.avatar_hash</text>
+  <text class="sm" x="380" y="106" text-anchor="middle">gravatarHash(email)</text>
+  <rect class="bx-g" x="20" y="20" width="200" height="50" rx="8"/>
+  <text class="ttl on-g" x="120" y="42" text-anchor="middle">createUser()</text>
+  <text class="sm" x="120" y="60" text-anchor="middle">注册时</text>
+  <rect class="bx-b" x="20" y="110" width="200" height="50" rx="8"/>
+  <text class="ttl on-b" x="120" y="132" text-anchor="middle">changeEmail()</text>
+  <text class="sm" x="120" y="150" text-anchor="middle">第 8 章，用户改邮箱</text>
+  <rect class="bx-r" x="540" y="60" width="200" height="60" rx="8"/>
+  <text class="ttl on-r" x="640" y="84" text-anchor="middle">管理员编辑资料</text>
+  <text class="sm" x="640" y="104" text-anchor="middle">本章，改别人的邮箱</text>
+  <path class="ln-g" d="M222 45 L276 78" marker-end="url(#ar-g)"/>
+  <path class="ln-b" d="M222 135 L276 102" marker-end="url(#ar-b)"/>
+  <path class="ln-r" d="M538 90 H484" marker-end="url(#ar-r)"/>
+</svg>
+<figcaption>图 10-6　缓存的代价是：凡是改邮箱的地方都要记得同步更新哈希，漏一处头像就错了</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+// createUser() 里
+avatarHash: gravatarHash(email),
+
+// changeEmail() 里
+await db.update(users)
+  .set({ email: newEmail, avatarHash: gravatarHash(newEmail) })
+  .where(eq(users.id, user.id))
+</pre>
+</div>
+
+<p><code>gravatar()</code> 优先使用缓存的 <code>avatarHash</code>，没有时（比如缓存列加上之前注册的老用户）才现算 —— 前面的代码里已经写了 <code>user.avatarHash ?? gravatarHash(user.email)</code>。</p>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：这个缓存值得吗？</div>
+  <p>
+    说实话，现代 CPU 上算一次 MD5 大约只要一微秒，一个页面算一百次也就 0.1 毫秒，远远比不上一次数据库查询。
+    原书这一节真正的价值，是演示<strong>“把可推导的数据缓存进数据库”这个模式，以及它带来的同步负担</strong>。
+    以后你会遇到值得这么做的场景（比如第 11 章把 Markdown 渲染结果存进 <code>body_html</code>，第 13 章的评论数），权衡的方式是一样的：
+    计算越贵、读得越多、写得越少，就越值得缓存。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>10d</b>：缓存头像哈希（这一版包含数据库迁移）</div>
+
+<p>对应的单元测试（原书 <code>test_gravatar</code>）：</p>
+
+<div class="code" data-lang="ts" data-file="tests/user-model.test.ts">
+<pre>
+it('Gravatar 地址', async () =&gt; {
+  const u = await createUser(db, { email: 'john@example.com', username: 'john', password: 'cat' })
+  expect(gravatar(u)).toContain('https://secure.gravatar.com/avatar/d4c74594d841139328695756648b6bd6')
+  expect(gravatar(u, 256)).toContain('s=256')
+  expect(gravatar(u, 100, 'retro', 'pg')).toContain('d=retro')
+  expect(gravatar(u, 100, 'retro', 'pg')).toContain('r=pg')
+})
+</pre>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>资料字段：<code>varchar</code> 限长、<code>text</code> 不限长；时间用 <code>timestamp withTimezone</code> + <code>defaultNow()</code>。</li>
+  <li><code>lastSeen</code> 在每个请求的中间件里刷新，但限制为每分钟最多写一次。</li>
+  <li>资料页 <code>/user/:username</code>：查不到就 <code>throw new HTTPException(404)</code>；区分被查看的 <code>profile</code> 和正在看的 <code>viewer</code>。</li>
+  <li>编辑器拆成 GET（用现有值填表单）和 POST（校验、更新、Flash、重定向）；管理员编辑器的 <code>roleId</code> 用 <code>z.coerce.number()</code>，查重只在值改变时进行。</li>
+  <li>Gravatar 头像 = 小写邮箱的 MD5 + 查询参数；哈希缓存在 <code>avatarHash</code> 列，所有改邮箱的地方都要同步更新。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给资料页加一个“个人主页”字段（<code>website</code>），用 <code>z.url()</code> 校验，走一遍迁移，并在资料页上显示成链接。</li>
+    <li>把 <code>ping</code> 的限频从 60 秒改成 5 分钟，用两个浏览器分别登录不同账号，观察“最后访问”的变化。</li>
+    <li>把默认头像从 <code>identicon</code> 换成 <code>retro</code> 或 <code>robohash</code>，比较效果。</li>
+    <li>给管理员编辑器写一个测试：用管理员登录后提交表单，把某个普通用户的角色改成 Moderator，再断言 <code>can(user, Permission.MODERATE)</code> 为真。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

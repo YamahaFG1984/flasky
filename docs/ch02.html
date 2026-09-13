@@ -1,0 +1,802 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 2 章 · 应用的基本结构 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="2">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 2 章</span>
+<h1>应用的基本结构</h1>
+<p class="lede">
+  这一章写出第一个 Hono 应用，并借它把 Web 应用最核心的机制讲清楚：
+  请求是怎么找到处理函数的（路由）、处理函数怎么拿到请求信息（Context）、
+  怎么在每个请求前后插入公共逻辑（中间件）、以及怎么构造各种响应。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>创建应用实例、定义路由和处理函数，写出完整的 Hello World</li>
+    <li>用动态路由从 URL 里取参数，并知道为什么要限制参数格式</li>
+    <li>用 <code>tsx watch</code> 获得“改代码自动重启”的开发体验</li>
+    <li>理解 Flask 的“上下文全局变量”和 Hono 的 <code>c</code> 参数，各自解决什么问题</li>
+    <li>用中间件实现 Flask 的请求钩子（before_request / after_request）</li>
+    <li>构造状态码、响应头、Cookie、重定向和错误响应</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="init">初始化：创建应用实例</h2>
+
+<p>
+  每个 Flask 应用都要先创建一个应用实例：<code>app = Flask(__name__)</code>。
+  Web 服务器把收到的所有请求交给这个对象处理。Hono 也一样：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+from flask import Flask
+app = Flask(__name__)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+import { Hono } from 'hono'
+const app = new Hono()
+</pre></div>
+  </div>
+</div>
+
+<p>
+  Flask 需要 <code>__name__</code> 参数来定位模板和静态文件目录；Hono 不需要任何参数，
+  因为它不假设你的文件放在哪里 —— 模板是普通的 TypeScript 模块（第 3 章），静态文件目录由你显式指定。
+</p>
+
+<h2 id="routes">路由和处理函数</h2>
+
+<p>
+  浏览器向服务器发请求，服务器交给应用。应用需要知道<em>“这个 URL 该运行哪段代码”</em>，
+  所以它维护着一张 URL 到函数的映射表。一条映射就叫一个<strong>路由</strong>（route）。
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask：装饰器</div>
+    <div class="code" data-lang="python"><pre>
+@app.route('/')
+def index():
+    return '&lt;h1&gt;Hello World!&lt;/h1&gt;'
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono：方法调用</div>
+    <div class="code" data-lang="ts"><pre>
+app.get('/', (c) =&gt; {
+  return c.html('&lt;h1&gt;Hello World!&lt;/h1&gt;')
+})
+</pre></div>
+  </div>
+</div>
+
+<p>对比一下两边：</p>
+<ul>
+  <li>Flask 用装饰器 <code>@app.route</code> 把函数“登记”成路由；Hono 直接调用 <code>app.get(路径, 处理函数)</code>。
+      方法名就是 HTTP 方法：<code>app.get</code>、<code>app.post</code>、<code>app.put</code>、<code>app.delete</code>……</li>
+  <li>Flask 把这种函数叫<strong>视图函数</strong>（view function），Hono 叫<strong>处理函数</strong>（handler）。</li>
+  <li>Flask 视图返回字符串，框架帮你包成响应；Hono 处理函数<strong>必须返回一个 <code>Response</code></strong>，
+      <code>c.html()</code> 就是生成 HTML 响应的快捷方法。</li>
+  <li>那个 <code>c</code> 是 <strong>Context</strong>（上下文），本章后半部分会重点讲。</li>
+</ul>
+
+<p>
+  原书还提到一种不用装饰器的注册方式 <code>app.add_url_rule('/', 'index', index)</code>。
+  Hono 里对应的是 <code>app.on('GET', '/', handler)</code>，适合方法名需要动态决定的场合，平时用得不多。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="路由表：URL 与方法共同决定调用哪个处理函数">
+  <rect class="bx" x="20" y="80" width="150" height="62" rx="10"/>
+  <text class="ttl" x="95" y="104" text-anchor="middle">请求</text>
+  <text class="mono" x="95" y="126" text-anchor="middle">GET /user/dave</text>
+  <path class="ln-a" d="M172 111 H222" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-a" x="226" y="20" width="300" height="190" rx="12"/>
+  <text class="ttl on-a" x="376" y="44" text-anchor="middle">路由表（app 内部）</text>
+  <rect class="bx" x="244" y="58" width="264" height="32" rx="6"/>
+  <text class="mono" x="256" y="79">GET  /</text>
+  <text class="sm" x="496" y="79" text-anchor="end">→ index</text>
+  <rect class="bx-g" x="244" y="98" width="264" height="32" rx="6"/>
+  <text class="mono on-g" x="256" y="119">GET  /user/:name</text>
+  <text class="sm on-g" x="496" y="119" text-anchor="end">→ user ✔</text>
+  <rect class="bx" x="244" y="138" width="264" height="32" rx="6"/>
+  <text class="mono" x="256" y="159">POST /login</text>
+  <text class="sm" x="496" y="159" text-anchor="end">→ login</text>
+  <text class="sm" x="376" y="196" text-anchor="middle">都不匹配 → 404 Not Found</text>
+
+  <path class="ln-g" d="M528 114 H578" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="582" y="70" width="158" height="88" rx="10"/>
+  <text class="ttl on-g" x="661" y="94" text-anchor="middle">处理函数 user(c)</text>
+  <text class="mono" x="661" y="118" text-anchor="middle">c.req.param('name')</text>
+  <text class="mono on-g" x="661" y="140" text-anchor="middle">→ 'dave'</text>
+</svg>
+<figcaption>图 2-1　路由匹配：<em>方法</em>和<em>路径</em>一起决定调用哪个处理函数，路径里的变量部分会被提取出来</figcaption>
+</figure>
+
+<h3>动态路由</h3>
+
+<p>
+  很多网址里带着变量，比如 <code>https://github.com/你的用户名</code>。
+  Flask 用尖括号 <code>&lt;name&gt;</code> 表示路由的动态部分，Hono 用冒号 <code>:name</code>：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+@app.route('/user/&lt;name&gt;')
+def user(name):
+    return '&lt;h1&gt;Hello, {}!&lt;/h1&gt;'.format(name)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+app.get('/user/:name', (c) =&gt; {
+  const name = c.req.param('name')
+  return c.html(`&lt;h1&gt;Hello, ${name}!&lt;/h1&gt;`)
+})
+</pre></div>
+  </div>
+</div>
+
+<p>
+  Flask 会把动态部分作为参数传给视图函数；Hono 则是在处理函数里用 <code>c.req.param('name')</code> 主动去取。
+  而且 TypeScript 能从路径字符串 <code>'/user/:name'</code> 里推断出参数名 —— 你写成 <code>c.req.param('nmae')</code> 编辑器就会报错。
+</p>
+
+<p>Flask 支持 <code>&lt;int:id&gt;</code> 这样的类型转换器，Hono 用<strong>正则表达式</strong>限制参数格式：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Flask</th><th>Hono</th><th>匹配</th></tr></thead>
+  <tbody>
+    <tr><td><code>/user/&lt;name&gt;</code></td><td><code>/user/:name</code></td><td>任意不含 <code>/</code> 的一段</td></tr>
+    <tr><td><code>/post/&lt;int:id&gt;</code></td><td><code>/post/:id{[0-9]+}</code></td><td>只匹配数字，<code>/post/abc</code> 直接 404</td></tr>
+    <tr><td><code>/files/&lt;path:p&gt;</code></td><td><code>/files/*</code> 或 <code>/files/:p{.+}</code></td><td>可以包含 <code>/</code> 的剩余部分</td></tr>
+    <tr><td>（需要写两条路由）</td><td><code>/api/animal/:type?</code></td><td>参数可选</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 参数永远是字符串</div>
+  <p>
+    <code>:id{[0-9]+}</code> 只是保证“看起来像数字”，<code>c.req.param('id')</code> 拿到的仍然是字符串 <code>'42'</code>。
+    要当数字用得自己转：<code>Number(c.req.param('id'))</code>。Flask 的 <code>int:</code> 会帮你转，这是两者的一个小差别。
+  </p>
+</div>
+
+<h2 id="complete">一个完整的应用</h2>
+
+<p>把上面的片段组装起来，再加上启动服务器的代码，就是一个完整可运行的应用：</p>
+
+<div class="code" data-lang="ts" data-file="src/index.ts">
+<pre>
+import { serve } from '@hono/node-server'
+import { Hono } from 'hono'
+
+const app = new Hono()
+
+app.get('/', (c) =&gt; {
+  return c.html('&lt;h1&gt;Hello World!&lt;/h1&gt;')
+})
+
+app.get('/user/:name', (c) =&gt; {
+  const name = c.req.param('name')
+  return c.html(`&lt;h1&gt;Hello, ${name}!&lt;/h1&gt;`)
+})
+
+// 把 Hono 应用接到 Node.js 的 HTTP 服务器上，监听 3000 端口
+serve({ fetch: app.fetch, port: 3000 }, (info) =&gt; {
+  console.log(`Listening on http://localhost:${info.port}`)
+})
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>2a</b> / <b>2b</b>：一个路由的 hello.py，以及加上动态路由之后的版本</div>
+
+<p>注意最后几行：<code>app.fetch</code> 就是“传入 Request、返回 Response”的那个函数。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="Node 服务器、适配器与 Hono 应用之间的关系">
+  <rect class="bx" x="20" y="60" width="130" height="60" rx="10"/>
+  <text class="ttl" x="85" y="86" text-anchor="middle">浏览器</text>
+  <text class="sm" x="85" y="104" text-anchor="middle">发出 HTTP 请求</text>
+  <path class="ln" d="M152 90 H200" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="204" y="40" width="190" height="100" rx="10"/>
+  <text class="ttl on-g" x="299" y="64" text-anchor="middle">Node.js http 模块</text>
+  <text class="sm" x="299" y="86" text-anchor="middle">监听 3000 端口</text>
+  <text class="sm" x="299" y="104" text-anchor="middle">收到的是 Node 专有的</text>
+  <text class="mono" x="299" y="122" text-anchor="middle">IncomingMessage</text>
+  <path class="ln" d="M396 90 H428" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="432" y="50" width="130" height="80" rx="10"/>
+  <text class="ttl on-b" x="497" y="76" text-anchor="middle">node-server</text>
+  <text class="sm" x="497" y="96" text-anchor="middle">适配器：翻译成</text>
+  <text class="mono" x="497" y="114" text-anchor="middle">Request</text>
+  <path class="ln-a" d="M564 90 H596" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="600" y="50" width="140" height="80" rx="10"/>
+  <text class="ttl on-a" x="670" y="76" text-anchor="middle">app.fetch</text>
+  <text class="mono" x="670" y="98" text-anchor="middle">Request</text>
+  <text class="mono" x="670" y="116" text-anchor="middle">→ Response</text>
+</svg>
+<figcaption>图 2-2　<code>@hono/node-server</code> 的作用和 WSGI 类似：把服务器收到的原始数据翻译成框架能理解的标准格式</figcaption>
+</figure>
+
+<h2 id="devserver">开发服务器</h2>
+
+<p>
+  Flask 用 <code>flask run</code> 启动开发服务器。我们在 <code>package.json</code> 里定义一个 <code>dev</code> 脚本：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm pkg set scripts.dev="tsx watch src/index.ts"
+npm run dev
+# Listening on http://localhost:3000
+</pre>
+</div>
+
+<p>
+  打开浏览器访问 <code>http://localhost:3000/</code> 就能看到 “Hello World!”；
+  访问 <code>http://localhost:3000/user/Dave</code> 看到 “Hello, Dave!”；
+  访问任何没定义的地址，得到 Hono 默认的 <code>404 Not Found</code>。按 <kbd>Ctrl</kbd>+<kbd>C</kbd> 停止服务器。
+</p>
+
+<h3>调试模式：重载器和调试器</h3>
+
+<p>原书的调试模式（<code>FLASK_DEBUG=1</code>）提供两样东西，我们逐一对应：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Flask 调试模式</th><th>Hono 开发环境</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>重载器</strong>：源文件一改，服务器自动重启</td>
+      <td><code>tsx watch</code> 已经做到了：保存文件，服务器在一瞬间重启</td>
+    </tr>
+    <tr>
+      <td><strong>调试器</strong>：出错时浏览器里显示可交互的调用栈</td>
+      <td>Hono 没有网页调试器。错误信息打印在终端里；需要断点时用 VS Code 的
+        <em>JavaScript Debug Terminal</em> 运行 <code>npm run dev</code>，就能在编辑器里打断点、看变量</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 不在网页上暴露调试器，反而是好事</div>
+  <p>
+    原书特别警告：<strong>绝不要在生产服务器上开启 Flask 调试模式</strong>，因为网页调试器允许访问者在服务器上执行任意代码。
+    Hono 根本没有这个东西，默认的错误响应只是一句 <code>Internal Server Error</code>，详细信息只出现在服务器终端。
+    你以后自己写错误处理（第 3 章）时也要保持这个原则：<em>调用栈只写日志，不回给浏览器</em>。
+  </p>
+</div>
+
+<h3>命令行选项：主机和端口</h3>
+
+<p>
+  Flask 的开发服务器默认只接受本机连接，要让局域网里其他电脑访问，需要 <code>flask run --host 0.0.0.0</code>。
+  Node 服务器默认监听所有网卡，端口则通常从环境变量读取：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/index.ts">
+<pre>
+const port = Number(process.env.PORT ?? 3000)
+serve({ fetch: app.fetch, port, hostname: '0.0.0.0' })
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+PORT=8000 npm run dev            # macOS / Linux
+$env:PORT=8000; npm run dev      # Windows PowerShell
+</pre>
+</div>
+
+<p>第 17 章部署时你会发现，几乎所有云平台都通过 <code>PORT</code> 环境变量告诉应用该监听哪个端口，所以从现在起就养成这个习惯。</p>
+
+<h2 id="cycle">请求-响应循环</h2>
+
+<p>玩过了第一个应用，我们来看看它背后是怎么运转的。</p>
+
+<h3>Flask 的上下文 vs Hono 的 c</h3>
+
+<p>
+  处理函数需要访问请求信息（URL、请求头、表单……）。最直接的办法是把请求作为参数传进去。
+  但 Flask 选择了另一条路：它让 <code>request</code> 看起来像一个<strong>全局变量</strong>，任何地方 <code>from flask import request</code> 就能用。
+</p>
+<p>
+  可是多个请求同时进来时，全局变量怎么可能同时装着不同的请求？
+  Flask 的答案是<strong>上下文</strong>（context）：每个线程看到的 <code>request</code> 是不同的对象。
+  原书列出了四个上下文变量：
+</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Flask 上下文变量</th><th>含义</th><th>Hono 里对应的写法</th></tr></thead>
+  <tbody>
+    <tr><td><code>current_app</code></td><td>当前应用实例</td><td>闭包里的 <code>app</code>，或中间件放进 <code>c.var</code> 的配置（第 7 章）</td></tr>
+    <tr><td><code>g</code></td><td>单个请求内的临时存储</td><td><code>c.set('key', v)</code> / <code>c.get('key')</code> / <code>c.var.key</code></td></tr>
+    <tr><td><code>request</code></td><td>当前请求</td><td><code>c.req</code></td></tr>
+    <tr><td><code>session</code></td><td>用户会话</td><td>第 4 章自己写的会话中间件，放在 <code>c.var.session</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  Hono 选择了最朴素的办法：<strong>把一切都装在参数 <code>c</code> 里传给你</strong>。
+  这不是风格偏好，而是 JavaScript 的运行方式决定的。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="Flask 多线程与 Node.js 事件循环处理并发请求的区别">
+  <text class="ttl" x="190" y="22" text-anchor="middle">Flask（多线程）：每个请求一个线程</text>
+  <rect class="bx-b" x="20" y="36" width="340" height="40" rx="8"/>
+  <text class="sm" x="30" y="61">线程 1</text>
+  <rect class="bx" x="80" y="44" width="270" height="24" rx="4"/>
+  <text class="sm" x="215" y="61" text-anchor="middle">请求 A：request = A（线程局部）</text>
+  <rect class="bx-b" x="20" y="84" width="340" height="40" rx="8"/>
+  <text class="sm" x="30" y="109">线程 2</text>
+  <rect class="bx" x="80" y="92" width="270" height="24" rx="4"/>
+  <text class="sm" x="215" y="109" text-anchor="middle">请求 B：request = B（线程局部）</text>
+  <text class="sm" x="190" y="146" text-anchor="middle">“全局”变量其实是每个线程各一份 → 能用</text>
+
+  <path class="ln-d" d="M380 14 V280"/>
+
+  <text class="ttl on-a" x="570" y="22" text-anchor="middle">Node.js（单线程事件循环）</text>
+  <rect class="bx-a" x="400" y="36" width="340" height="88" rx="8"/>
+  <text class="sm" x="410" y="61">唯一的线程</text>
+  <rect class="bx-g" x="476" y="46" width="60" height="24" rx="4"/><text class="sm" x="506" y="63" text-anchor="middle">A 开始</text>
+  <rect class="bx-p" x="540" y="46" width="60" height="24" rx="4"/><text class="sm" x="570" y="63" text-anchor="middle">B 开始</text>
+  <rect class="bx-g" x="604" y="46" width="60" height="24" rx="4"/><text class="sm" x="634" y="63" text-anchor="middle">A 继续</text>
+  <rect class="bx-p" x="668" y="46" width="62" height="24" rx="4"/><text class="sm" x="699" y="63" text-anchor="middle">B 继续</text>
+  <text class="sm" x="570" y="96" text-anchor="middle">A 在 await 查数据库时，线程去处理 B</text>
+  <text class="sm" x="570" y="112" text-anchor="middle">如果 request 是真正的全局变量，A 回来时它已经变成 B 了！</text>
+  <text class="sm on-a" x="570" y="146" text-anchor="middle">所以每个请求的数据装在自己的 c 里，显式传递</text>
+
+  <rect class="bx" x="20" y="170" width="720" height="104" rx="10"/>
+  <text class="ttl" x="36" y="194">Hono 的 Context（c）里有什么</text>
+  <rect class="bx-b" x="36" y="206" width="160" height="54" rx="8"/>
+  <text class="mono on-b" x="116" y="228" text-anchor="middle">c.req</text>
+  <text class="sm" x="116" y="248" text-anchor="middle">请求：路径、参数、请求头、正文</text>
+  <rect class="bx-g" x="212" y="206" width="160" height="54" rx="8"/>
+  <text class="mono on-g" x="292" y="228" text-anchor="middle">c.html / c.json …</text>
+  <text class="sm" x="292" y="248" text-anchor="middle">构造响应的方法</text>
+  <rect class="bx-p" x="388" y="206" width="160" height="54" rx="8"/>
+  <text class="mono on-p" x="468" y="228" text-anchor="middle">c.set / c.var</text>
+  <text class="sm" x="468" y="248" text-anchor="middle">本次请求的临时变量（≈ g）</text>
+  <rect class="bx-a" x="564" y="206" width="160" height="54" rx="8"/>
+  <text class="mono on-a" x="644" y="228" text-anchor="middle">c.env</text>
+  <text class="sm" x="644" y="248" text-anchor="middle">运行时环境（Workers 绑定等）</text>
+</svg>
+<figcaption>图 2-3　单线程 + 异步交错执行，是 Hono 把请求“显式传参”的根本原因</figcaption>
+</figure>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：真想要“全局的 c”怎么办</div>
+  <p>
+    Node.js 有个叫 <code>AsyncLocalStorage</code> 的机制，能做到“在同一条异步调用链里共享一个值” —— 效果和 Flask 的上下文一样。
+    Hono 把它包装成了 <code>hono/context-storage</code> 中间件，用 <code>getContext()</code> 就能在任意深的函数里拿到当前请求的 <code>c</code>。
+    但大多数时候显式传参更清晰：看函数签名就知道它依赖请求，测试时也好伪造。本教程只在必要时才这么做。
+  </p>
+</div>
+
+<h3>请求分派：查看路由表</h3>
+
+<p>原书在 Python shell 里打印 <code>app.url_map</code> 来查看路由表。Hono 提供了 <code>showRoutes</code>：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { showRoutes } from 'hono/dev'
+
+showRoutes(app)
+// GET  /
+// GET  /user/:name
+</pre>
+</div>
+
+<p>
+  原书的路由表里还有 <code>HEAD</code> 和 <code>OPTIONS</code>。<code>HEAD</code> 请求的意思是“只要响应头，不要正文”。
+  Hono 同样会自动处理：对 GET 路由发 HEAD 请求，它会运行 GET 处理函数，然后丢掉正文。
+  <code>OPTIONS</code> 主要用于跨域（CORS）预检，Hono 不会自动响应，需要时加上 <code>hono/cors</code> 中间件。
+</p>
+
+<h3>请求对象</h3>
+
+<p>
+  原书表 2-2 列出了 Flask <code>request</code> 对象最常用的属性。Hono 的 <code>c.req</code> 包装了标准的 Web <code>Request</code>，
+  下面是逐项对照（没有直接对应的，用标准 API 也能拿到）：
+</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Flask <code>request</code></th><th>Hono</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>form</code></td><td><code>await c.req.parseBody()</code></td><td>表单字段（第 4 章）</td></tr>
+    <tr><td><code>args</code></td><td><code>c.req.query('page')</code> / <code>c.req.query()</code></td><td>查询字符串 <code>?page=2</code></td></tr>
+    <tr><td><code>values</code></td><td>（手动合并上面两者）</td><td>很少需要</td></tr>
+    <tr><td><code>cookies</code></td><td><code>getCookie(c, 'name')</code></td><td>来自 <code>hono/cookie</code></td></tr>
+    <tr><td><code>headers</code></td><td><code>c.req.header('User-Agent')</code></td><td>请求头，名字不区分大小写</td></tr>
+    <tr><td><code>files</code></td><td><code>await c.req.parseBody()</code> 里的 <code>File</code> 对象</td><td>上传的文件</td></tr>
+    <tr><td><code>get_data()</code></td><td><code>await c.req.text()</code> / <code>arrayBuffer()</code></td><td>原始正文</td></tr>
+    <tr><td><code>get_json()</code></td><td><code>await c.req.json()</code></td><td>JSON 正文（第 14 章）</td></tr>
+    <tr><td><code>endpoint</code> / <code>blueprint</code></td><td><code>c.req.routePath</code></td><td>匹配到的路由模式，如 <code>/user/:name</code></td></tr>
+    <tr><td><code>method</code></td><td><code>c.req.method</code></td><td><code>'GET'</code>、<code>'POST'</code>……</td></tr>
+    <tr><td><code>scheme</code> / <code>is_secure()</code></td><td><code>new URL(c.req.url).protocol</code></td><td><code>'http:'</code> 或 <code>'https:'</code></td></tr>
+    <tr><td><code>host</code></td><td><code>c.req.header('Host')</code></td><td>含端口</td></tr>
+    <tr><td><code>path</code></td><td><code>c.req.path</code></td><td>路径部分</td></tr>
+    <tr><td><code>query_string</code></td><td><code>new URL(c.req.url).search</code></td><td>包括开头的 <code>?</code></td></tr>
+    <tr><td><code>url</code></td><td><code>c.req.url</code></td><td>完整地址</td></tr>
+    <tr><td><code>remote_addr</code></td><td><code>getConnInfo(c).remote.address</code></td><td>来自 <code>@hono/node-server/conninfo</code></td></tr>
+    <tr><td><code>environ</code></td><td><code>c.req.raw</code></td><td>底层的标准 <code>Request</code> 对象</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>比如原书用来演示上下文的例子：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/browser', (c) =&gt; {
+  const userAgent = c.req.header('User-Agent')
+  return c.html(`&lt;p&gt;Your browser is ${userAgent}&lt;/p&gt;`)
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 把用户输入直接拼进 HTML 是危险的</div>
+  <p>
+    上面几个例子都把外部传来的字符串（URL 参数、请求头）直接拼进了 HTML。试试访问
+    <code>/user/%3Cb%3EDave%3C%2Fb%3E</code> —— Hono 会把参数解码成 <code>&lt;b&gt;Dave&lt;/b&gt;</code>，
+    页面上的名字就变成了粗体。换成 <code>&lt;script&gt;</code> 就是一次 <strong>XSS 攻击</strong>。
+    （原书的 Flask 例子也有同样的问题。）临时的修复是用 <code>hono/html</code> 的 <code>html</code> 标签函数，它会自动转义：
+  </p>
+  <div class="code" data-lang="ts"><pre>
+import { html } from 'hono/html'
+return c.html(html`&lt;h1&gt;Hello, ${name}!&lt;/h1&gt;`)   // → &amp;lt;b&amp;gt;Dave&amp;lt;/b&amp;gt;
+</pre></div>
+  <p>下一章改用 JSX 模板后，所有变量都会被自动转义，这个问题就从根本上解决了。</p>
+</div>
+
+<h2 id="hooks">请求钩子 → 中间件</h2>
+
+<p>
+  有些代码需要在<em>每个</em>请求前后运行：记录日志、连接数据库、识别当前登录的用户……
+  Flask 提供了四个钩子：<code>before_request</code>、<code>before_first_request</code>、<code>after_request</code>、<code>teardown_request</code>。
+</p>
+<p>
+  Hono 只有一个更通用的概念：<strong>中间件</strong>（middleware）。
+  中间件是一个接收 <code>(c, next)</code> 的函数：调用 <code>await next()</code> 之前的代码在处理函数之前运行，之后的代码在处理函数之后运行。
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+app.use(async (c, next) =&gt; {
+  const start = Date.now()          // ← 相当于 before_request
+  await next()                      // ← 交给下一层，最终执行到处理函数
+  const ms = Date.now() - start     // ← 相当于 after_request
+  c.header('X-Response-Time', `${ms}ms`)
+})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="中间件的洋葱模型">
+  <rect class="bx-d" x="120" y="20" width="520" height="250" rx="18"/>
+  <text class="sm" x="136" y="42">中间件 1：计时</text>
+  <rect class="bx-b" x="170" y="54" width="420" height="200" rx="16"/>
+  <text class="sm on-b" x="186" y="76">中间件 2：加载当前用户（第 8 章）</text>
+  <rect class="bx-p" x="220" y="88" width="320" height="150" rx="14"/>
+  <text class="sm on-p" x="236" y="110">中间件 3：检查权限（第 9 章）</text>
+  <rect class="bx-a" x="280" y="124" width="200" height="96" rx="12"/>
+  <text class="ttl on-a" x="380" y="160" text-anchor="middle">处理函数</text>
+  <text class="mono" x="380" y="184" text-anchor="middle">return c.html(…)</text>
+
+  <path class="ln-g" d="M40 100 H270" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="22" y="92">请求 →</text>
+  <text class="sm" x="22" y="118">next() 之前的代码</text>
+  <text class="sm" x="22" y="132">由外向内依次执行</text>
+
+  <path class="ln-a" d="M490 196 H740" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="652" y="188">→ 响应</text>
+  <text class="sm" x="652" y="214">next() 之后的代码</text>
+  <text class="sm" x="652" y="228">由内向外依次执行</text>
+</svg>
+<figcaption>图 2-4　洋葱模型：请求从外向内穿过每一层，响应再从内向外穿回来。任何一层都可以不调用 next()，直接返回响应</figcaption>
+</figure>
+
+<p>四个 Flask 钩子在 Hono 里分别这样写：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Flask 钩子</th><th>Hono 写法</th></tr></thead>
+  <tbody>
+    <tr><td><code>before_request</code></td><td>中间件里 <code>await next()</code> 之前的代码。如果直接 <code>return</code> 一个响应（比如重定向），请求就不会到达处理函数</td></tr>
+    <tr><td><code>after_request</code></td><td>中间件里 <code>await next()</code> 之后的代码，可以通过 <code>c.res</code> 或 <code>c.header()</code> 修改响应</td></tr>
+    <tr><td><code>teardown_request</code></td><td>用 <code>try { await next() } finally { … }</code>，即使出错也会执行</td></tr>
+    <tr><td><code>before_first_request</code></td><td>不需要钩子：直接写在模块顶层，服务器启动时就执行一次</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  原书提到钩子和视图之间常用 <code>g</code> 来传数据，比如 <code>before_request</code> 查出当前用户放进 <code>g.user</code>。
+  Hono 里用 <code>c.set()</code> 放、<code>c.var</code> 取，而且可以给它声明类型：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+type Env = { Variables: { requestId: string } }
+const app = new Hono&lt;Env&gt;()
+
+app.use(async (c, next) =&gt; {
+  c.set('requestId', crypto.randomUUID())
+  await next()
+})
+
+app.get('/', (c) =&gt; {
+  return c.text(`你的请求编号是 ${c.var.requestId}`)  // 类型是 string，拼错名字会报错
+})
+</pre>
+</div>
+
+<p>
+  Hono 还自带了很多现成的中间件，用 <code>app.use()</code> 挂上就行。比如开发时很有用的访问日志：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+import { logger } from 'hono/logger'
+app.use(logger())
+// &lt;-- GET /user/dave
+// --&gt; GET /user/dave 200 2ms
+</pre>
+</div>
+
+<h2 id="responses">响应</h2>
+
+<p>
+  原书说：HTTP 响应不只是一段字符串，它还有<strong>状态码</strong>和<strong>响应头</strong>。
+  Flask 视图可以返回 <code>(正文, 状态码, 响应头)</code> 三元组；Hono 的响应方法都接受同样的三个参数：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="一个 HTTP 响应的组成部分">
+  <rect class="bx" x="20" y="20" width="440" height="160" rx="10"/>
+  <rect class="bx-a" x="34" y="34" width="412" height="30" rx="6"/>
+  <text class="mono on-a" x="46" y="54">HTTP/1.1 400 Bad Request</text>
+  <rect class="bx-b" x="34" y="72" width="412" height="52" rx="6"/>
+  <text class="mono on-b" x="46" y="92">Content-Type: text/html; charset=UTF-8</text>
+  <text class="mono on-b" x="46" y="112">Set-Cookie: answer=42; Path=/</text>
+  <rect class="bx-g" x="34" y="132" width="412" height="36" rx="6"/>
+  <text class="mono on-g" x="46" y="155">&lt;h1&gt;Bad Request&lt;/h1&gt;</text>
+  <text class="ttl on-a" x="480" y="54">① 状态行</text>
+  <text class="sm" x="480" y="70">状态码告诉浏览器“结果如何”</text>
+  <text class="ttl on-b" x="480" y="100">② 响应头</text>
+  <text class="sm" x="480" y="116">内容类型、Cookie、缓存策略…</text>
+  <text class="ttl on-g" x="480" y="152">③ 正文</text>
+  <text class="sm" x="480" y="168">HTML、JSON、图片……</text>
+</svg>
+<figcaption>图 2-5　响应的三个组成部分，对应 <code>c.html(正文, 状态码, 响应头)</code> 的三个参数</figcaption>
+</figure>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+@app.route('/')
+def index():
+    return '&lt;h1&gt;Bad Request&lt;/h1&gt;', 400
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+app.get('/', (c) =&gt; {
+  return c.html('&lt;h1&gt;Bad Request&lt;/h1&gt;', 400)
+})
+</pre></div>
+  </div>
+</div>
+
+<p>常用的响应方法：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+c.text('纯文本')                         // Content-Type: text/plain
+c.html('&lt;p&gt;HTML&lt;/p&gt;')                     // Content-Type: text/html
+c.json({ ok: true })                     // Content-Type: application/json
+c.body(buffer, 200, { 'Content-Type': 'image/png' })  // 任意内容
+c.redirect('/login')                     // 302 重定向
+c.notFound()                             // 404
+
+// 也可以直接返回标准的 Response 对象，Hono 完全不拦着
+return new Response('hi', { status: 201, headers: { 'X-Custom': 'yes' } })
+</pre>
+</div>
+
+<h3>设置 Cookie 与响应头</h3>
+
+<p>原书用 <code>make_response()</code> 先造出响应对象，再调用 <code>set_cookie()</code>。Hono 里 Cookie 和响应头可以在返回之前随时设置：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+from flask import make_response
+
+@app.route('/')
+def index():
+    response = make_response(
+        '&lt;h1&gt;This document carries a cookie!&lt;/h1&gt;')
+    response.set_cookie('answer', '42')
+    return response
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+import { setCookie } from 'hono/cookie'
+
+app.get('/', (c) =&gt; {
+  setCookie(c, 'answer', '42')
+  c.header('X-Powered-By', 'Hono')
+  return c.html(
+    '&lt;h1&gt;This document carries a cookie!&lt;/h1&gt;')
+})
+</pre></div>
+  </div>
+</div>
+
+<p>原书表 2-3 列出的 Flask 响应对象属性，在 Web 标准的 <code>Response</code> 里是这样的：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Flask 响应对象</th><th>Hono / Web 标准</th></tr></thead>
+  <tbody>
+    <tr><td><code>status_code</code></td><td><code>res.status</code>；构造时用 <code>c.status(404)</code> 或方法的第二个参数</td></tr>
+    <tr><td><code>headers</code></td><td><code>res.headers</code>（一个 <code>Headers</code> 对象）；构造时用 <code>c.header()</code></td></tr>
+    <tr><td><code>set_cookie()</code> / <code>delete_cookie()</code></td><td><code>setCookie(c, …)</code> / <code>deleteCookie(c, …)</code></td></tr>
+    <tr><td><code>content_length</code> / <code>content_type</code></td><td><code>res.headers.get('Content-Length')</code> / <code>get('Content-Type')</code></td></tr>
+    <tr><td><code>set_data()</code> / <code>get_data()</code></td><td>正文在构造时给定；读取用 <code>await res.text()</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>重定向</h3>
+
+<p>
+  <strong>重定向</strong>是一种特殊的响应：没有页面内容，只有一个状态码 302 和一个 <code>Location</code> 响应头，告诉浏览器“去这个地址”。
+  它在处理表单时极其常用（第 4 章）。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="重定向的两次往返">
+  <rect class="bx" x="20" y="20" width="140" height="160" rx="10"/>
+  <text class="ttl" x="90" y="44" text-anchor="middle">浏览器</text>
+  <rect class="bx-a" x="600" y="20" width="140" height="160" rx="10"/>
+  <text class="ttl on-a" x="670" y="44" text-anchor="middle">Hono 应用</text>
+
+  <path class="ln" d="M162 70 H596" marker-end="url(#ar)"/>
+  <text class="mono" x="380" y="64" text-anchor="middle">① GET /old-page</text>
+  <path class="ln-a" d="M596 100 H164" marker-end="url(#ar-a)"/>
+  <text class="mono on-a" x="380" y="94" text-anchor="middle">② 302 Found · Location: /new-page</text>
+  <path class="ln" d="M162 130 H596" marker-end="url(#ar)"/>
+  <text class="mono" x="380" y="124" text-anchor="middle">③ GET /new-page（浏览器自动发起）</text>
+  <path class="ln-g" d="M596 160 H164" marker-end="url(#ar-g)"/>
+  <text class="mono on-g" x="380" y="154" text-anchor="middle">④ 200 OK · 页面内容</text>
+</svg>
+<figcaption>图 2-6　一次重定向 = 两次请求。地址栏最终显示的是新地址</figcaption>
+</figure>
+
+<div class="code" data-lang="ts">
+<pre>
+app.get('/old-page', (c) =&gt; c.redirect('/new-page'))          // 默认 302
+app.get('/moved', (c) =&gt; c.redirect('https://example.com', 301)) // 永久搬家用 301
+</pre>
+</div>
+
+<h3>中止请求：404 和其他错误</h3>
+
+<p>
+  原书用 <code>abort(404)</code> 立即结束请求。<code>abort()</code> 的原理是抛出一个异常。
+  Hono 里对应的是抛出 <code>HTTPException</code>，或者直接返回 <code>c.notFound()</code>：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+from flask import abort
+
+@app.route('/user/&lt;id&gt;')
+def get_user(id):
+    user = load_user(id)
+    if not user:
+        abort(404)
+    return '&lt;h1&gt;Hello, {}&lt;/h1&gt;'.format(user.name)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+import { HTTPException } from 'hono/http-exception'
+
+app.get('/user/:id', async (c) =&gt; {
+  const user = await loadUser(c.req.param('id'))
+  if (!user) throw new HTTPException(404)
+  return c.html(html`&lt;h1&gt;Hello, ${user.name}&lt;/h1&gt;`)
+})
+</pre></div>
+  </div>
+</div>
+
+<p>
+  抛异常的好处和 Flask 一样：它能从任意深的函数调用里“跳出来”，不用一层层 <code>return</code>。
+  抛出的异常最终由 <code>app.onError()</code> 统一处理 —— 下一章我们会用它做好看的错误页面。
+</p>
+
+<h2 id="ext">扩展 → 中间件与生态包</h2>
+
+<p>
+  原书这一章最后说：Flask 被设计成可扩展的，数据库、认证这些重要功能都交给扩展。
+  Hono 也一样，只是“扩展”分成了三类：
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#129521;</span><h4>内置中间件</h4><p><code>hono/logger</code>、<code>hono/cors</code>、<code>hono/csrf</code>、<code>hono/jwt</code>、<code>hono/basic-auth</code>、<code>hono/secure-headers</code>……随 hono 一起安装。</p></div>
+  <div class="card"><span class="ic">&#128295;</span><h4>内置助手</h4><p><code>hono/cookie</code>、<code>hono/html</code>、<code>hono/jsx</code>、<code>hono/streaming</code>……不是中间件，是在处理函数里调用的工具函数。</p></div>
+  <div class="card"><span class="ic">&#128230;</span><h4>第三方包</h4><p><code>@hono/zod-validator</code> 这样的官方周边，以及 Drizzle、Nodemailer 等与框架无关的通用库。</p></div>
+</div>
+
+<p>下一章开始，我们用第一个“扩展”—— JSX 模板 —— 把 HTML 从处理函数里搬出去。</p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li><code>new Hono()</code> 创建应用；<code>app.get/post(路径, 处理函数)</code> 注册路由；处理函数必须返回 <code>Response</code>。</li>
+  <li>动态路由用 <code>:name</code>，用 <code>{正则}</code> 限制格式；参数总是字符串。</li>
+  <li><code>serve({ fetch: app.fetch })</code> 把应用接到 Node.js；<code>tsx watch</code> 提供自动重载。</li>
+  <li>Flask 的 <code>request</code>、<code>g</code> 等上下文变量，在 Hono 里都在参数 <code>c</code> 上，因为 Node.js 单线程交错执行多个请求。</li>
+  <li>四种请求钩子统一成中间件：<code>await next()</code> 之前 = before，之后 = after，<code>finally</code> = teardown。</li>
+  <li>响应 = 状态码 + 响应头 + 正文；<code>c.redirect()</code> 重定向，<code>throw new HTTPException(404)</code> 中止请求。</li>
+  <li>永远不要把用户输入直接拼进 HTML。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>加一个路由 <code>/post/:id{[0-9]+}</code>，返回“第 N 篇文章”。分别访问 <code>/post/42</code> 和 <code>/post/abc</code>，观察区别。</li>
+    <li>写一个中间件，给每个响应加上 <code>X-Request-Id</code> 响应头（值用 <code>crypto.randomUUID()</code>），并在处理函数里通过 <code>c.var</code> 读到同一个值。</li>
+    <li>用 <code>curl -I http://localhost:3000/</code> 发一个 HEAD 请求，确认 Hono 返回了响应头但没有正文。</li>
+    <li>在 <code>/user/:name</code> 里分别用普通模板字符串和 <code>html``</code> 输出名字，访问 <code>/user/%3Ci%3Ehi%3C%2Fi%3E</code> 比较两者的页面源代码。</li>
+    <li>试着在处理函数里故意写个错误（比如调用一个不存在的函数），看看浏览器和终端各显示了什么。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

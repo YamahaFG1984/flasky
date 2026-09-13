@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 15 章 · 测试 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="15">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 15 章</span>
+<h1>测试</h1>
+<p class="lede">
+  第三部分“最后一公里”从测试开始。写单元测试有两个理由：确认新写的代码按预期工作；更重要的是，每次修改之后都能确认<strong>旧的功能没有被改坏</strong>（也就是没有“回归”）。
+  这一章用覆盖率找出没被测到的代码，用 Hono 的 <code>app.request()</code> 测试网页和 API，最后用 Playwright 驱动真实的浏览器做端到端测试。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 Vitest 的 V8 覆盖率报告找出测试的盲区</li>
+    <li>理解 <code>app.request()</code>：不启动服务器，直接把请求送进应用</li>
+    <li>写一个会记住 Cookie、会跟随重定向的测试客户端，模拟完整的注册登录流程</li>
+    <li>测试 REST API 的认证、状态码和 JSON 内容</li>
+    <li>用 Playwright 在真实浏览器里测试页面</li>
+    <li>知道哪些测试值得写、代码应该怎样组织才好测</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="coverage">代码覆盖率</h2>
+
+<p>
+  有一套测试很重要，知道这套测试“好不好”同样重要。<strong>覆盖率</strong>工具统计测试运行时执行了应用的哪些代码，
+  并给出一份报告，指出哪些部分从来没被测到 —— 这正是下一步该补测试的地方。
+</p>
+<p>
+  原书用 Python 的 coverage 包，而且为了让覆盖率从程序的第一行开始统计，在 <code>flask test --coverage</code> 里用了一个“设置环境变量后重新启动自己”的技巧。
+  Node.js 的 V8 引擎自带覆盖率统计，Vitest 直接调用它，一个参数就够了：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install -D @vitest/coverage-v8
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="vitest.config.ts">
+<pre>
+import { defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: {
+    include: ['tests/**/*.test.ts'],
+    testTimeout: 20_000,
+    hookTimeout: 30_000,
+    // 只统计 src/ 下的代码（相当于原书的 include='app/*'），测试代码和依赖包不算
+    coverage: { provider: 'v8', include: ['src/**'] },
+  },
+})
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npx vitest run --coverage
+</pre>
+</div>
+
+<p>下面是 Flasky 当前的报告（节选），测试一共 27 个：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>文件</th><th>语句</th><th>分支</th><th>函数</th><th>行</th></tr></thead>
+  <tbody>
+    <tr><td><strong>全部</strong></td><td><strong>61.4%</strong></td><td><strong>46.0%</strong></td><td><strong>59.8%</strong></td><td><strong>64.5%</strong></td></tr>
+    <tr><td><code>src/models/users.ts</code></td><td>90.6%</td><td>79.7%</td><td>87.5%</td><td>94.4%</td></tr>
+    <tr><td><code>src/models/posts.ts</code></td><td>83.0%</td><td>72.7%</td><td>76.2%</td><td>82.2%</td></tr>
+    <tr><td><code>src/models/permissions.ts</code></td><td>92.9%</td><td>100%</td><td>75.0%</td><td>100%</td></tr>
+    <tr><td><code>src/lib/session.ts</code></td><td>96.4%</td><td>92.9%</td><td>100%</td><td>100%</td></tr>
+    <tr><td><code>src/routes/api/</code>（合计）</td><td>88.6%</td><td>69.0%</td><td>96.7%</td><td>96.6%</td></tr>
+    <tr><td><code>src/routes/auth.tsx</code></td><td>47.9%</td><td>28.9%</td><td>29.2%</td><td>53.8%</td></tr>
+    <tr><td><code>src/routes/main.tsx</code></td><td>21.3%</td><td>7.4%</td><td>9.7%</td><td>22.4%</td></tr>
+    <tr><td><code>src/views/pages.tsx</code></td><td>23.5%</td><td>23.7%</td><td>20.0%</td><td>23.5%</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  和原书的报告惊人地相似：原书总覆盖率 45%，模型类因为从一开始就有单元测试，达到了 79%；而蓝本里的视图函数几乎没被测到（<code>main/views.py</code> 只有 18%）。
+  我们这里也一样：<code>models/</code> 在 80%–90% 之间，而 <code>routes/main.tsx</code>（首页、资料页、关注、评论……）只有 21%。
+</p>
+
+<p>
+  除了终端里的表格，Vitest 还会在 <code>coverage/</code> 目录生成一份 HTML 报告，用浏览器打开 <code>coverage/index.html</code>，
+  可以看到每一行源代码被标成绿色（执行过）或红色（没执行过）。原书特别提到了<strong>分支覆盖率</strong>：
+  它不只看每一行有没有执行，还检查每个 <code>if</code> 的“真”和“假”两条路是不是都走过 —— 表格里的“分支”一列就是它。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 覆盖率高不等于没有 bug</div>
+  <p>
+    原书提醒：覆盖率说明不了项目里有多少代码是没有 bug 的，测试本身的质量同样重要。一行代码“被执行过”，不代表它的结果被检查过。
+    覆盖率最有用的地方，是告诉你<strong>哪里完全没有测试</strong>。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>15a</b>：覆盖率报告</div>
+
+<h2 id="client">测试网页：app.request()</h2>
+
+<p>
+  应用里有些代码离不开“正在处理请求”的环境。原书指出，你没法直接调用视图函数来测试它 —— 它需要请求上下文、表单数据、登录的用户……
+  Flask 为此提供了<strong>测试客户端</strong>：它模拟应用运行在 Web 服务器里的环境，让测试像客户端一样发请求。
+</p>
+<p>
+  Hono 在这方面有天然优势。应用本来就是一个 <code>(Request) =&gt; Response</code> 的函数，测试时根本不需要服务器：
+  <code>app.request()</code> 构造一个标准的 <code>Request</code>，直接交给应用，拿回一个标准的 <code>Response</code>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="app.request 与真实浏览器测试的区别">
+  <text class="ttl on-g" x="20" y="22">app.request()：没有网络，没有服务器</text>
+  <rect class="bx-g" x="20" y="34" width="150" height="60" rx="10"/>
+  <text class="ttl on-g" x="95" y="58" text-anchor="middle">Vitest 测试</text>
+  <text class="mono" x="95" y="78" text-anchor="middle">app.request('/')</text>
+  <path class="ln-g" d="M172 64 H250" marker-end="url(#ar-g)"/>
+  <text class="sm" x="211" y="56" text-anchor="middle">Request</text>
+  <rect class="bx-a" x="254" y="34" width="210" height="60" rx="10"/>
+  <text class="ttl on-a" x="359" y="58" text-anchor="middle">createApp(测试配置)</text>
+  <text class="sm" x="359" y="78" text-anchor="middle">中间件 → 路由 → 处理函数</text>
+  <path class="ln-g" d="M466 64 H544" marker-end="url(#ar-g)"/>
+  <text class="sm" x="505" y="56" text-anchor="middle">Response</text>
+  <rect class="bx-g" x="548" y="34" width="192" height="60" rx="10"/>
+  <text class="ttl on-g" x="644" y="58" text-anchor="middle">断言</text>
+  <text class="sm" x="644" y="78" text-anchor="middle">状态码 · 响应头 · 正文</text>
+  <text class="sm" x="380" y="116" text-anchor="middle">每个请求只要几毫秒；不执行页面里的 JavaScript</text>
+
+  <line class="ln-d" x1="20" y1="132" x2="740" y2="132"/>
+
+  <text class="ttl on-p" x="20" y="158">Playwright：真实浏览器 + 真实服务器</text>
+  <rect class="bx-p" x="20" y="170" width="150" height="60" rx="10"/>
+  <text class="ttl on-p" x="95" y="194" text-anchor="middle">Playwright 测试</text>
+  <text class="sm" x="95" y="214" text-anchor="middle">“点击”“输入”</text>
+  <path class="ln-p" d="M172 200 H222" marker-end="url(#ar-p)"/>
+  <rect class="bx" x="226" y="170" width="140" height="60" rx="10"/>
+  <text class="ttl" x="296" y="194" text-anchor="middle">Chromium</text>
+  <text class="sm" x="296" y="214" text-anchor="middle">执行 JS · 渲染页面</text>
+  <path class="ln" d="M368 200 H418" marker-end="url(#ar)"/>
+  <text class="sm" x="393" y="192" text-anchor="middle">HTTP</text>
+  <rect class="bx-a" x="422" y="170" width="160" height="60" rx="10"/>
+  <text class="ttl on-a" x="502" y="194" text-anchor="middle">Node 服务器</text>
+  <text class="sm" x="502" y="214" text-anchor="middle">serve(app.fetch)</text>
+  <text class="sm" x="662" y="194" text-anchor="middle">慢，但最接近</text>
+  <text class="sm" x="662" y="212" text-anchor="middle">真实用户</text>
+</svg>
+<figcaption>图 15-1　两种测试方式。本章大部分测试用上面的方式，只有少数关键流程用下面的方式</figcaption>
+</figure>
+
+<p>最简单的例子，对应原书的 <code>test_home_page</code>：</p>
+
+<div class="code" data-lang="ts" data-file="tests/client.test.ts">
+<pre>
+it('首页向陌生人问好', async () =&gt; {
+  const res = await ctx.app.request('/')
+  expect(res.status).toBe(200)
+  expect(await res.text()).toContain('陌生人')
+})
+</pre>
+</div>
+
+<h3>一个像浏览器一样的测试客户端</h3>
+
+<p>
+  原书创建测试客户端时传了 <code>use_cookies=True</code>：让它像浏览器一样接收和发送 Cookie，这样依赖会话的功能（登录状态！）才能测试。
+  它还有 <code>follow_redirects=True</code> 选项，让客户端自动跟随重定向。<code>app.request()</code> 本身只发一次请求，我们在它外面包一个小类，补上这两个能力：
+</p>
+
+<div class="code" data-lang="ts" data-file="tests/helpers.ts">
+<pre>
+type Fetchable = { request: (input: string, init?: RequestInit) =&gt; Response | Promise&lt;Response&gt; }
+
+export class TestClient {
+  cookies = new Map&lt;string, string&gt;()
+
+  constructor(private app: Fetchable) {}
+
+  async request(path: string, init: RequestInit &amp; { followRedirects?: boolean } = {}): Promise&lt;Response&gt; {
+    const { followRedirects = false, ...rest } = init
+    const headers = new Headers(rest.headers)
+    if (this.cookies.size) {
+      headers.set('Cookie', [...this.cookies].map(([k, v]) =&gt; `${k}=${v}`).join('; '))   // ① 带上 Cookie
+    }
+    const res = await this.app.request(path, { ...rest, headers })
+    this.storeCookies(res)                                                               // ② 记住 Cookie
+
+    const location = res.headers.get('Location')
+    if (followRedirects &amp;&amp; res.status &gt;= 300 &amp;&amp; res.status &lt; 400 &amp;&amp; location) {
+      const url = new URL(location, 'http://localhost')
+      return this.request(url.pathname + url.search, { followRedirects: true })          // ③ 跟随重定向
+    }
+    return res
+  }
+
+  get(path: string, opts: { followRedirects?: boolean } = {}) {
+    return this.request(path, opts)
+  }
+
+  post(path: string, form: Record&lt;string, string&gt;, opts: { followRedirects?: boolean } = {}) {
+    return this.request(path, { method: 'POST', body: new URLSearchParams(form), ...opts })
+  }
+
+  private storeCookies(res: Response) {
+    for (const line of res.headers.getSetCookie()) {
+      const [pair, ...attrs] = line.split(';')
+      const i = pair.indexOf('=')
+      const name = pair.slice(0, i).trim()
+      const value = pair.slice(i + 1).trim()
+      const expired = attrs.some((a) =&gt; /^\s*max-age=0\s*$/i.test(a))   // deleteCookie 发的是 Max-Age=0
+      if (expired || value === '') this.cookies.delete(name)
+      else this.cookies.set(name, value)
+    }
+  }
+}
+</pre>
+</div>
+
+<p>
+  注意 <code>post()</code> 用 <code>URLSearchParams</code> 作正文，和浏览器提交表单时的编码完全一样（<code>application/x-www-form-urlencoded</code>，第 4 章）。
+</p>
+
+<h3>CSRF 与测试配置</h3>
+
+<p>
+  原书遇到一个小麻烦：Flask-WTF 的每个表单都有隐藏的 CSRF 令牌，测试要先请求页面、解析 HTML 取出令牌才能提交。于是原书在测试配置里关掉了 CSRF。
+  我们的 <code>hono/csrf</code> 检查的是 <code>Origin</code> 头，测试客户端不发这个头，同样会被拦截。第 7 章的测试配置里已经做了同样的事：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/config.ts">
+<pre>
+case 'testing':
+  return { ...base, name: 'testing', testing: true, csrf: false, databaseUrl: 'memory://' }
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 也可以不关，测试里带上 Origin</div>
+  <p>
+    因为我们的 CSRF 防护不需要令牌，其实只要在测试请求里加一个头 <code>Origin: http://localhost</code> 就能通过检查。
+    如果你想让测试覆盖 CSRF 中间件本身，这是个好办法：写一个专门的测试，断言“没有 Origin 的表单 POST 返回 403”。
+  </p>
+</div>
+
+<h3>模拟一个新用户的完整流程</h3>
+
+<p>原书例 15-4 模拟了一个新用户：注册、登录、确认账户、退出。翻译成我们的测试客户端：</p>
+
+<div class="code" data-lang="ts" data-file="tests/client.test.ts">
+<pre>
+it('注册 → 登录 → 确认 → 退出', async () =&gt; {
+  // 注册：成功时重定向到登录页
+  let res = await client.post('/auth/register', {
+    email: 'john@example.com', username: 'john', password: 'cat', password2: 'cat',
+  })
+  expect(res.status).toBe(302)
+  expect(ctx.mailer.outbox).toHaveLength(1)                       // 确认邮件“发”出去了
+  expect(ctx.mailer.outbox[0].subject).toContain('确认你的账户')
+
+  // 登录：会被带到“请先确认账户”页面
+  res = await client.post('/auth/login', { email: 'john@example.com', password: 'cat' }, { followRedirects: true })
+  expect(res.status).toBe(200)
+  let html = await res.text()
+  expect(html).toMatch(/你好，\s*john！/)
+  expect(html).toContain('你还没有确认账户')
+
+  // 模拟点击邮件里的确认链接
+  const user = (await findUserByEmail(ctx.db, 'john@example.com'))!
+  const token = await generateConfirmationToken(ctx.config.secretKey, user.id)
+  res = await client.get(`/auth/confirm/${token}`, { followRedirects: true })
+  expect(await res.text()).toContain('账户确认成功')
+
+  // 退出（第 8 章把它改成了 POST）
+  res = await client.post('/auth/logout', {}, { followRedirects: true })
+  html = await res.text()
+  expect(html).toContain('你已退出登录')
+  expect(html).toContain('陌生人')
+})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="测试客户端在一个测试中维持的会话">
+  <rect class="bx" x="20" y="60" width="120" height="56" rx="8"/>
+  <text class="sm" x="80" y="84" text-anchor="middle">POST</text>
+  <text class="mono" x="80" y="102" text-anchor="middle">/auth/register</text>
+  <path class="ln" d="M142 88 H168" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="172" y="60" width="120" height="56" rx="8"/>
+  <text class="sm" x="232" y="84" text-anchor="middle">POST</text>
+  <text class="mono on-b" x="232" y="102" text-anchor="middle">/auth/login</text>
+  <path class="ln" d="M294 88 H320" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="324" y="60" width="140" height="56" rx="8"/>
+  <text class="sm" x="394" y="84" text-anchor="middle">GET</text>
+  <text class="mono on-b" x="394" y="102" text-anchor="middle">/auth/confirm/…</text>
+  <path class="ln" d="M466 88 H492" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="496" y="60" width="120" height="56" rx="8"/>
+  <text class="sm" x="556" y="84" text-anchor="middle">POST</text>
+  <text class="mono on-b" x="556" y="102" text-anchor="middle">/auth/logout</text>
+  <path class="ln" d="M618 88 H644" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="648" y="60" width="92" height="56" rx="8"/>
+  <text class="sm on-g" x="694" y="92" text-anchor="middle">陌生人</text>
+  <path class="ln-b" d="M232 118 V142 H556 V118"/>
+  <text class="sm on-b" x="394" y="158" text-anchor="middle">cookies Map 里的 session Cookie，把这三个请求连成同一个“登录用户”</text>
+  <text class="sm" x="380" y="40" text-anchor="middle">mailer.outbox 里能看到注册时“发出”的确认邮件</text>
+</svg>
+<figcaption>图 15-2　测试客户端里的 Cookie 让多个请求共享同一个会话，就像同一个浏览器</figcaption>
+</figure>
+
+<p>几个值得说说的细节，都来自原书的讨论：</p>
+<ul>
+  <li><strong>正则匹配问候语。</strong>原书发现 <code>'Hello, john!'</code> 搜不到，因为 Jinja2 模板在两个词之间留下了多余的空白，只好用正则。JSX 输出的 HTML 没有这种多余空白，但用 <code>\s*</code> 容错是好习惯，模板格式调整时测试不会莫名其妙地挂掉。</li>
+  <li><strong>确认令牌从哪来？</strong>令牌本来在邮件里。原书的做法是绕过邮件，直接用用户对象再生成一个。我们也这样做；另一种选择是从 <code>ctx.mailer.outbox[0].text</code> 里用正则把链接抠出来 —— 这样还顺便测试了邮件内容。</li>
+  <li><strong>每个测试都从干净的数据库开始。</strong>见下一节。</li>
+</ul>
+
+<h3>测试数据库的策略</h3>
+
+<p>
+  原书在每个测试的 <code>setUp()</code> 里 <code>create_all()</code>、在 <code>tearDown()</code> 里 <code>drop_all()</code>。
+  每个测试都新建一个 PGlite 实例也可以，但它启动一次要零点几秒。更快的做法是<strong>每个测试文件建一次，每个测试前清空所有表</strong>：
+</p>
+
+<div class="code" data-lang="ts" data-file="tests/helpers.ts">
+<pre>
+export async function resetDb(db: Db) {
+  // TRUNCATE 比 DELETE 快得多；RESTART IDENTITY 让自增 id 从 1 重新开始；CASCADE 连带清空有外键引用的表
+  await db.execute(sql`truncate table comments, posts, follows, users, roles restart identity cascade`)
+  await insertRoles(db)
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="tests/client.test.ts">
+<pre>
+describe('网页端（测试客户端）', () =&gt; {
+  let ctx: Awaited&lt;ReturnType&lt;typeof setupTestApp&gt;&gt;
+  let client: TestClient
+
+  beforeAll(async () =&gt; { ctx = await setupTestApp() })     // 每个文件一次：建库、迁移、建应用
+  beforeEach(async () =&gt; {
+    await resetDb(ctx.db)                                   // 每个测试一次：清空数据
+    ctx.mailer.outbox.length = 0
+    client = new TestClient(ctx.app)                        // 新的客户端 = 新的“浏览器”，没有 Cookie
+  })
+  // …各个 it(…)
+})
+</pre>
+</div>
+
+<p>Vitest 默认让不同的测试文件在不同的工作线程里并行运行，每个文件有自己的内存数据库，互不干扰。</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>15b</b>：用测试客户端测试网页</div>
+
+<h2 id="api">测试 Web 服务</h2>
+
+<p>
+  测试 API 同样用 <code>app.request()</code>，而且更简单：API 是无状态的，不需要 Cookie，每个请求自己带上认证头就行。原书写了一个辅助方法生成这些请求头：
+</p>
+
+<div class="code" data-lang="ts" data-file="tests/api.test.ts">
+<pre>
+const basic = (email: string, password: string) =&gt; ({
+  Authorization: `Basic ${btoa(`${email}:${password}`)}`,
+  Accept: 'application/json',
+  'Content-Type': 'application/json',
+})
+
+it('没带认证信息 → 401', async () =&gt; {
+  const res = await ctx.app.request('/api/v1/posts/', { headers: { 'Content-Type': 'application/json' } })
+  expect(res.status).toBe(401)
+})
+
+it('未确认的账户 → 403', async () =&gt; {
+  await createUser(ctx.db, { email: 'john@example.com', username: 'john', password: 'cat', confirmed: false })
+  const res = await ctx.app.request('/api/v1/posts/', { headers: basic('john@example.com', 'cat') })
+  expect(res.status).toBe(403)
+})
+</pre>
+</div>
+
+<p>原书例 15-5 的 <code>test_posts</code>：先插入一个用户，然后通过 API 写一篇文章、再读回来检查：</p>
+
+<div class="code" data-lang="ts" data-file="tests/api.test.ts">
+<pre>
+it('文章：创建、读取、列表、时间线、修改', async () =&gt; {
+  const u = await addUser('john@example.com', 'john', 'cat')
+  const headers = basic('john@example.com', 'cat')
+
+  // 空正文 → 400
+  let res = await ctx.app.request('/api/v1/posts/', { method: 'POST', headers, body: JSON.stringify({ body: '' }) })
+  expect(res.status).toBe(400)
+  expect((await res.json()).message).toBe('post does not have a body')
+
+  // 写一篇
+  res = await ctx.app.request('/api/v1/posts/', {
+    method: 'POST', headers, body: JSON.stringify({ body: 'body of the *blog* post' }),
+  })
+  expect(res.status).toBe(201)
+  const url = res.headers.get('Location')!
+
+  // 读回来
+  res = await ctx.app.request(url, { headers })
+  const post = await res.json()
+  expect(post.url).toBe(url)
+  expect(post.body_html).toBe('&lt;p&gt;body of the &lt;em&gt;blog&lt;/em&gt; post&lt;/p&gt;')   // Markdown 在服务器上渲染过了
+
+  // 时间线里也有它（自己关注自己，第 12 章）
+  res = await ctx.app.request(`/api/v1/users/${u.id}/timeline/`, { headers })
+  expect((await res.json()).count).toBe(1)
+})
+</pre>
+</div>
+
+<p>
+  原书提到，Flask 测试客户端不会自动把字典编码成 JSON，需要手动 <code>json.dumps()</code>，返回的正文也要 <code>json.loads()</code>。
+  标准的 <code>Request</code> / <code>Response</code> 也一样：请求正文用 <code>JSON.stringify()</code>，响应用 <code>await res.json()</code>。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 类型安全的测试客户端：hono/testing</div>
+  <p>
+    Hono 还提供了 <code>testClient()</code>（来自 <code>hono/testing</code>），它和第 14 章提到的 RPC 客户端 <code>hc</code> 一样，
+    能根据路由定义推断出路径和参数的类型，写成 <code>client.posts[':id'].$get({ param: { id: '1' } })</code> 这样。
+    要享受这种类型推断，路由需要用链式写法（<code>new Hono().get(…).post(…)</code>）来定义。我们的项目用的是普通写法，所以本章用 <code>app.request()</code>，它适用于任何写法。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>15c</b>：测试 Web 服务</div>
+
+<h2 id="e2e">用 Playwright 做端到端测试</h2>
+
+<p>
+  测试客户端无法完全模拟真实的运行环境。原书举的例子：页面里的 JavaScript 根本不会被执行。Flasky 就有两段这样的脚本（第 3 章的本地化时间、第 11 章的 Markdown 预览）。
+  要测试这些，只能用真正的浏览器连接真正运行着的服务器。原书用的是 Selenium，今天 JavaScript 生态里最流行的是微软的 <a href="https://playwright.dev">Playwright</a>：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install -D @playwright/test
+npx playwright install chromium        # 下载一个测试专用的 Chromium
+</pre>
+</div>
+
+<p>
+  原书为 Selenium 测试做了不少准备工作：在后台线程里启动 Flask 服务器、写一个只在测试模式下可用的 <code>/shutdown</code> 路由来关闭它、测试结束后清理数据库……
+  Playwright 把这些都接管了：在配置里告诉它“怎么启动服务器、服务器在哪个地址”，它会在测试前启动、等服务器就绪、测试后关闭。
+</p>
+
+<div class="code" data-lang="ts" data-file="playwright.config.ts">
+<pre>
+import { defineConfig } from '@playwright/test'
+
+export default defineConfig({
+  testDir: './e2e',
+  use: { baseURL: 'http://localhost:3100' },      // 默认就是无头模式（原书的 'headless' 参数）
+  webServer: {
+    command: 'npx tsx scripts/e2e-server.ts',     // 启动一个带测试数据的服务器
+    url: 'http://localhost:3100',                 // 等这个地址能访问了才开始测试
+  },
+})
+</pre>
+</div>
+
+<p>测试用的服务器：内存数据库，插入一些假数据和一个管理员（对应原书 <code>setUpClass()</code> 里做的事）：</p>
+
+<div class="code" data-lang="ts" data-file="scripts/e2e-server.ts">
+<pre>
+import { serve } from '@hono/node-server'
+import { eq } from 'drizzle-orm'
+import { createApp } from '../src/app.js'
+import { loadConfig } from '../src/config.js'
+import { createDb, migrateDb } from '../src/db/index.js'
+import { roles } from '../src/db/schema.js'
+import { fakePosts, fakeUsers } from '../src/fake.js'
+import { createMailer } from '../src/lib/email.js'
+import { insertRoles } from '../src/models/permissions.js'
+import { createUser } from '../src/models/users.js'
+
+const config = { ...loadConfig('testing'), csrf: true }    // 真浏览器会发 Origin 头，CSRF 可以打开
+const db = createDb('memory://')
+await migrateDb(db)
+await insertRoles(db)
+await fakeUsers(db, 10)
+await fakePosts(db, 10)
+
+const [admin] = await db.select().from(roles).where(eq(roles.name, 'Administrator'))
+await createUser(db, { email: 'john@example.com', username: 'john', password: 'cat', confirmed: true, roleId: admin.id })
+
+serve({ fetch: createApp({ config, db, mailer: createMailer(config) }).fetch, port: 3100 })
+</pre>
+</div>
+
+<p>测试本身（原书例 15-8）：打开首页、点“登录”、填表、提交、打开个人资料页：</p>
+
+<div class="code" data-lang="ts" data-file="e2e/admin.spec.ts">
+<pre>
+import { expect, test } from '@playwright/test'
+
+test('管理员登录并打开个人资料页', async ({ page }) =&gt; {
+  // 打开首页
+  await page.goto('/')
+  await expect(page.locator('h1')).toContainText('你好，陌生人')
+
+  // 进入登录页
+  await page.getByRole('link', { name: '登录', exact: true }).click()
+  await expect(page.locator('h1')).toHaveText('登录')
+
+  // 登录
+  await page.getByLabel('邮箱').fill('john@example.com')
+  await page.getByLabel('密码').fill('cat')
+  await page.getByRole('button', { name: '登录' }).click()
+  await expect(page.locator('h1')).toContainText('你好，john')
+
+  // 打开个人资料页
+  await page.getByRole('link', { name: '个人资料' }).click()
+  await expect(page.locator('h1')).toHaveText('john')
+})
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npx playwright test
+# Running 1 test using 1 worker
+#   ✓  1 e2e/admin.spec.ts:3:1 › 管理员登录并打开个人资料页 (3.3s)
+#   1 passed (15.0s)
+</pre>
+</div>
+
+<p>
+  和测试客户端的写法对比，原书指出了最大的不同：用 Selenium（Playwright 也一样）时，测试<strong>从不直接和应用打交道</strong>，
+  而是向浏览器发出命令，这些命令和真实用户用鼠标、键盘做的事一一对应。
+  Playwright 的定位方式也是按“用户看到的东西”来的：<code>getByRole('link', { name: '登录' })</code> 找的是“文字为‘登录’的链接”，
+  <code>getByLabel('邮箱')</code> 找的是“标签为‘邮箱’的输入框”——这也是第 4 章表单里 <code>&lt;label for&gt;</code> 要写对的另一个理由。
+</p>
+
+<div class="box tip">
+  <div class="t">&#128161; 想亲眼看着浏览器操作？</div>
+  <p>
+    原书说，注释掉 <code>headless</code> 选项就能看到真实的 Chrome 窗口。Playwright 里是 <code>npx playwright test --headed</code>；
+    更好用的是 <code>npx playwright test --ui</code>，它会打开一个界面，可以逐步回放每个操作，并查看每一步时页面的样子。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>15d</b>：用 Selenium 做端到端测试</div>
+
+<h2 id="worth">值得吗？</h2>
+
+<p>
+  原书用一节来回答这个问题：写测试客户端和浏览器测试真的值得吗？它的回答很有分量：
+  <strong>无论你愿不愿意，你的应用一定会被测试。</strong>你不测，你的用户就会替你测 —— 他们会发现 bug，然后你得在压力之下修复。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="测试金字塔">
+  <path class="ln" d="M380 20 L660 250 L100 250 Z" style="fill:none"/>
+  <rect class="bx-p" x="300" y="40" width="160" height="50" rx="8"/>
+  <text class="ttl on-p" x="380" y="62" text-anchor="middle">端到端（Playwright）</text>
+  <text class="sm" x="380" y="80" text-anchor="middle">少量 · 慢 · 最真实</text>
+  <rect class="bx-b" x="220" y="108" width="320" height="56" rx="8"/>
+  <text class="ttl on-b" x="380" y="132" text-anchor="middle">集成测试（app.request / TestClient）</text>
+  <text class="sm" x="380" y="152" text-anchor="middle">关键流程：注册登录、API 的认证与权限</text>
+  <rect class="bx-g" x="130" y="182" width="500" height="60" rx="8"/>
+  <text class="ttl on-g" x="380" y="206" text-anchor="middle">单元测试（直接调用 models/、lib/ 里的函数）</text>
+  <text class="sm" x="380" y="226" text-anchor="middle">大量 · 毫秒级 · 写起来最便宜：密码、令牌、权限、关注、分页……</text>
+  <text class="sm" x="700" y="70" text-anchor="middle">成本高</text>
+  <text class="sm" x="700" y="220" text-anchor="middle">成本低</text>
+  <path class="ln-d" d="M700 80 V206"/>
+</svg>
+<figcaption>图 15-3　测试金字塔：越往下越多、越快、越便宜。原书的建议正是这个形状</figcaption>
+</figure>
+
+<p>原书的建议可以总结成两条：</p>
+<ul>
+  <li><strong>能脱离请求环境测试的部分，一定要测。</strong>比如模型里的逻辑，写起来成本很低，却保证了应用核心的正确性。本书从第 8 章起就一直在这么做。</li>
+  <li><strong>把业务逻辑从处理函数里挪出去。</strong>处理函数应该很薄：接收请求、调用 <code>models/</code> 或 <code>lib/</code> 里的函数、返回响应。
+      这样大部分逻辑都能用便宜的单元测试覆盖，只有少数“必须在真实环境里才能验证”的功能才需要写端到端测试。</li>
+</ul>
+
+<p>回头看看我们的代码：<code>createUser()</code>、<code>confirmUser()</code>、<code>getPostsPage()</code>、<code>can()</code> 都是不依赖 <code>c</code> 的普通函数，所以测起来毫不费力；
+第 7 章的应用工厂和依赖注入，让整个应用可以用内存数据库和假邮件发送器组装起来测试。<strong>好测的代码，往往也是结构好的代码。</strong></p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li><code>vitest run --coverage</code> 用 V8 内置覆盖率生成报告，重点看“完全没测到”的地方；分支覆盖率检查每个 <code>if</code> 的两条路。</li>
+  <li><code>app.request()</code> 不需要服务器，直接把标准 <code>Request</code> 交给应用；包一层 Cookie 管理和重定向跟随，就得到了 Flask 测试客户端的全部能力。</li>
+  <li>测试配置关闭 CSRF（或者给请求带上 <code>Origin</code> 头）；测试邮件看 <code>mailer.outbox</code>。</li>
+  <li>每个测试文件一个内存数据库，每个测试前 <code>TRUNCATE</code> 清空，又快又隔离。</li>
+  <li>API 测试每个请求自己带认证头，用 <code>JSON.stringify</code> / <code>res.json()</code> 处理正文。</li>
+  <li>Playwright 负责启动服务器和驱动真实浏览器；按用户看到的角色和文字定位元素。</li>
+  <li>多写便宜的单元测试，少写昂贵的端到端测试；让处理函数保持轻薄。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>打开 <code>coverage/index.html</code>，找到 <code>routes/main.tsx</code> 里没被覆盖的“关注”路由，给它写一个测试：两个用户，A 关注 B，断言 B 的资料页显示“粉丝 1”。</li>
+    <li>写一个测试：用 <code>Origin</code> 头打开 CSRF 检查，断言“没带 Origin 的表单 POST 返回 403，带了就正常”。</li>
+    <li>从 <code>ctx.mailer.outbox[0].text</code> 里用正则提取确认链接，用它来确认账户，代替直接生成令牌。</li>
+    <li>给 Playwright 加一个测试：在首页的文本框里输入 <code>**粗体**</code>，断言预览区里出现了 <code>&lt;strong&gt;粗体&lt;/strong&gt;</code>（这正是测试客户端做不到的）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

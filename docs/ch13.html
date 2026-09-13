@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 13 章 · 用户评论 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="13">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 13 章</span>
+<h1>用户评论</h1>
+<p class="lede">
+  让用户互动，是社交博客成功的关键。这一章实现评论：存储、提交、分页显示，以及让协管员屏蔽不当评论。
+  这里用到的技术几乎都是前几章的组合，所以这一章也是一次很好的复习。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>设计 <code>comments</code> 表，它同时属于一篇文章和一个用户</li>
+    <li>在文章详情页显示评论、提交评论，并且提交后跳到最后一页</li>
+    <li>理解 URL 片段（<code>#comments</code>）的作用</li>
+    <li>用一个组件同时服务“普通显示”和“管理模式”两种场景</li>
+    <li>实现评论管理页，让协管员屏蔽或恢复评论</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="model">评论的数据库表示</h2>
+
+<p>
+  评论和文章很像：都有正文、作者和时间，而且都用 Markdown 写。不同的是，评论属于某一篇文章，所以它有两个外键：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="comments 表同时与 users 和 posts 构成一对多">
+  <rect class="bx-b" x="20" y="30" width="190" height="130" rx="10"/>
+  <text class="ttl on-b" x="115" y="54" text-anchor="middle">users</text>
+  <line class="ln" x1="20" y1="66" x2="210" y2="66"/>
+  <text class="mono" x="36" y="90">🔑 id</text>
+  <text class="mono" x="36" y="114">username</text>
+  <text class="mono" x="36" y="138">…</text>
+
+  <rect class="bx-a" x="285" y="20" width="190" height="210" rx="10"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">comments</text>
+  <line class="ln" x1="285" y1="56" x2="475" y2="56"/>
+  <text class="mono" x="301" y="80">🔑 id</text>
+  <text class="mono" x="301" y="104">body · body_html</text>
+  <text class="mono" x="301" y="128">timestamp</text>
+  <text class="mono on-r" x="301" y="152">disabled</text>
+  <text class="mono on-b" x="301" y="176">🔗 author_id</text>
+  <text class="mono on-g" x="301" y="200">🔗 post_id</text>
+
+  <rect class="bx-g" x="550" y="30" width="190" height="130" rx="10"/>
+  <text class="ttl on-g" x="645" y="54" text-anchor="middle">posts</text>
+  <line class="ln" x1="550" y1="66" x2="740" y2="66"/>
+  <text class="mono" x="566" y="90">🔑 id</text>
+  <text class="mono" x="566" y="114">body · author_id</text>
+  <text class="mono" x="566" y="138">…</text>
+
+  <path class="ln-b" d="M212 90 H250 V172 H281"/>
+  <text class="sm on-b" x="222" y="84">1</text><text class="sm on-b" x="262" y="166">多</text>
+  <path class="ln-g" d="M548 90 H510 V196 H479"/>
+  <text class="sm on-g" x="530" y="84">1</text><text class="sm on-g" x="484" y="190">多</text>
+</svg>
+<figcaption>图 13-1　评论分别和用户、文章构成一对多：用户写了很多评论，文章有很多评论（原书图 13-1）</figcaption>
+</figure>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+class Comment(db.Model):
+    __tablename__ = 'comments'
+    id = db.Column(db.Integer, primary_key=True)
+    body = db.Column(db.Text)
+    body_html = db.Column(db.Text)
+    timestamp = db.Column(db.DateTime, index=True,
+                          default=datetime.utcnow)
+    disabled = db.Column(db.Boolean)
+    author_id = db.Column(db.Integer,
+                          db.ForeignKey('users.id'))
+    post_id = db.Column(db.Integer,
+                        db.ForeignKey('posts.id'))
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+export const comments = pgTable('comments', {
+  id: serial('id').primaryKey(),
+  body: text('body').notNull(),
+  bodyHtml: text('body_html'),
+  timestamp: timestamp('timestamp', { withTimezone: true })
+    .notNull().defaultNow(),
+  disabled: boolean('disabled').notNull().default(false),
+  authorId: integer('author_id').notNull()
+    .references(() =&gt; users.id, { onDelete: 'cascade' }),
+  postId: integer('post_id').notNull()
+    .references(() =&gt; posts.id, { onDelete: 'cascade' }),
+}, (t) =&gt; [index('ix_comments_timestamp').on(t.timestamp)])
+</pre></div>
+  </div>
+</div>
+
+<ul>
+  <li><code>disabled</code> 是新东西：协管员用它屏蔽不当的评论。原书的列可以为空（<code>None</code>），我们直接给它 <code>notNull().default(false)</code>，省去“空值到底算不算屏蔽”的困惑。</li>
+  <li>两个外键都级联删除：删文章时它的评论一起删，删用户时他的评论一起删。</li>
+</ul>
+
+<p>
+  评论通常很短，所以原书给评论用了一份更严格的 HTML 白名单：去掉了段落、标题、列表这些块级标签，只留下文字格式。
+  复用第 11 章的 <code>renderMarkdown()</code>，换一份白名单就行：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+const COMMENT_TAGS = ['a', 'abbr', 'acronym', 'b', 'code', 'em', 'i', 'strong']
+
+export const commentBodyHtml = (body: string) =&gt; renderMarkdown(body, COMMENT_TAGS)
+
+export async function createComment(db: Db, postId: number, authorId: number, body: string) {
+  const [comment] = await db.insert(comments)
+    .values({ body, bodyHtml: commentBodyHtml(body), postId, authorId })
+    .returning()
+  return comment
+}
+</pre>
+</div>
+
+<p>
+  <code>&lt;p&gt;</code> 不在白名单里会怎样？sanitize-html 默认会<strong>去掉标签、保留里面的文字</strong>（相当于 Bleach 的 <code>strip=True</code>），
+  所以 <code>Good [post](http://example.com)!</code> 会变成 <code>Good &lt;a href="http://example.com"&gt;post&lt;/a&gt;!</code>，外面的 <code>&lt;p&gt;</code> 被剥掉了。
+</p>
+
+<p>别忘了在 <code>schema.ts</code> 里补上关系声明，并生成迁移：</p>
+
+<div class="code" data-lang="ts" data-file="src/db/schema.ts">
+<pre>
+export const commentsRelations = relations(comments, ({ one }) =&gt; ({
+  author: one(users, { fields: [comments.authorId], references: [users.id] }),
+  post: one(posts, { fields: [comments.postId], references: [posts.id] }),
+}))
+// usersRelations 和 postsRelations 里各加一行：comments: many(comments)
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npm run db:generate -- --name comments
+npm run db:migrate
+</pre>
+</div>
+
+<h2 id="submit">提交和显示评论</h2>
+
+<p>评论显示在第 11 章做的文章详情页（永久链接页）上，评论表单也放在这里：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="文章详情页的结构">
+  <rect class="bx" x="20" y="20" width="720" height="250" rx="12"/>
+  <rect class="bx-a" x="36" y="34" width="688" height="56" rx="8"/>
+  <text class="ttl on-a" x="52" y="58">文章（复用 PostList，传 [post]）</text>
+  <text class="sm" x="52" y="78">正文 · 编辑 · 永久链接 · 3 条评论</text>
+  <text class="ttl" x="36" y="116" id="c">评论</text>
+  <text class="mono on-b" x="100" y="116">&lt;h4 id="comments"&gt;</text>
+  <rect class="bx-b" x="68" y="126" width="656" height="40" rx="8"/>
+  <text class="sm on-b" x="84" y="151">评论表单（有 COMMENT 权限才显示）</text>
+  <rect class="bx" x="68" y="174" width="656" height="24" rx="6"/><text class="sm" x="84" y="191">susan · Good post!</text>
+  <rect class="bx" x="68" y="202" width="656" height="24" rx="6"/><text class="sm" x="84" y="219">john · Thank you!</text>
+  <rect class="bx-d" x="68" y="232" width="656" height="24" rx="6"/><text class="sm" x="84" y="249">分页导航，链接末尾带 #comments</text>
+</svg>
+<figcaption>图 13-2　评论列表比文章缩进一点，按时间<strong>正序</strong>排列，新评论在最后</figcaption>
+</figure>
+
+<p>评论的分页查询。和文章列表一样，一次 JOIN 带出作者信息：</p>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+function selectComments(db: Db) {
+  return db.select({
+    id: comments.id,
+    body: comments.body,
+    bodyHtml: comments.bodyHtml,
+    timestamp: comments.timestamp,
+    disabled: comments.disabled,
+    postId: comments.postId,
+    authorId: comments.authorId,
+    author: authorColumns,
+  })
+    .from(comments)
+    .innerJoin(users, eq(comments.authorId, users.id))
+}
+
+export async function getPostComments(db: Db, postId: number, page: number, perPage: number) {
+  const where = eq(comments.postId, postId)
+  if (page === -1) {
+    // -1 表示“最后一页”：刚发表的评论在那里
+    const total = await db.$count(comments, where)
+    page = Math.floor((total - 1) / perPage) + 1
+  }
+  return paginate(
+    page,
+    perPage,
+    () =&gt; db.$count(comments, where),
+    (limit, offset) =&gt; selectComments(db).where(where)
+      .orderBy(asc(comments.timestamp), asc(comments.id)).limit(limit).offset(offset),
+  )
+}
+</pre>
+</div>
+
+<p>
+  那个 <code>page === -1</code> 是原书的一个巧妙设计。评论按时间正序排列，新评论总在最后一页。
+  用户提交评论后，处理函数重定向到 <code>?page=-1</code>，查询时再把 -1 换算成真正的最后一页，这样用户马上就能看到自己刚写的评论：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="把 page=-1 换算成最后一页">
+  <rect class="bx" x="20" y="50" width="160" height="60" rx="10"/>
+  <text class="ttl" x="100" y="76" text-anchor="middle">提交评论后</text>
+  <text class="mono" x="100" y="96" text-anchor="middle">?page=-1#comments</text>
+  <path class="ln" d="M182 80 H230" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="234" y="30" width="300" height="100" rx="10"/>
+  <text class="ttl on-a" x="384" y="54" text-anchor="middle">换算</text>
+  <text class="mono" x="384" y="80" text-anchor="middle">total = 61，perPage = 30</text>
+  <text class="mono" x="384" y="102" text-anchor="middle">⌊(61 − 1) / 30⌋ + 1 = 3</text>
+  <text class="sm" x="384" y="122" text-anchor="middle">第 3 页只有 1 条：就是刚发的那条</text>
+  <path class="ln-g" d="M536 80 H584" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="588" y="50" width="152" height="60" rx="10"/>
+  <text class="ttl on-g" x="664" y="76" text-anchor="middle">显示第 3 页</text>
+  <text class="sm" x="664" y="96" text-anchor="middle">并滚动到评论区</text>
+</svg>
+<figcaption>图 13-3　“-1 表示最后一页”这个约定，让重定向的地址不必事先知道总页数</figcaption>
+</figure>
+
+<p>详情页的 GET 和 POST。评论需要登录并且有 <code>COMMENT</code> 权限（原书只在页面上隐藏了表单，没有在处理函数里检查，我们两处都做）：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+const commentSchema = z.object({ body: z.string().trim().min(1, '评论不能为空') })
+
+async function renderPost(c: Context&lt;AppEnv&gt;, extra = {}) {
+  const id = Number(c.req.param('id'))
+  const post = await getPost(c.var.db, id)
+  if (!post) throw new HTTPException(404)
+  const comments = await getPostComments(c.var.db, id, pageParam(c), c.var.config.commentsPerPage)
+  return c.render(&lt;PostPage post={post} user={c.var.user} comments={comments} {...extra} /&gt;, { title: '文章' })
+}
+
+main.get('/post/:id{[0-9]+}', (c) =&gt; renderPost(c))
+
+main.post(
+  '/post/:id{[0-9]+}',
+  loginRequired,
+  permissionRequired(Permission.COMMENT),
+  validateForm(commentSchema, (c, values, errors) =&gt; renderPost(c, { values, errors })),
+  async (c) =&gt; {
+    const id = Number(c.req.param('id'))
+    if (!(await getPost(c.var.db, id))) throw new HTTPException(404)
+    await createComment(c.var.db, id, requireUser(c).id, c.req.valid('form').body)
+    flash(c, '评论已发表。')
+    return c.redirect(`/post/${id}?page=-1#comments`)
+  },
+)
+</pre>
+</div>
+
+<h3>URL 片段：#comments</h3>
+
+<p>
+  注意重定向地址末尾的 <code>#comments</code>。原书解释：这叫 <strong>URL 片段</strong>（fragment），用来指定页面加载后的初始滚动位置。
+  浏览器会找到 <code>id</code> 等于这个值的元素，把它滚动到窗口顶部。评论区的标题就是 <code>&lt;h4 id="comments"&gt;评论&lt;/h4&gt;</code>。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 片段不会发给服务器</div>
+  <p>
+    <code>#</code> 后面的部分只在浏览器里使用，请求里根本不包含它。所以服务器不需要处理它，也读不到它。
+    这也意味着：分页导航里的每个页码链接都要自己带上 <code>#comments</code>，否则翻页后又会从页面顶部开始。
+    第 11 章的 <code>PaginationWidget</code> 预留了 <code>fragment</code> 参数，就是为这里准备的（原书也给分页宏加了同名参数）。
+  </p>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/views/pages.tsx">
+<pre>
+export function PostPage({ post, user, comments, values, errors }: FormState &amp; {
+  post: PostWithAuthor
+  user: CurrentUser | null
+  comments: Pagination&lt;CommentWithAuthor&gt;
+}) {
+  return (
+    &lt;&gt;
+      &lt;PostList posts={[post]} user={user} /&gt;
+      &lt;h4 id="comments"&gt;评论&lt;/h4&gt;
+      {can(user, Permission.COMMENT) &amp;&amp; (
+        &lt;form method="post" class="comment-form"&gt;
+          &lt;Field name="body" label="写下你的评论" values={values} errors={errors} /&gt;
+          &lt;Submit /&gt;
+        &lt;/form&gt;
+      )}
+      &lt;CommentList comments={comments.items} /&gt;
+      &lt;PaginationWidget pagination={comments} href={(p) =&gt; `/post/${post.id}?page=${p}`} fragment="#comments" /&gt;
+    &lt;/&gt;
+  )
+}
+</pre>
+</div>
+
+<h3>文章列表里的评论数</h3>
+
+<p>
+  首页和资料页上的每篇文章，都要显示“N 条评论”并链接到评论区。原书在模板里直接写 <code>{{ post.comments.count() }}</code> ——
+  这意味着每篇文章都要发一次 COUNT 查询，一页 20 篇就是 20 次，又是 N+1。
+  还记得第 11 章 <code>selectPosts()</code> 里那个评论数子查询吗？它就是为这里准备的，一页文章的评论数在同一条查询里就算好了：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+&lt;a href={`/post/${post.id}#comments`}&gt;
+  &lt;span class="badge text-bg-primary"&gt;{post.commentCount} 条评论&lt;/span&gt;
+&lt;/a&gt;
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>13a</b>：文章评论（含迁移）</div>
+
+<h2 id="moderation">评论管理</h2>
+
+<p>
+  第 9 章定义了 <code>Permission.MODERATE</code> 权限：拥有它的人可以管理别人的评论。现在把这个功能做出来。
+  先在导航栏加一个只有协管员能看到的链接：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/layout.tsx">
+<pre>
+{can(user, Permission.MODERATE) &amp;&amp; (
+  &lt;li class="nav-item"&gt;&lt;a class="nav-link" href="/moderate"&gt;管理评论&lt;/a&gt;&lt;/li&gt;
+)}
+</pre>
+</div>
+
+<p>管理页把所有文章的评论放在一个列表里，最新的在前面：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+main.get('/moderate', loginRequired, permissionRequired(Permission.MODERATE), async (c) =&gt; {
+  const comments = await getAllComments(c.var.db, pageParam(c), c.var.config.commentsPerPage)
+  return c.render(&lt;ModeratePage comments={comments} /&gt;, { title: '评论管理' })
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+export async function getAllComments(db: Db, page: number, perPage: number) {
+  return paginate(
+    page,
+    perPage,
+    () =&gt; db.$count(comments),
+    (limit, offset) =&gt; selectComments(db)
+      .orderBy(desc(comments.timestamp), desc(comments.id)).limit(limit).offset(offset),
+  )
+}
+</pre>
+</div>
+
+<h3>一个组件，两种模式</h3>
+
+<p>
+  原书的管理页复用了 <code>_comments.html</code>，但它需要在管理模式下多显示一些东西。为此原书用了 Jinja2 的一个技巧：
+  在 <code>include</code> 之前用 <code>{% set moderate = True %}</code> 定义一个变量，被包含的模板能看到它。
+  组件不需要这种隐式的变量传递 —— 直接加一个 <code>moderate</code> 属性：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="普通模式与管理模式下一条被屏蔽评论的显示差别">
+  <rect class="bx" x="20" y="20" width="350" height="186" rx="10"/>
+  <text class="ttl" x="195" y="44" text-anchor="middle">普通模式（文章页）</text>
+  <rect class="bx" x="36" y="58" width="318" height="40" rx="6"/>
+  <text class="sm" x="48" y="82">susan · 很有帮助，谢谢！</text>
+  <rect class="bx-d" x="36" y="106" width="318" height="40" rx="6"/>
+  <text class="sm" x="48" y="124">eve</text>
+  <text class="sm on-r" x="48" y="140">这条评论已被管理员屏蔽。</text>
+  <text class="sm" x="195" y="176" text-anchor="middle">被屏蔽的评论只显示提示，看不到内容</text>
+
+  <rect class="bx-a" x="390" y="20" width="350" height="186" rx="10"/>
+  <text class="ttl on-a" x="565" y="44" text-anchor="middle">管理模式（/moderate）</text>
+  <rect class="bx" x="406" y="58" width="318" height="40" rx="6"/>
+  <text class="sm" x="418" y="82">susan · 很有帮助，谢谢！</text>
+  <rect class="bx-r" x="662" y="66" width="54" height="24" rx="5"/><text class="sm on-r" x="689" y="83" text-anchor="middle">屏蔽</text>
+  <rect class="bx-d" x="406" y="106" width="318" height="56" rx="6"/>
+  <text class="sm" x="418" y="124">eve</text>
+  <text class="sm on-r" x="418" y="140">这条评论已被管理员屏蔽。</text>
+  <text class="sm" x="418" y="156">买便宜手表请访问……（内容仍然可见）</text>
+  <rect class="bx" x="662" y="122" width="54" height="24" rx="5"/><text class="sm" x="689" y="139" text-anchor="middle">恢复</text>
+  <text class="sm" x="565" y="190" text-anchor="middle">协管员能看到内容，才能判断要不要恢复</text>
+</svg>
+<figcaption>图 13-4　同一个 <code>CommentList</code> 组件，<code>moderate</code> 属性决定显示方式</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+export function CommentList({ comments, moderate = false, page = 1 }: {
+  comments: CommentWithAuthor[]
+  moderate?: boolean
+  page?: number
+}) {
+  return (
+    &lt;ul class="comments"&gt;
+      {comments.map((comment) =&gt; (
+        &lt;li class="comment"&gt;
+          &lt;div class="comment-thumbnail"&gt;
+            &lt;a href={`/user/${comment.author.username}`}&gt;
+              &lt;img class="rounded profile-thumbnail" src={gravatar(comment.author, 40)} alt="" /&gt;
+            &lt;/a&gt;
+          &lt;/div&gt;
+          &lt;div class="comment-content"&gt;
+            &lt;div class="comment-date"&gt;&lt;Moment ts={comment.timestamp} /&gt;&lt;/div&gt;
+            &lt;div class="comment-author"&gt;&lt;a href={`/user/${comment.author.username}`}&gt;{comment.author.username}&lt;/a&gt;&lt;/div&gt;
+            &lt;div class="comment-body"&gt;
+              {comment.disabled &amp;&amp; &lt;p&gt;&lt;i&gt;这条评论已被管理员屏蔽。&lt;/i&gt;&lt;/p&gt;}
+              {(moderate || !comment.disabled) &amp;&amp; (comment.bodyHtml ? raw(comment.bodyHtml) : comment.body)}
+            &lt;/div&gt;
+            {moderate &amp;&amp; (
+              &lt;form method="post" action={`/moderate/${comment.disabled ? 'enable' : 'disable'}/${comment.id}?page=${page}`}&gt;
+                {comment.disabled
+                  ? &lt;button class="btn btn-outline-secondary btn-sm"&gt;恢复&lt;/button&gt;
+                  : &lt;button class="btn btn-danger btn-sm"&gt;屏蔽&lt;/button&gt;}
+              &lt;/form&gt;
+            )}
+          &lt;/div&gt;
+        &lt;/li&gt;
+      ))}
+    &lt;/ul&gt;
+  )
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/views/pages.tsx">
+<pre>
+export function ModeratePage({ comments }: { comments: Pagination&lt;CommentWithAuthor&gt; }) {
+  return (
+    &lt;&gt;
+      &lt;div class="page-header"&gt;&lt;h1&gt;评论管理&lt;/h1&gt;&lt;/div&gt;
+      &lt;CommentList comments={comments.items} moderate page={comments.page} /&gt;
+      &lt;PaginationWidget pagination={comments} href={(p) =&gt; `/moderate?page=${p}`} /&gt;
+    &lt;/&gt;
+  )
+}
+</pre>
+</div>
+
+<h3>屏蔽和恢复</h3>
+
+<p>
+  两个按钮分别提交到“屏蔽”和“恢复”两个路由。原书用的是 GET 链接，我们用 POST 小表单（修改数据的操作都用 POST，理由见第 8 章）。
+  两个路由几乎一样，用一个循环注册：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+for (const action of ['enable', 'disable'] as const) {
+  main.post(`/moderate/${action}/:id{[0-9]+}`, loginRequired, permissionRequired(Permission.MODERATE), async (c) =&gt; {
+    const ok = await setCommentDisabled(c.var.db, Number(c.req.param('id')), action === 'disable')
+    if (!ok) throw new HTTPException(404)
+    return c.redirect(`/moderate?page=${pageParam(c)}`)     // 回到刚才那一页
+  })
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+export async function setCommentDisabled(db: Db, id: number, disabled: boolean) {
+  const rows = await db.update(comments).set({ disabled }).where(eq(comments.id, id)).returning({ id: comments.id })
+  return rows.length &gt; 0          // 0 行被更新 = 评论不存在
+}
+</pre>
+</div>
+
+<p>
+  注意按钮表单的 <code>action</code> 里带着 <code>?page=当前页</code>，处理函数重定向时把它原样带回去。
+  原书特别提到这一点：协管员翻到第 5 页屏蔽了一条评论，处理完应该还停在第 5 页，而不是被送回第 1 页。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="屏蔽评论的完整往返">
+  <rect class="bx-a" x="20" y="50" width="170" height="70" rx="10"/>
+  <text class="ttl on-a" x="105" y="76" text-anchor="middle">/moderate?page=5</text>
+  <text class="sm" x="105" y="96" text-anchor="middle">点“屏蔽”</text>
+  <path class="ln" d="M192 85 H240" marker-end="url(#ar)"/>
+  <rect class="bx" x="244" y="40" width="270" height="90" rx="10"/>
+  <text class="mono" x="379" y="64" text-anchor="middle">POST /moderate/disable/42?page=5</text>
+  <text class="sm" x="379" y="88" text-anchor="middle">loginRequired → permissionRequired(MODERATE)</text>
+  <text class="sm" x="379" y="108" text-anchor="middle">UPDATE comments SET disabled = true</text>
+  <path class="ln-g" d="M516 85 H564" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="568" y="50" width="172" height="70" rx="10"/>
+  <text class="ttl on-g" x="654" y="76" text-anchor="middle">302</text>
+  <text class="mono" x="654" y="96" text-anchor="middle">/moderate?page=5</text>
+  <text class="sm" x="380" y="158" text-anchor="middle">又是 PRG 模式：刷新页面不会重复提交</text>
+</svg>
+<figcaption>图 13-5　屏蔽一条评论：POST → 更新 → 重定向回原来的页码</figcaption>
+</figure>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>13b</b>：评论管理</div>
+
+<p>
+  原书说：社交功能到此就全部完成了。下一章，我们把应用的功能以 API 的形式开放出来，让手机 App 这样的客户端也能使用。
+</p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li><code>comments</code> 表有两个外键（作者、文章），各自构成一对多；<code>disabled</code> 用 <code>notNull().default(false)</code> 避免三态。</li>
+  <li>评论的 Markdown 用更严格的白名单，块级标签被剥掉但保留文字。</li>
+  <li>提交评论后重定向到 <code>?page=-1#comments</code>：-1 换算成最后一页，片段让浏览器滚动到评论区；分页链接也要带上片段。</li>
+  <li>文章列表的评论数来自第 11 章的子查询，而不是每篇文章单独 COUNT。</li>
+  <li><code>CommentList</code> 组件用 <code>moderate</code> 属性切换两种显示，代替 Jinja2 的 <code>{% set %}</code> + <code>include</code>。</li>
+  <li>屏蔽 / 恢复用 POST，带着页码往返，保持协管员的位置。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给一篇文章添加 65 条假评论（每页 30 条），然后发表一条新评论，确认你被送到了第 3 页的评论区。</li>
+    <li>在资料页上显示“N 条评论”（提示：<code>getProfileStats</code> 里已经算好了 <code>commentCount</code>）。</li>
+    <li>让评论的作者可以删除自己的评论，协管员可以删除任何评论。想一想：删除和屏蔽，各适合什么场景？</li>
+    <li>在评论管理页加一个筛选：“只看被屏蔽的评论”（提示：给 <code>getAllComments</code> 加一个可选的 <code>where</code> 条件）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

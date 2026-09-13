@@ -1,0 +1,920 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 11 章 · 博客文章 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="11">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 11 章</span>
+<h1>博客文章</h1>
+<p class="lede">
+  这一章实现 Flasky 的核心功能：写文章和读文章。途中会学到几个非常通用的技术：
+  用一条 JOIN 查询代替成百上千次小查询、复用页面片段、给长列表分页、
+  以及安全地处理用户写的富文本（Markdown）。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>定义 <code>posts</code> 表，在首页发布和展示文章</li>
+    <li>理解 N+1 查询问题，用 JOIN 和子查询一次取出文章、作者和评论数</li>
+    <li>把文章列表做成可复用的组件，同时用在首页和资料页</li>
+    <li>用 Faker 生成大量假数据，实现分页查询和分页导航</li>
+    <li>支持 Markdown：浏览器端实时预览，服务器端转换并清洗 HTML</li>
+    <li>给每篇文章一个永久链接，并允许作者和管理员编辑</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="model">发布和展示文章</h2>
+
+<p>一篇文章有正文、时间和作者。作者是一个指向 <code>users</code> 的外键，所以用户和文章之间是一对多关系：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+class Post(db.Model):
+    __tablename__ = 'posts'
+    id = db.Column(db.Integer, primary_key=True)
+    body = db.Column(db.Text)
+    timestamp = db.Column(db.DateTime, index=True,
+                          default=datetime.utcnow)
+    author_id = db.Column(db.Integer,
+                          db.ForeignKey('users.id'))
+
+class User(UserMixin, db.Model):
+    # ...
+    posts = db.relationship('Post', backref='author',
+                            lazy='dynamic')
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+export const posts = pgTable('posts', {
+  id: serial('id').primaryKey(),
+  body: text('body').notNull(),
+  timestamp: timestamp('timestamp', { withTimezone: true })
+    .notNull().defaultNow(),
+  authorId: integer('author_id').notNull()
+    .references(() =&gt; users.id, { onDelete: 'cascade' }),
+}, (t) =&gt; [index('ix_posts_timestamp').on(t.timestamp)])
+
+export const postsRelations = relations(posts, ({ one }) =&gt; ({
+  author: one(users, { fields: [posts.authorId], references: [users.id] }),
+}))
+</pre></div>
+  </div>
+</div>
+
+<ul>
+  <li><code>timestamp</code> 加了索引：文章列表总是按时间倒序排列，有了索引数据库就不必每次都把全表排一遍序。</li>
+  <li><code>onDelete: 'cascade'</code>：删除用户时，数据库自动删除他的文章，不会留下“作者不存在”的孤儿文章。</li>
+</ul>
+
+<p>首页的发布表单只有一个文本框。写入数据库的函数和第 5 章的插入一模一样：</p>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+export async function createPost(db: Db, authorId: number, body: string, timestamp?: Date) {
+  const [post] = await db.insert(posts).values({ body, authorId, timestamp }).returning()
+  return post
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+const postSchema = z.object({ body: z.string().trim().min(1, '内容不能为空') })
+
+main.post(
+  '/',
+  permissionRequired(Permission.WRITE),            // 没有写文章权限的人，提交也没用
+  validateForm(postSchema, (c, values, errors) =&gt; renderIndex(c, { values, errors })),
+  async (c) =&gt; {
+    await createPost(c.var.db, requireUser(c).id, c.req.valid('form').body)
+    return c.redirect('/')                         // PRG，第 4 章
+  },
+)
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 不再需要 _get_current_object()</div>
+  <p>
+    原书这里有个小插曲：<code>current_user</code> 是一个线程局部的代理对象，写数据库时要用 <code>current_user._get_current_object()</code> 取出真正的用户对象。
+    我们的 <code>c.var.user</code> 本来就是普通对象，而且只需要它的 <code>id</code>，这个问题根本不存在。
+  </p>
+</div>
+
+<h3>一次查询取出文章和作者</h3>
+
+<p>
+  文章列表里每一条都要显示作者的用户名和头像。原书的模板直接写 <code>post.author.username</code>，SQLAlchemy 会在访问 <code>author</code> 时<em>自动</em>去查一次用户。
+  方便，但藏着一个性能陷阱：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="N+1 查询与 JOIN 查询的对比">
+  <text class="ttl on-r" x="20" y="22">N+1：先查 20 篇文章，再为每篇查一次作者</text>
+  <rect class="bx" x="20" y="34" width="110" height="34" rx="6"/>
+  <text class="mono" x="75" y="56" text-anchor="middle">SELECT posts</text>
+  <path class="ln-r" d="M132 51 H158" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="162" y="34" width="36" height="34" rx="4"/><text class="sm" x="180" y="56" text-anchor="middle">1</text>
+  <rect class="bx-r" x="204" y="34" width="36" height="34" rx="4"/><text class="sm" x="222" y="56" text-anchor="middle">2</text>
+  <rect class="bx-r" x="246" y="34" width="36" height="34" rx="4"/><text class="sm" x="264" y="56" text-anchor="middle">3</text>
+  <rect class="bx-r" x="288" y="34" width="36" height="34" rx="4"/><text class="sm" x="306" y="56" text-anchor="middle">4</text>
+  <text class="sm on-r" x="336" y="56">… 共 20 次 SELECT users，再加 20 次 COUNT comments（第 13 章）</text>
+  <text class="sm" x="20" y="92">每次查询都有网络往返和解析开销；列表越长越慢，而开发时数据少，很难察觉</text>
+
+  <line class="ln-d" x1="20" y1="110" x2="740" y2="110"/>
+
+  <text class="ttl on-g" x="20" y="140">JOIN：一条查询，数据库在内部把两张表拼好</text>
+  <rect class="bx-g" x="20" y="152" width="720" height="104" rx="10"/>
+  <text class="mono" x="36" y="176">SELECT posts.*, users.id, users.username, users.email, users.avatar_hash,</text>
+  <text class="mono" x="36" y="196">       (SELECT count(*) FROM comments WHERE comments.post_id = posts.id) AS comment_count</text>
+  <text class="mono" x="36" y="216">FROM posts INNER JOIN users ON posts.author_id = users.id</text>
+  <text class="mono" x="36" y="236">ORDER BY posts.timestamp DESC LIMIT 20 OFFSET 0</text>
+</svg>
+<figcaption>图 11-1　“N+1 查询”是 ORM 最常见的性能问题。Drizzle 不会偷偷帮你查，所以你会自然地写出右边的形式</figcaption>
+</figure>
+
+<p>
+  Drizzle 从不在背后自动查询 —— 你要什么数据，就在查询里明确地写出来。
+  下面这个函数一次取出文章、作者的几个字段，还用一个<strong>子查询</strong>顺便算出评论数（评论在第 13 章实现，这里先把列准备好）：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+const authorColumns = {
+  id: users.id,
+  username: users.username,
+  email: users.email,
+  avatarHash: users.avatarHash,
+}
+
+function selectPosts(db: Db) {
+  return db.select({
+    id: posts.id,
+    body: posts.body,
+    bodyHtml: posts.bodyHtml,
+    timestamp: posts.timestamp,
+    authorId: posts.authorId,
+    author: authorColumns,                 // 嵌套对象：结果里是 post.author.username
+    commentCount: sql&lt;number&gt;`(select count(*) from ${comments} where ${comments.postId} = ${posts.id})`
+      .mapWith(Number),
+  })
+    .from(posts)
+    .innerJoin(users, eq(posts.authorId, users.id))
+}
+
+// 结果的类型直接从查询推导出来，不用手写
+export type PostWithAuthor = Awaited&lt;ReturnType&lt;typeof selectPosts&gt;&gt;[number]
+</pre>
+</div>
+
+<p>
+  <code>sql`…`</code> 是 Drizzle 写原生 SQL 片段的方式（第 5 章说过：好的 ORM 要允许你随时下沉到 SQL）。
+  里面的 <code>${comments.postId}</code> 会被正确地展开成带引号的列名，<code>.mapWith(Number)</code> 把 PostgreSQL 返回的 <code>bigint</code> 计数转成 JavaScript 数字。
+</p>
+
+<h3>文章列表组件</h3>
+
+<p>
+  原书先把文章列表写在首页模板里，接着发现资料页也要显示同样的列表，于是把这段 HTML 移进了 <code>_posts.html</code>，两个页面各自 <code>{% include %}</code> 它。
+  在 JSX 里这就是一个组件：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+export function PostList({ posts, user }: { posts: PostWithAuthor[]; user: CurrentUser | null }) {
+  return (
+    &lt;ul class="posts"&gt;
+      {posts.map((post) =&gt; (
+        &lt;li class="post"&gt;
+          &lt;div class="post-thumbnail"&gt;
+            &lt;a href={`/user/${post.author.username}`}&gt;
+              &lt;img class="rounded profile-thumbnail" src={gravatar(post.author, 40)} alt="" /&gt;
+            &lt;/a&gt;
+          &lt;/div&gt;
+          &lt;div class="post-content"&gt;
+            &lt;div class="post-date"&gt;&lt;Moment ts={post.timestamp} /&gt;&lt;/div&gt;
+            &lt;div class="post-author"&gt;&lt;a href={`/user/${post.author.username}`}&gt;{post.author.username}&lt;/a&gt;&lt;/div&gt;
+            &lt;div class="post-body"&gt;{post.body}&lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/li&gt;
+      ))}
+    &lt;/ul&gt;
+  )
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="一条文章在页面上的布局">
+  <rect class="bx" x="20" y="20" width="720" height="110" rx="10"/>
+  <rect class="bx-d" x="34" y="34" width="40" height="40" rx="6"/>
+  <text class="sm" x="54" y="58" text-anchor="middle">头像</text>
+  <text class="ttl on-a" x="90" y="48">john</text>
+  <text class="sm" x="724" y="48" text-anchor="end">3 分钟前</text>
+  <text class="lbl" x="90" y="72">今天学了 Drizzle 的关系查询，比想象中简单……</text>
+  <rect class="bx-b" x="468" y="96" width="60" height="22" rx="5"/><text class="sm on-b" x="498" y="111" text-anchor="middle">编辑</text>
+  <rect class="bx" x="536" y="96" width="80" height="22" rx="5"/><text class="sm" x="576" y="111" text-anchor="middle">永久链接</text>
+  <rect class="bx-b" x="624" y="96" width="100" height="22" rx="5"/><text class="sm on-b" x="674" y="111" text-anchor="middle">3 条评论</text>
+  <text class="sm" x="90" y="112">post-thumbnail · post-author · post-date · post-body · post-footer</text>
+</svg>
+<figcaption>图 11-2　一条文章的结构。底部的三个按钮在本章后半和第 13 章陆续加上</figcaption>
+</figure>
+
+<p>首页和资料页都只需要把数据传进去：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+// 首页
+&lt;PostList posts={pagination.items} user={user} /&gt;
+
+// 资料页
+&lt;h3&gt;{profile.username} 的文章&lt;/h3&gt;
+&lt;PostList posts={pagination.items} user={viewer} /&gt;
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>11a</b> 发布文章（含迁移）· <b>11b</b> 资料页上的文章</div>
+
+<h2 id="fake">生成假数据</h2>
+
+<p>
+  要开发分页，就需要大量文章。手动录入太慢，原书用 Faker 这个包生成看起来很真实的名字、邮箱、段落。JavaScript 有同名的
+  <a href="https://fakerjs.dev">@faker-js/faker</a>。它只在开发时需要，所以装成开发依赖（原书为此把 requirements 拆成了 <code>dev.txt</code> 和 <code>prod.txt</code>，第 7 章讲过 npm 里对应的是 <code>-D</code>）：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install -D @faker-js/faker
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/fake.ts">
+<pre>
+import { faker } from '@faker-js/faker'
+import { count } from 'drizzle-orm'
+import type { Db } from './db/index.js'
+import { users } from './db/schema.js'
+import { createPost } from './models/posts.js'
+import { createUser } from './models/users.js'
+
+// 用户名或邮箱撞车时，PostgreSQL 报错码 23505（唯一约束冲突）
+function isUniqueViolation(err: unknown): boolean {
+  const e = err as { code?: string; cause?: { code?: string } }
+  return e?.code === '23505' || e?.cause?.code === '23505'
+}
+
+export async function fakeUsers(db: Db, total = 100) {
+  let created = 0
+  while (created &lt; total) {
+    try {
+      await createUser(db, {
+        email: faker.internet.email(),
+        username: faker.internet.username().replace(/[^A-Za-z0-9_.]/g, '') || 'user',
+        password: 'password',
+        confirmed: true,
+        name: faker.person.fullName(),
+        location: faker.location.city(),
+        aboutMe: faker.lorem.sentence(),
+        memberSince: faker.date.past(),
+      })
+      created++
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err       // 重复了就跳过重来，其他错误照常抛出
+    }
+  }
+}
+
+export async function fakePosts(db: Db, total = 100) {
+  const [{ n }] = await db.select({ n: count() }).from(users)
+  for (let i = 0; i &lt; total; i++) {
+    // 随机跳过若干行再取一行 = 随机挑一个作者（原书同样用 offset）
+    const [author] = await db.select({ id: users.id }).from(users)
+      .offset(faker.number.int({ min: 0, max: n - 1 })).limit(1)
+    await createPost(db, author.id, faker.lorem.paragraphs(2), faker.date.past())
+  }
+}
+</pre>
+</div>
+
+<p>
+  Faker 是随机生成的，用户名可能重复。原书的做法是提交时捕获 <code>IntegrityError</code> 并回滚，然后重试 —— 我们捕获数据库的“唯一约束冲突”错误，思路完全一样。
+  配一个命令脚本：
+</p>
+
+<div class="code" data-lang="ts" data-file="scripts/fake.ts">
+<pre>
+import { loadConfig } from '../src/config.js'
+import { createDb } from '../src/db/index.js'
+import { fakePosts, fakeUsers } from '../src/fake.js'
+
+try { process.loadEnvFile() } catch { /* 没有 .env 也行 */ }
+
+// 用法：npm run fake -- users 100   或   npm run fake -- posts 100
+const [what, n = '100'] = process.argv.slice(2)
+const db = createDb(loadConfig().databaseUrl)
+if (what === 'users') await fakeUsers(db, Number(n))
+else if (what === 'posts') await fakePosts(db, Number(n))
+process.exit(0)
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npm pkg set scripts.fake="tsx scripts/fake.ts"
+npm run fake -- users 100
+npm run fake -- posts 100
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>11c</b>：生成假用户和假文章</div>
+
+<h2 id="paginate">分页</h2>
+
+<p>
+  网站越来越大，把所有文章一次显示出来会越来越慢：生成慢、传输慢、浏览器渲染也慢。解决办法是<strong>分页</strong>：每次只取一页的数据。
+</p>
+
+<h3>在数据库里分页：LIMIT 和 OFFSET</h3>
+
+<p>
+  原书用 Flask-SQLAlchemy 的 <code>paginate()</code>，它在底层做了两件事：用 <code>LIMIT</code> 和 <code>OFFSET</code> 只取出一页，再用 <code>COUNT</code> 算出总数（用来计算一共多少页）。
+  我们自己写一个小小的 <code>paginate()</code>，把这两件事包起来：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="LIMIT 和 OFFSET 如何取出第 3 页">
+  <text class="sm" x="20" y="22">按时间倒序排好的全部文章（total = 150，每页 20 篇）</text>
+  <rect class="bx" x="20" y="34" width="150" height="40" rx="6"/><text class="sm" x="95" y="58" text-anchor="middle">第 1 页：1–20</text>
+  <rect class="bx" x="176" y="34" width="150" height="40" rx="6"/><text class="sm" x="251" y="58" text-anchor="middle">第 2 页：21–40</text>
+  <rect class="bx-a" x="332" y="34" width="150" height="40" rx="6"/><text class="sm on-a" x="407" y="58" text-anchor="middle">第 3 页：41–60</text>
+  <rect class="bx" x="488" y="34" width="150" height="40" rx="6"/><text class="sm" x="563" y="58" text-anchor="middle">第 4 页：61–80</text>
+  <text class="sm" x="660" y="58">… 共 8 页</text>
+
+  <path class="ln-d" d="M20 90 H330"/>
+  <text class="mono" x="175" y="108" text-anchor="middle">OFFSET (3−1)×20 = 40</text>
+  <text class="sm" x="175" y="124" text-anchor="middle">跳过前 40 条</text>
+  <path class="ln-a" d="M332 90 H482"/>
+  <text class="mono on-a" x="407" y="108" text-anchor="middle">LIMIT 20</text>
+  <text class="sm" x="407" y="124" text-anchor="middle">再取 20 条</text>
+
+  <rect class="bx-b" x="20" y="146" width="720" height="40" rx="8"/>
+  <text class="mono on-b" x="36" y="171">SELECT count(*) FROM posts  → 150  →  pages = ceil(150 / 20) = 8</text>
+</svg>
+<figcaption>图 11-3　一页 = 一次带 LIMIT/OFFSET 的查询 + 一次 COUNT 查询</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/lib/paginate.ts">
+<pre>
+export async function paginate&lt;T&gt;(
+  page: number,
+  perPage: number,
+  count: () =&gt; Promise&lt;number&gt;,
+  fetch: (limit: number, offset: number) =&gt; Promise&lt;T[]&gt;,
+): Promise&lt;Pagination&lt;T&gt;&gt; {
+  const current = Math.max(1, page)
+  const [total, items] = await Promise.all([count(), fetch(perPage, (current - 1) * perPage)])
+  return new Pagination(items, current, perPage, total)
+}
+
+// ?page=3 → 3；缺省或乱写 → 1（相当于 request.args.get('page', 1, type=int)）
+export function pageParam(c: Context): number {
+  const n = Number.parseInt(c.req.query('page') ?? '1', 10)
+  return Number.isNaN(n) ? 1 : n
+}
+</pre>
+</div>
+
+<p>
+  <code>paginate()</code> 不关心查的是什么，只要调用方给它两个函数：一个算总数，一个按 <code>limit</code>/<code>offset</code> 取数据。
+  原书的 <code>error_out=False</code>（页码超出范围时返回空列表而不是 404）在这里是默认行为：OFFSET 超出了，数据库自然返回空数组。
+</p>
+
+<p>文章的分页查询，同时支持“全部文章”和“某个作者的文章”（第 12 章还会加上“关注的人的文章”）：</p>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+export async function getPostsPage(db: Db, page: number, perPage: number, filter: { authorId?: number } = {}) {
+  let query = selectPosts(db).$dynamic()                        // $dynamic()：允许后面按条件追加子句
+  let countQuery = db.select({ n: count() }).from(posts).$dynamic()
+
+  if (filter.authorId !== undefined) {
+    const where = eq(posts.authorId, filter.authorId)
+    query = query.where(where)
+    countQuery = countQuery.where(where)
+  }
+
+  return paginate(
+    page,
+    perPage,
+    async () =&gt; (await countQuery)[0].n,
+    // 时间相同时再按 id 排，保证翻页时顺序稳定、不重不漏
+    (limit, offset) =&gt; query.orderBy(desc(posts.timestamp), desc(posts.id)).limit(limit).offset(offset),
+  )
+}
+</pre>
+</div>
+
+<p>每页的数量放进配置（原书的 <code>FLASKY_POSTS_PER_PAGE</code>），首页的处理函数就变成：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+main.get('/', async (c) =&gt; {
+  const pagination = await getPostsPage(c.var.db, pageParam(c), c.var.config.postsPerPage)
+  return c.render(&lt;IndexPage user={c.var.user} pagination={pagination} /&gt;)
+})
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：OFFSET 的代价</div>
+  <p>
+    <code>OFFSET 100000</code> 意味着数据库要先数过十万行再丢掉它们，页码越靠后越慢。
+    对于“无限滚动”这类只需要“下一页”的场景，更好的做法是<strong>键集分页</strong>（keyset / cursor pagination）：
+    记住上一页最后一条的时间和 id，下一页查 <code>WHERE (timestamp, id) &lt; (上次的值) ORDER BY … LIMIT 20</code>，走索引直接定位，不管翻多深都一样快。
+    它的缺点是没法直接跳到“第 37 页”，所以原书这种带页码的导航仍然用 OFFSET。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>11d</b>：分页（前半部分）</div>
+
+<h3>分页导航</h3>
+
+<p>
+  原书的 <code>paginate()</code> 返回一个 <code>Pagination</code> 对象，里面有模板生成页码链接需要的一切。我们照着写一个同名的类：
+</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Flask-SQLAlchemy 属性 / 方法</th><th>我们的 <code>Pagination</code></th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>items</code></td><td><code>items</code></td><td>当前页的记录</td></tr>
+    <tr><td><code>page</code> / <code>per_page</code> / <code>total</code></td><td>同名（驼峰）</td><td>当前页码、每页条数、总条数</td></tr>
+    <tr><td><code>pages</code></td><td><code>pages</code></td><td>总页数</td></tr>
+    <tr><td><code>has_prev</code> / <code>has_next</code></td><td><code>hasPrev</code> / <code>hasNext</code></td><td>有没有上一页 / 下一页</td></tr>
+    <tr><td><code>prev_num</code> / <code>next_num</code></td><td><code>prevNum</code> / <code>nextNum</code></td><td>上一页 / 下一页的页码</td></tr>
+    <tr><td><code>iter_pages()</code></td><td><code>iterPages()</code></td><td>分页导航里要显示哪些页码</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/lib/paginate.ts">
+<pre>
+export class Pagination&lt;T&gt; {
+  constructor(public items: T[], public page: number, public perPage: number, public total: number) {}
+
+  get pages() { return Math.max(1, Math.ceil(this.total / this.perPage)) }
+  get hasPrev() { return this.page &gt; 1 }
+  get hasNext() { return this.page &lt; this.pages }
+  get prevNum() { return this.hasPrev ? this.page - 1 : null }
+  get nextNum() { return this.hasNext ? this.page + 1 : null }
+
+  // null 表示“这里省略了一段”，导航里显示成 …
+  *iterPages(leftEdge = 2, leftCurrent = 2, rightCurrent = 5, rightEdge = 2): Generator&lt;number | null&gt; {
+    let last = 0
+    for (let num = 1; num &lt;= this.pages; num++) {
+      if (
+        num &lt;= leftEdge ||                                                  // 最左边的几页
+        (num &gt;= this.page - leftCurrent &amp;&amp; num &lt; this.page + rightCurrent) ||  // 当前页附近
+        num &gt; this.pages - rightEdge                                        // 最右边的几页
+      ) {
+        if (last + 1 !== num) yield null
+        yield num
+        last = num
+      }
+    }
+  }
+}
+</pre>
+</div>
+
+<p>原书举的例子：共 100 页、当前在第 50 页时，<code>iterPages()</code> 产出的序列是：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 130" role="img" aria-label="第 50 页时分页导航显示的页码">
+  <rect class="bx" x="20" y="40" width="34" height="34" rx="5"/><text class="mono" x="37" y="62" text-anchor="middle">1</text>
+  <rect class="bx" x="58" y="40" width="34" height="34" rx="5"/><text class="mono" x="75" y="62" text-anchor="middle">2</text>
+  <text class="mono" x="112" y="62" text-anchor="middle">…</text>
+  <rect class="bx" x="132" y="40" width="42" height="34" rx="5"/><text class="mono" x="153" y="62" text-anchor="middle">48</text>
+  <rect class="bx" x="178" y="40" width="42" height="34" rx="5"/><text class="mono" x="199" y="62" text-anchor="middle">49</text>
+  <rect class="bx-a" x="224" y="40" width="42" height="34" rx="5"/><text class="mono on-a" x="245" y="62" text-anchor="middle">50</text>
+  <rect class="bx" x="270" y="40" width="42" height="34" rx="5"/><text class="mono" x="291" y="62" text-anchor="middle">51</text>
+  <rect class="bx" x="316" y="40" width="42" height="34" rx="5"/><text class="mono" x="337" y="62" text-anchor="middle">52</text>
+  <rect class="bx" x="362" y="40" width="42" height="34" rx="5"/><text class="mono" x="383" y="62" text-anchor="middle">53</text>
+  <rect class="bx" x="408" y="40" width="42" height="34" rx="5"/><text class="mono" x="429" y="62" text-anchor="middle">54</text>
+  <text class="mono" x="470" y="62" text-anchor="middle">…</text>
+  <rect class="bx" x="490" y="40" width="42" height="34" rx="5"/><text class="mono" x="511" y="62" text-anchor="middle">99</text>
+  <rect class="bx" x="536" y="40" width="42" height="34" rx="5"/><text class="mono" x="557" y="62" text-anchor="middle">100</text>
+
+  <path class="ln-d" d="M20 88 H92"/><text class="sm" x="56" y="104" text-anchor="middle">leftEdge=2</text>
+  <path class="ln-d" d="M132 88 H266"/><text class="sm" x="199" y="104" text-anchor="middle">leftCurrent=2</text>
+  <path class="ln-d" d="M270 88 H450"/><text class="sm" x="360" y="104" text-anchor="middle">rightCurrent=5（含当前页）</text>
+  <path class="ln-d" d="M490 88 H578"/><text class="sm" x="534" y="104" text-anchor="middle">rightEdge=2</text>
+  <text class="mono" x="600" y="30">1, 2, null, 48 … 54,</text>
+  <text class="mono" x="600" y="46">null, 99, 100</text>
+</svg>
+<figcaption>图 11-4　<code>iterPages()</code> 的四个参数分别控制两端和当前页附近各显示几页，其余的用省略号代替</figcaption>
+</figure>
+
+<p>
+  原书把分页导航写成一个 Jinja2 宏 <code>pagination_widget(pagination, endpoint, **kwargs)</code>，额外的关键字参数原样传给 <code>url_for()</code>，这样资料页这种带 <code>username</code> 参数的地址也能用。
+  我们的组件更直接：让调用方传一个 <code>href</code> 函数，告诉组件“第 n 页的地址是什么”：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+export function PaginationWidget&lt;T&gt;({ pagination: p, href, fragment = '' }: {
+  pagination: Pagination&lt;T&gt;
+  href: (page: number) =&gt; string
+  fragment?: string                      // 第 13 章用来加上 #comments
+}) {
+  return (
+    &lt;nav aria-label="分页"&gt;
+      &lt;ul class="pagination"&gt;
+        &lt;li class={`page-item${p.hasPrev ? '' : ' disabled'}`}&gt;
+          &lt;a class="page-link" href={p.hasPrev ? href(p.page - 1) + fragment : '#'}&gt;&amp;laquo;&lt;/a&gt;
+        &lt;/li&gt;
+        {[...p.iterPages()].map((n) =&gt;
+          n === null ? (
+            &lt;li class="page-item disabled"&gt;&lt;span class="page-link"&gt;&amp;hellip;&lt;/span&gt;&lt;/li&gt;
+          ) : (
+            &lt;li class={`page-item${n === p.page ? ' active' : ''}`}&gt;
+              &lt;a class="page-link" href={href(n) + fragment}&gt;{n}&lt;/a&gt;
+            &lt;/li&gt;
+          ),
+        )}
+        &lt;li class={`page-item${p.hasNext ? '' : ' disabled'}`}&gt;
+          &lt;a class="page-link" href={p.hasNext ? href(p.page + 1) + fragment : '#'}&gt;&amp;raquo;&lt;/a&gt;
+        &lt;/li&gt;
+      &lt;/ul&gt;
+    &lt;/nav&gt;
+  )
+}
+
+// 首页
+&lt;PaginationWidget pagination={pagination} href={(p) =&gt; `/?page=${p}`} /&gt;
+// 资料页
+&lt;PaginationWidget pagination={pagination} href={(p) =&gt; `/user/${profile.username}?page=${p}`} /&gt;
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>11d</b>：分页导航</div>
+
+<h2 id="markdown">用 Markdown 写富文本</h2>
+
+<p>
+  纯文本对简短的状态更新够用了，但想写长文章的人会觉得缺少格式很难受。原书把文本框升级成支持 <strong>Markdown</strong> 的编辑器，并提供实时预览。
+  它用了四个包：浏览器端的 PageDown（Markdown 转 HTML）及其 Flask 封装 Flask-PageDown，服务器端的 Markdown（转换）和 Bleach（清洗 HTML）。
+  我们的对应方案：
+</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>作用</th><th>原书</th><th>本教程</th></tr></thead>
+  <tbody>
+    <tr><td>浏览器端 Markdown → HTML（预览）</td><td>PageDown + Flask-PageDown</td><td>marked（CDN）</td></tr>
+    <tr><td>浏览器端清洗（预览时防自己坑自己）</td><td>—</td><td>DOMPurify（CDN）</td></tr>
+    <tr><td>服务器端 Markdown → HTML</td><td>Markdown</td><td>marked（npm 包）</td></tr>
+    <tr><td>服务器端清洗 HTML、自动链接</td><td>Bleach（<code>clean</code> + <code>linkify</code>）</td><td>sanitize-html；自动链接由 marked 的 GFM 模式完成</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install marked sanitize-html
+npm install -D @types/sanitize-html
+</pre>
+</div>
+
+<h3>浏览器端：实时预览</h3>
+
+<p>
+  原书用 <code>PageDownField</code> 代替普通文本框，并在模板里加载 PageDown 的脚本。我们给文本框加一个 <code>data-preview</code> 属性，在它下面放一个预览区，再加载一小段脚本：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+export function TextArea({ name, label, values, errors, rows = 3, preview }: FieldProps &amp; { rows?: number; preview?: boolean }) {
+  return (
+    &lt;div class="mb-3"&gt;
+      &lt;label class="form-label" for={name}&gt;{label}&lt;/label&gt;
+      &lt;textarea class="form-control" id={name} name={name} rows={rows}
+        data-preview={preview ? `${name}-preview` : undefined}&gt;{String(values?.[name] ?? '')}&lt;/textarea&gt;
+      {preview &amp;&amp; &lt;div class="markdown-preview" id={`${name}-preview`}&gt;&lt;/div&gt;}
+    &lt;/div&gt;
+  )
+}
+
+export function MarkdownPreviewScripts() {
+  return (
+    &lt;&gt;
+      &lt;script src="https://cdn.jsdelivr.net/npm/marked@18/lib/marked.umd.js"&gt;&lt;/script&gt;
+      &lt;script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"&gt;&lt;/script&gt;
+      &lt;script&gt;{raw(`
+        document.querySelectorAll('textarea[data-preview]').forEach(function (ta) {
+          var out = document.getElementById(ta.dataset.preview);
+          function update() { out.innerHTML = DOMPurify.sanitize(marked.parse(ta.value)); }
+          ta.addEventListener('input', update);
+          update();
+        });`)}
+      &lt;/script&gt;
+    &lt;/&gt;
+  )
+}
+</pre>
+</div>
+
+<p>
+  这段脚本只在有编辑器的页面需要。原书用 <code>{% block scripts %}{{ super() }}…{% endblock %}</code> 往基础模板的脚本区追加内容。
+  我们在第 3 章给 <code>c.render()</code> 的第二个参数留过扩展位置，现在加一个 <code>scripts</code> 字段，布局在 <code>&lt;body&gt;</code> 末尾输出它：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/layout.tsx">
+<pre>
+declare module 'hono' {
+  interface ContextRenderer {
+    (content: string | Promise&lt;string&gt;, props?: { title?: string; scripts?: unknown }): Response | Promise&lt;Response&gt;
+  }
+}
+
+export const renderer = jsxRenderer(({ children, title, scripts }) =&gt; {
+  // …
+  return (
+    &lt;html&gt;
+      …
+        &lt;script src="…bootstrap.bundle.min.js"&gt;&lt;/script&gt;
+        &lt;script&gt;{raw(momentScript)}&lt;/script&gt;
+        {scripts}                                   {/* ← 相当于 {{ super() }} 之后追加的部分 */}
+      &lt;/body&gt;
+    &lt;/html&gt;
+  )
+}, { docType: true })
+
+// 首页的处理函数
+return c.render(&lt;IndexPage … /&gt;, { scripts: &lt;MarkdownPreviewScripts /&gt; })
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>11e</b>：用 Flask-PageDown 写富文本文章</div>
+
+<h3>服务器端：转换并清洗</h3>
+
+<p>
+  原书讲得很清楚：表单提交时<strong>只发送 Markdown 源文本</strong>，浏览器里的预览 HTML 直接扔掉。
+  因为攻击者完全可以绕过浏览器，直接提交任意 HTML。服务器必须自己把 Markdown 再转换一次，并用<strong>白名单</strong>清洗结果：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="Markdown 在服务器端的转换与清洗流程">
+  <rect class="bx" x="20" y="30" width="170" height="80" rx="10"/>
+  <text class="ttl" x="105" y="54" text-anchor="middle">用户提交的源文本</text>
+  <text class="mono" x="105" y="78" text-anchor="middle">**你好** https://x.com</text>
+  <text class="mono on-r" x="105" y="98" text-anchor="middle">&lt;script&gt;坏事()&lt;/script&gt;</text>
+  <path class="ln" d="M192 70 H232" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="236" y="30" width="150" height="80" rx="10"/>
+  <text class="ttl on-b" x="311" y="54" text-anchor="middle">① marked</text>
+  <text class="sm" x="311" y="76" text-anchor="middle">Markdown → HTML</text>
+  <text class="sm" x="311" y="94" text-anchor="middle">GFM：裸网址变链接</text>
+  <path class="ln" d="M388 70 H428" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="432" y="30" width="150" height="80" rx="10"/>
+  <text class="ttl on-a" x="507" y="54" text-anchor="middle">② sanitize-html</text>
+  <text class="sm" x="507" y="76" text-anchor="middle">只保留白名单标签</text>
+  <text class="sm" x="507" y="94" text-anchor="middle">危险标签和属性全部去掉</text>
+  <path class="ln-g" d="M584 70 H624" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="628" y="30" width="112" height="80" rx="10"/>
+  <text class="ttl on-g" x="684" y="54" text-anchor="middle">body_html</text>
+  <text class="sm" x="684" y="76" text-anchor="middle">存进数据库</text>
+  <text class="sm" x="684" y="94" text-anchor="middle">显示时 raw()</text>
+
+  <rect class="bx-d" x="20" y="136" width="720" height="98" rx="10"/>
+  <text class="ttl" x="36" y="160">白名单（原书同款）</text>
+  <text class="mono" x="36" y="184">文章：a abbr acronym b blockquote code em i li ol pre strong ul h1 h2 h3 p</text>
+  <text class="mono" x="36" y="206">评论（第 13 章）：a abbr acronym b code em i strong</text>
+  <text class="sm" x="36" y="226">&lt;a&gt; 只允许 href / title 属性，href 只允许 http、https、mailto 等安全协议 —— javascript: 链接也会被去掉</text>
+</svg>
+<figcaption>图 11-5　白名单比黑名单安全得多：没列出来的一律不要，而不是“列出坏的去掉”</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+import { marked } from 'marked'
+import sanitizeHtml from 'sanitize-html'
+
+const POST_TAGS = ['a', 'abbr', 'acronym', 'b', 'blockquote', 'code', 'em', 'i',
+  'li', 'ol', 'pre', 'strong', 'ul', 'h1', 'h2', 'h3', 'p']
+
+function renderMarkdown(source: string, allowedTags: string[]) {
+  const html = marked.parse(source, { async: false, gfm: true })      // gfm：裸网址自动变链接
+  return sanitizeHtml(html, {
+    allowedTags,
+    allowedAttributes: { a: ['href', 'title'] },
+  }).trim()
+}
+
+export const postBodyHtml = (body: string) =&gt; renderMarkdown(body, POST_TAGS)
+</pre>
+</div>
+
+<p>
+  转换每次显示都做一遍太浪费，原书把结果缓存在新的 <code>body_html</code> 列里，并用 SQLAlchemy 的事件监听器实现“正文一变，HTML 自动重新生成”。
+  Drizzle 没有这种隐式的事件机制，我们在<strong>写入正文的两个函数里显式地</strong>同时写入 HTML —— 所有修改正文的代码都经过这两个函数，效果一样，而且一眼就能看出发生了什么：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+// schema.ts 的 posts 表里加一列：bodyHtml: text('body_html'),
+
+export async function createPost(db: Db, authorId: number, body: string, timestamp?: Date) {
+  const [post] = await db.insert(posts)
+    .values({ body, bodyHtml: postBodyHtml(body), authorId, timestamp })
+    .returning()
+  return post
+}
+
+export async function updatePost(db: Db, id: number, body: string) {
+  await db.update(posts).set({ body, bodyHtml: postBodyHtml(body) }).where(eq(posts.id, id))
+}
+</pre>
+</div>
+
+<p>文章列表里优先显示 <code>bodyHtml</code>；它是服务器清洗过的，所以可以用 <code>raw()</code> 原样输出（相当于原书的 <code>{{ post.body_html | safe }}</code>）：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+&lt;div class="post-body"&gt;
+  {/* body_html 是服务器清洗过的，才能用 raw() 原样输出 */}
+  {post.bodyHtml ? raw(post.bodyHtml) : post.body}
+&lt;/div&gt;
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; raw() 的安全，完全建立在“写入时清洗过”之上</div>
+  <p>
+    如果以后有人写了一段新代码，绕过 <code>createPost</code> / <code>updatePost</code> 直接往 <code>body_html</code> 里写东西，XSS 漏洞就出现了。
+    所以请把“只能通过这两个函数修改文章”当成一条团队规则；第 14 章的 API 也会复用它们。
+    另外，<code>post.body</code> 作为兜底（旧文章还没有 <code>body_html</code>）时没有用 <code>raw()</code>，会被正常转义，是安全的。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>11f</b>：服务器端处理富文本（含迁移）</div>
+
+<h2 id="permalink">文章的永久链接</h2>
+
+<p>用户会想把某篇文章分享给朋友，所以每篇文章都需要一个独立的页面和固定的地址。用文章的 id 构造 URL 最简单：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+main.get('/post/:id{[0-9]+}', async (c) =&gt; {
+  const post = await getPost(c.var.db, Number(c.req.param('id')))
+  if (!post) throw new HTTPException(404)
+  return c.render(&lt;PostList posts={[post]} user={c.var.user} /&gt;, { title: '文章' })
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/models/posts.ts">
+<pre>
+export async function getPost(db: Db, id: number) {
+  const [post] = await selectPosts(db).where(eq(posts.id, id))
+  return post ?? null
+}
+</pre>
+</div>
+
+<p>
+  原书这里用了一个小技巧：给详情页模板传一个<strong>只有一个元素的列表</strong> <code>posts=[post]</code>，这样就能直接复用 <code>_posts.html</code>。
+  我们同样把 <code>[post]</code> 传给 <code>PostList</code> 组件。然后在每篇文章底部加上永久链接：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+&lt;div class="post-footer"&gt;
+  &lt;a href={`/post/${post.id}`}&gt;&lt;span class="badge text-bg-secondary"&gt;永久链接&lt;/span&gt;&lt;/a&gt;
+&lt;/div&gt;
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 用 slug 代替数字 id</div>
+  <p>
+    原书提到，有些网站喜欢用可读的地址，比如 <code>/post/learning-drizzle-relations</code>。这个可读的部分叫 <strong>slug</strong>，通常由标题转换而来。
+    实现方法：给 <code>posts</code> 表加一个 <code>slug</code> 列并加唯一索引，路由改成 <code>/post/:slug</code>。
+    常见的折中是两者都要：<code>/post/42/learning-drizzle</code>，按 id 查找，slug 只是给人看的。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>11g</b>：文章的永久链接</div>
+
+<h2 id="editor">编辑文章</h2>
+
+<p>最后一个功能：作者可以编辑自己的文章，管理员可以编辑任何人的文章。编辑页和首页一样有 Markdown 预览：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+async function loadEditablePost(c: Context&lt;AppEnv&gt;) {
+  const post = await getPost(c.var.db, Number(c.req.param('id')))
+  if (!post) throw new HTTPException(404)
+  const user = requireUser(c)
+  // 不是作者、也不是管理员 → 403
+  if (user.id !== post.authorId &amp;&amp; !can(user, Permission.ADMIN)) throw new HTTPException(403)
+  return post
+}
+
+main.get('/edit/:id{[0-9]+}', loginRequired, async (c) =&gt; {
+  const post = await loadEditablePost(c)
+  return c.render(&lt;EditPostPage values={{ body: post.body }} /&gt;,     // 编辑的是 Markdown 源文本
+    { title: '编辑文章', scripts: &lt;MarkdownPreviewScripts /&gt; })
+})
+
+main.post(
+  '/edit/:id{[0-9]+}',
+  loginRequired,
+  validateForm(postSchema, (c, values, errors) =&gt;
+    c.render(&lt;EditPostPage values={values} errors={errors} /&gt;, { scripts: &lt;MarkdownPreviewScripts /&gt; })),
+  async (c) =&gt; {
+    const post = await loadEditablePost(c)             // POST 时也要再检查一次权限！
+    await updatePost(c.var.db, post.id, c.req.valid('form').body)
+    flash(c, '文章已更新。')
+    return c.redirect(`/post/${post.id}`)
+  },
+)
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="编辑文章的权限判断">
+  <rect class="bx" x="20" y="60" width="130" height="50" rx="8"/>
+  <text class="mono" x="85" y="90" text-anchor="middle">/edit/42</text>
+  <path class="ln" d="M152 85 H190" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="194" y="56" width="120" height="58" rx="10"/>
+  <text class="sm on-b" x="254" y="80" text-anchor="middle">文章存在吗？</text>
+  <text class="sm" x="254" y="98" text-anchor="middle">否 → 404</text>
+  <path class="ln" d="M316 85 H354" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="358" y="56" width="160" height="58" rx="10"/>
+  <text class="sm on-b" x="438" y="80" text-anchor="middle">是作者 或 是管理员？</text>
+  <text class="sm on-r" x="438" y="98" text-anchor="middle">否 → 403</text>
+  <path class="ln-g" d="M520 85 H558" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="562" y="56" width="178" height="58" rx="10"/>
+  <text class="ttl on-g" x="651" y="80" text-anchor="middle">显示 / 保存编辑</text>
+  <text class="sm" x="651" y="98" text-anchor="middle">GET 和 POST 都要检查</text>
+  <text class="sm" x="380" y="150" text-anchor="middle">只在 GET 时检查、POST 时不检查，是一个常见的漏洞：攻击者可以跳过页面，直接提交表单</text>
+</svg>
+<figcaption>图 11-6　把检查放进 <code>loadEditablePost()</code>，GET 和 POST 都调用它，就不会漏掉</figcaption>
+</figure>
+
+<p>最后在文章底部加上“编辑”链接。作者看到蓝色的“编辑”，管理员看到红色的“编辑 [管理员]”，用不同样式提示这是管理功能（原书例 11-22）：</p>
+
+<div class="code" data-lang="ts" data-file="src/views/components.tsx">
+<pre>
+{user?.id === post.authorId ? (
+  &lt;a href={`/edit/${post.id}`}&gt;&lt;span class="badge text-bg-primary"&gt;编辑&lt;/span&gt;&lt;/a&gt;
+) : isAdministrator(user) ? (
+  &lt;a href={`/edit/${post.id}`}&gt;&lt;span class="badge text-bg-danger"&gt;编辑 [管理员]&lt;/span&gt;&lt;/a&gt;
+) : null}
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>11h</b>：文章编辑器</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li><code>posts</code> 表通过 <code>authorId</code> 外键和 <code>users</code> 形成一对多；<code>timestamp</code> 加索引，删用户时级联删除文章。</li>
+  <li>Drizzle 不会自动懒加载，用 <code>innerJoin</code> + 嵌套选择 + 子查询一次取齐列表需要的所有数据，避免 N+1。</li>
+  <li>重复的页面片段做成组件（<code>PostList</code>），相当于 <code>{% include %}</code>；详情页传 <code>[post]</code> 复用它。</li>
+  <li>分页 = <code>LIMIT/OFFSET</code> + <code>COUNT</code>；<code>Pagination</code> 类提供导航需要的属性，<code>iterPages()</code> 决定显示哪些页码。</li>
+  <li>Markdown：浏览器端 marked + DOMPurify 预览；服务器端只信任源文本，marked 转换后用 sanitize-html 白名单清洗，结果缓存在 <code>bodyHtml</code>。</li>
+  <li>编辑权限在 GET 和 POST 两处都要检查。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>生成 500 篇假文章，把每页条数改成 5，观察第 1 页、中间某页、最后一页的分页导航分别长什么样。</li>
+    <li>在 shell 里对 <code>getPostsPage</code> 用到的查询调用 <code>.toSQL()</code>，找到其中的 JOIN 和评论数子查询。</li>
+    <li>试着发布一篇包含 <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> 和 <code>[点我](javascript:alert(1))</code> 的文章，查看数据库里 <code>body_html</code> 最终存了什么。</li>
+    <li>给文章加一个可选的标题字段和 slug，实现 <code>/post/:id/:slug</code> 形式的永久链接。</li>
+    <li>写一个一次性脚本：把所有 <code>body_html</code> 为空的旧文章重新生成 HTML（提示：<code>isNull(posts.bodyHtml)</code>）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

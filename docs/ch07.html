@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 7 章 · 大型应用的结构 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="7">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 7 章</span>
+<h1>大型应用的结构</h1>
+<p class="lede">
+  单文件应用写起来方便，但越长越难改。和 Flask 一样，Hono 不强制任何目录结构，怎么组织完全由你决定。
+  这一章把 <code>src/index.tsx</code> 拆成一个结构清晰的项目：配置集中管理、用<strong>应用工厂</strong>创建应用、
+  用<strong>子应用</strong>分组路由（相当于蓝本），并且配上第一批单元测试。本书剩下的部分都会沿用这个结构。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>知道项目里每个目录、每个文件的职责</li>
+    <li>把配置集中到一个模块里，按“开发 / 测试 / 生产”切换，敏感信息只来自环境变量</li>
+    <li>用应用工厂 <code>createApp()</code> 延迟创建应用，并通过中间件把依赖注入到每个请求</li>
+    <li>用 <code>new Hono()</code> + <code>app.route()</code> 实现蓝本的效果</li>
+    <li>用 npm scripts 代替 Flask 的自定义命令</li>
+    <li>用 Vitest 写出并运行第一批单元测试</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="layout">项目结构</h2>
+
+<p>原书例 7-1 给出了一个多文件 Flask 应用的基本布局。下面是它和本教程项目结构的对照：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 420" role="img" aria-label="Flask 项目与 Hono 项目的目录结构对照">
+  <text class="ttl" x="20" y="22">原书（Flask）</text>
+  <rect class="bx" x="20" y="34" width="300" height="370" rx="10"/>
+  <text class="mono" x="36" y="58">flasky/</text>
+  <text class="mono" x="52" y="80">app/</text>
+  <text class="mono" x="68" y="100">templates/</text>
+  <text class="mono" x="68" y="120">static/</text>
+  <text class="mono" x="68" y="140">main/</text>
+  <text class="mono" x="84" y="160">__init__.py  views.py</text>
+  <text class="mono" x="84" y="180">errors.py  forms.py</text>
+  <text class="mono" x="68" y="200">__init__.py</text>
+  <text class="sm" x="300" y="200" text-anchor="end">create_app</text>
+  <text class="mono" x="68" y="220">email.py  models.py</text>
+  <text class="mono" x="52" y="244">migrations/</text>
+  <text class="mono" x="52" y="266">tests/</text>
+  <text class="mono" x="52" y="288">venv/</text>
+  <text class="mono" x="52" y="310">requirements.txt</text>
+  <text class="mono" x="52" y="332">config.py</text>
+  <text class="mono" x="52" y="354">flasky.py</text>
+  <text class="sm" x="300" y="354" text-anchor="end">入口 + 命令</text>
+
+  <text class="ttl on-a" x="360" y="22">本教程（Hono）</text>
+  <rect class="bx-a" x="360" y="34" width="380" height="370" rx="10"/>
+  <text class="mono" x="376" y="58">flasky/</text>
+  <text class="mono" x="392" y="80">src/</text>
+  <text class="mono" x="408" y="100">views/</text>
+  <text class="sm" x="724" y="100" text-anchor="end">JSX 页面、布局、邮件模板</text>
+  <text class="mono" x="408" y="120">routes/</text>
+  <text class="sm" x="724" y="120" text-anchor="end">main.tsx · auth.tsx · api/（蓝本）</text>
+  <text class="mono" x="408" y="140">models/</text>
+  <text class="sm" x="724" y="140" text-anchor="end">业务逻辑（原 models.py）</text>
+  <text class="mono" x="408" y="160">lib/</text>
+  <text class="sm" x="724" y="160" text-anchor="end">会话、认证、邮件、分页……</text>
+  <text class="mono" x="408" y="180">db/</text>
+  <text class="sm" x="724" y="180" text-anchor="end">schema.ts · index.ts</text>
+  <text class="mono" x="408" y="200">app.tsx</text>
+  <text class="sm on-a" x="724" y="200" text-anchor="end">createApp()</text>
+  <text class="mono" x="408" y="220">config.ts  types.ts  index.ts</text>
+  <text class="mono" x="392" y="244">drizzle/</text>
+  <text class="sm" x="724" y="244" text-anchor="end">迁移（原 migrations/）</text>
+  <text class="mono" x="392" y="266">tests/</text>
+  <text class="mono" x="392" y="288">node_modules/</text>
+  <text class="sm" x="724" y="288" text-anchor="end">（原 venv/）</text>
+  <text class="mono" x="392" y="310">package.json  package-lock.json</text>
+  <text class="mono" x="392" y="332">scripts/  static/</text>
+  <text class="sm" x="724" y="332" text-anchor="end">命令脚本 · 静态文件</text>
+  <text class="mono" x="392" y="354">tsconfig.json  drizzle.config.ts</text>
+  <text class="mono" x="392" y="376">.env</text>
+  <text class="sm on-r" x="724" y="376" text-anchor="end">不提交到 Git</text>
+</svg>
+<figcaption>图 7-1　两边几乎一一对应。主要差别：模板变成了 <code>views/</code> 里的组件，命令行任务放进了 <code>scripts/</code></figcaption>
+</figure>
+
+<p>四个最重要的约定：</p>
+<ul>
+  <li><strong><code>src/</code></strong> 放应用本身的所有代码（相当于原书的 <code>app</code> 包）。</li>
+  <li><strong><code>drizzle/</code></strong> 放迁移（第 5 章生成的）。</li>
+  <li><strong><code>tests/</code></strong> 放单元测试。</li>
+  <li><strong><code>scripts/</code></strong> 放命令行任务：迁移数据库、打开 shell、生成假数据、部署。原书把这些写在 <code>flasky.py</code> 里用 <code>@app.cli.command</code> 注册。</li>
+</ul>
+
+<h2 id="config">配置</h2>
+
+<p>
+  应用通常需要好几套配置，最典型的是数据库：开发、测试、生产要用三个不同的数据库，互不干扰 ——
+  你肯定不希望跑一遍单元测试就把开发时攒的数据清空了。
+  原书用一组配置类（<code>Config</code>、<code>DevelopmentConfig</code>、<code>TestingConfig</code>、<code>ProductionConfig</code>）加一个字典来实现。
+  TypeScript 里用一个接口描述“配置长什么样”，再用一个函数按名字生成对应的配置对象：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/config.ts">
+<pre>
+export type ConfigName = 'development' | 'testing' | 'production'
+
+export interface Config {
+  name: ConfigName
+  debug: boolean
+  testing: boolean
+  secretKey: string
+  databaseUrl: string
+  mail: { host: string; port: number; user?: string; password?: string }
+  mailSubjectPrefix: string
+  mailSender: string
+  adminEmail?: string
+  csrf: boolean
+}
+
+type Env = Record&lt;string, string | undefined&gt;
+
+// 所有环境共用的部分（相当于原书的 Config 基类）
+function baseConfig(env: Env) {
+  return {
+    debug: false,
+    testing: false,
+    secretKey: env.SECRET_KEY ?? 'hard to guess string',
+    mail: {
+      host: env.MAIL_SERVER ?? 'smtp.googlemail.com',
+      port: Number(env.MAIL_PORT ?? 587),
+      user: env.MAIL_USERNAME,
+      password: env.MAIL_PASSWORD,
+    },
+    mailSubjectPrefix: '[Flasky]',
+    mailSender: 'Flasky Admin &lt;flasky@example.com&gt;',
+    adminEmail: env.FLASKY_ADMIN,
+    csrf: true,
+  }
+}
+
+export function loadConfig(name?: string, env: Env = process.env): Config {
+  const configName = name ?? env.FLASKY_CONFIG ?? 'development'
+  const base = baseConfig(env)
+
+  switch (configName) {
+    case 'development':
+      return { ...base, name: 'development', debug: true, databaseUrl: env.DEV_DATABASE_URL ?? './data/dev' }
+    case 'testing':
+      return { ...base, name: 'testing', testing: true, csrf: false, databaseUrl: env.TEST_DATABASE_URL ?? 'memory://' }
+    case 'production':
+      if (!env.SECRET_KEY) throw new Error('生产环境必须设置 SECRET_KEY 环境变量')
+      return { ...base, name: 'production', databaseUrl: env.DATABASE_URL ?? './data/prod' }
+    default:
+      throw new Error(`未知的配置名：${configName}`)
+  }
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="loadConfig 如何根据环境变量选择配置">
+  <rect class="bx" x="20" y="90" width="170" height="70" rx="10"/>
+  <text class="ttl" x="105" y="114" text-anchor="middle">环境变量</text>
+  <text class="mono" x="105" y="136" text-anchor="middle">FLASKY_CONFIG</text>
+  <text class="mono" x="105" y="152" text-anchor="middle">SECRET_KEY …</text>
+  <path class="ln" d="M192 125 H240" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="244" y="90" width="140" height="70" rx="10"/>
+  <text class="ttl on-a" x="314" y="120" text-anchor="middle">loadConfig()</text>
+  <text class="sm" x="314" y="140" text-anchor="middle">base + 各环境差异</text>
+
+  <path class="ln-g" d="M386 110 L460 44" marker-end="url(#ar-g)"/>
+  <path class="ln-b" d="M386 125 H460" marker-end="url(#ar-b)"/>
+  <path class="ln-p" d="M386 140 L460 206" marker-end="url(#ar-p)"/>
+
+  <rect class="bx-g" x="464" y="14" width="276" height="60" rx="8"/>
+  <text class="ttl on-g" x="480" y="36">development</text>
+  <text class="sm" x="480" y="58">debug · 数据库 ./data/dev · 默认密钥可用</text>
+  <rect class="bx-b" x="464" y="95" width="276" height="60" rx="8"/>
+  <text class="ttl on-b" x="480" y="117">testing</text>
+  <text class="sm" x="480" y="139">memory:// 数据库 · 关闭 CSRF · 邮件不真发</text>
+  <rect class="bx-p" x="464" y="176" width="276" height="60" rx="8"/>
+  <text class="ttl on-p" x="480" y="198">production</text>
+  <text class="sm" x="480" y="220">必须有 SECRET_KEY · DATABASE_URL</text>
+</svg>
+<figcaption>图 7-2　同一份代码，靠环境变量决定用哪套配置。第 17 章还会加上 heroku 等部署平台专用的配置</figcaption>
+</figure>
+
+<p>和原书的写法相比，有几点值得注意：</p>
+<ul>
+  <li><strong>类型保证了“每套配置都完整”。</strong>如果给 <code>Config</code> 接口加了一个字段而某个分支忘了设置，TypeScript 会直接报错。</li>
+  <li><strong>生产环境没有 <code>SECRET_KEY</code> 就拒绝启动。</strong>原书给了一个默认值 <code>'hard to guess string'</code>，开发时方便，但如果忘了在生产环境设置，
+      所有人都能伪造你的会话。启动时就失败，比上线后出事好得多。</li>
+  <li><strong><code>env</code> 参数默认是 <code>process.env</code>。</strong>测试时可以传进一个假的环境，方便验证各种配置组合。</li>
+  <li>原书每个配置类还有一个 <code>init_app()</code> 方法，用于“某个环境专属的初始化”（第 17 章用它配置日志）。我们会把这类逻辑放在 <code>createApp()</code> 里，按 <code>config</code> 的字段决定做不做。</li>
+</ul>
+
+<div class="box warn">
+  <div class="t">&#9888; 永远不要把密码等机密写进会提交到 Git 的配置文件</div>
+  <p>
+    这是原书的原话，也是本书反复强调的规矩。机密一律通过环境变量传入。
+    开发时一个个 <code>export</code> 很烦，可以把它们写进项目根目录的 <code>.env</code> 文件（第 1 章已经把它加进了 <code>.gitignore</code>）：
+  </p>
+  <div class="code" data-lang="env" data-file=".env"><pre>
+FLASKY_CONFIG=development
+MAIL_USERNAME=你的测试邮箱
+MAIL_PASSWORD=应用专用密码
+FLASKY_ADMIN=你的邮箱
+</pre></div>
+  <p>
+    Node.js 20.12 起内置了 <code>process.loadEnvFile()</code>，调用一次就把 <code>.env</code> 读进 <code>process.env</code>，不需要装任何包（原书在第 17 章用 python-dotenv 做同样的事）。
+  </p>
+</div>
+
+<h2 id="factory">应用工厂</h2>
+
+<p>
+  到目前为止，<code>app</code> 是在模块顶层直接创建的。原书指出了这样做的问题：<strong>应用在模块被导入的那一刻就创建好了</strong>，
+  之后再想换一套配置已经来不及。这对单元测试尤其不利 —— 测试需要一个用测试配置、连测试数据库的应用。
+</p>
+<p>
+  解决方法是把创建应用的代码放进一个函数，需要的时候再调用，这个函数叫<strong>应用工厂</strong>（application factory）。
+  顺便把应用依赖的东西（配置、数据库、邮件发送器）都作为参数传进去：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+import { serveStatic } from '@hono/node-server/serve-static'
+import { Hono } from 'hono'
+import { csrf } from 'hono/csrf'
+import { logger } from 'hono/logger'
+import type { Config } from './config.js'
+import type { Db } from './db/index.js'
+import type { Mailer } from './lib/email.js'
+import { session } from './lib/session.js'
+import { main } from './routes/main.js'
+import type { AppEnv } from './types.js'
+import { renderer } from './views/layout.js'
+import { ErrorPage } from './views/pages.js'
+
+export interface AppDeps {
+  config: Config
+  db: Db
+  mailer: Mailer
+}
+
+export function createApp({ config, db, mailer }: AppDeps) {
+  const app = new Hono&lt;AppEnv&gt;()
+
+  // 把“全局”依赖挂到每个请求的 c.var 上 —— 相当于 Flask 的 current_app
+  app.use('*', async (c, next) =&gt; {
+    c.set('config', config)
+    c.set('db', db)
+    c.set('mailer', mailer)
+    await next()
+  })
+
+  if (config.debug) app.use('*', logger())
+  app.use('/static/*', serveStatic({ root: './' }))
+  app.use('*', renderer)
+  if (config.csrf) app.use('*', csrf())
+  app.use('*', session)
+
+  app.route('/', main)          // 注册“蓝本”
+
+  app.notFound((c) =&gt; { c.status(404); return c.render(&lt;ErrorPage status={404} /&gt;) })
+  app.onError((err, c) =&gt; {
+    console.error(err)
+    c.status(500)
+    return c.render(&lt;ErrorPage status={500} /&gt;)
+  })
+
+  return app
+}
+</pre>
+</div>
+
+<p>所有会出现在 <code>c.var</code> 上的东西，在一个地方声明类型：</p>
+
+<div class="code" data-lang="ts" data-file="src/types.ts">
+<pre>
+import type { Config } from './config.js'
+import type { Db } from './db/index.js'
+import type { Mailer } from './lib/email.js'
+import type { SessionData } from './lib/session.js'
+
+export type AppEnv = {
+  Variables: {
+    config: Config
+    db: Db
+    mailer: Mailer
+    session: SessionData
+  }
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="应用工厂与依赖注入">
+  <rect class="bx" x="20" y="20" width="200" height="98" rx="10"/>
+  <text class="ttl" x="120" y="44" text-anchor="middle">src/index.ts（生产/开发）</text>
+  <text class="mono" x="36" y="68">loadConfig()</text>
+  <text class="mono" x="36" y="86">createDb('./data/dev')</text>
+  <text class="mono" x="36" y="104">createMailer(config)</text>
+  <rect class="bx-g" x="20" y="142" width="200" height="98" rx="10"/>
+  <text class="ttl on-g" x="120" y="166" text-anchor="middle">tests/helpers.ts（测试）</text>
+  <text class="mono" x="36" y="190">loadConfig('testing')</text>
+  <text class="mono" x="36" y="208">createDb('memory://')</text>
+  <text class="mono" x="36" y="226">假的 mailer（只记录）</text>
+
+  <path class="ln" d="M222 70 L290 120" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M222 190 L290 140" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-a" x="294" y="90" width="170" height="80" rx="12"/>
+  <text class="ttl on-a" x="379" y="118" text-anchor="middle">createApp(deps)</text>
+  <text class="sm" x="379" y="140" text-anchor="middle">每次调用都得到一个</text>
+  <text class="sm" x="379" y="156" text-anchor="middle">全新、独立的应用</text>
+
+  <path class="ln-a" d="M466 130 H510" marker-end="url(#ar-a)"/>
+  <rect class="bx-b" x="514" y="40" width="226" height="180" rx="12"/>
+  <text class="ttl on-b" x="627" y="64" text-anchor="middle">每个请求</text>
+  <text class="sm" x="530" y="92">第一个中间件把依赖放进 c.var：</text>
+  <text class="mono" x="530" y="118">c.var.config</text>
+  <text class="mono" x="530" y="140">c.var.db</text>
+  <text class="mono" x="530" y="162">c.var.mailer</text>
+  <text class="sm" x="530" y="192">处理函数只管“用”，</text>
+  <text class="sm" x="530" y="208">不关心它们是怎么来的</text>
+</svg>
+<figcaption>图 7-3　应用工厂 + 依赖注入：生产代码和测试代码用不同的“零件”组装出同样结构的应用</figcaption>
+</figure>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：为什么不直接 import 一个全局的 db？</div>
+  <p>
+    第 5 章我们在 <code>db/index.ts</code> 里直接 <code>export const db = …</code>，任何文件 import 进来就能用。这很方便，
+    但它和“模块顶层创建 app”有同样的问题：数据库在 import 的那一刻就连上了，测试没法换成内存数据库。
+    通过 <code>c.var.db</code> 取数据库，数据库是谁、连到哪里，完全由调用 <code>createApp()</code> 的人决定。
+    这就是<strong>依赖注入</strong>。在 Cloudflare Workers 上它还是必需的：那里的数据库连接只能在请求里从 <code>c.env</code> 拿到。
+  </p>
+</div>
+
+<h3>数据库模块也改成工厂</h3>
+
+<p>第 5 章的 <code>db/index.ts</code> 写死了 PGlite 的路径。现在改成根据 URL 决定连接谁：</p>
+
+<div class="code" data-lang="ts" data-file="src/db/index.ts">
+<pre>
+import { mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
+import { PGlite } from '@electric-sql/pglite'
+import { drizzle as drizzlePg, type NodePgDatabase } from 'drizzle-orm/node-postgres'
+import { migrate } from 'drizzle-orm/node-postgres/migrator'
+import { drizzle as drizzlePglite } from 'drizzle-orm/pglite'
+import pg from 'pg'
+import * as schema from './schema.js'
+
+export type Db = NodePgDatabase&lt;typeof schema&gt;
+
+// postgres:// 开头 → 真正的 PostgreSQL 服务器；其他 → PGlite（目录路径，或 memory://）
+export function createDb(url: string): Db {
+  if (/^postgres(ql)?:\/\//.test(url)) {
+    return drizzlePg(new pg.Pool({ connectionString: url }), { schema })
+  }
+  if (!url.startsWith('memory://')) mkdirSync(dirname(url), { recursive: true })   // PGlite 不会自动建上级目录
+  // 两种驱动的查询 API 完全相同，统一成一个类型，业务代码就不必关心底下是谁
+  return drizzlePglite(new PGlite(url), { schema }) as unknown as Db
+}
+
+export async function migrateDb(db: Db, migrationsFolder = './drizzle') {
+  await migrate(db, { migrationsFolder })
+}
+</pre>
+</div>
+
+<h3>邮件模块同理</h3>
+
+<p>
+  第 6 章的 <code>transport</code> 也是模块顶层创建的。改成一个 <code>Mailer</code> 接口，并且测试配置下<strong>根本不连 SMTP</strong>，只把邮件存进一个数组 ——
+  原书也提到，Flask-Mail 在测试配置下会把邮件记录下来而不真正发送：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/email.ts">
+<pre>
+export interface MailMessage { to: string; subject: string; text: string; html: string }
+
+export interface Mailer {
+  send(message: MailMessage): Promise&lt;void&gt;
+  outbox: MailMessage[]            // 测试时，“发出去”的邮件都留在这里
+}
+
+export function createMailer(config: Config): Mailer {
+  const outbox: MailMessage[] = []
+  if (config.testing) {
+    return { outbox, async send(message) { outbox.push(message) } }
+  }
+  const transport = nodemailer.createTransport({
+    host: config.mail.host,
+    port: config.mail.port,
+    secure: config.mail.port === 465,
+    auth: config.mail.user ? { user: config.mail.user, pass: config.mail.password } : undefined,
+  })
+  return { outbox, async send(message) { await transport.sendMail({ from: config.mailSender, ...message }) } }
+}
+
+export function sendEmail&lt;P&gt;(
+  c: Context&lt;AppEnv&gt;, to: string, subject: string, template: EmailTemplate&lt;P&gt;, props: P,
+): Promise&lt;void&gt; {
+  const { config, mailer } = c.var
+  const task = (async () =&gt; {
+    const { text, html } = template(props)
+    await mailer.send({ to, subject: `${config.mailSubjectPrefix} ${subject}`, text, html: String(await html) })
+  })().catch((err) =&gt; console.error('邮件发送失败：', err))
+
+  // Cloudflare Workers 等环境需要 waitUntil；Node.js 没有 executionCtx，访问它会抛异常，忽略即可
+  try { c.executionCtx.waitUntil(task) } catch { /* Node.js */ }
+  return task
+}
+</pre>
+</div>
+
+<h2 id="blueprints">用子应用分组路由（蓝本）</h2>
+
+<p>
+  应用工厂带来一个新问题：原来路由是用 <code>app.get()</code> 注册的，可现在 <code>app</code> 要等 <code>createApp()</code> 被调用时才存在，
+  路由写在哪？原书的答案是<strong>蓝本</strong>（blueprint）：它像一个“还没挂上去的小应用”，可以先定义路由，之后再注册到应用上。
+</p>
+<p>
+  Hono 里没有专门的“蓝本”类，因为<strong>任何一个 <code>new Hono()</code> 都可以挂到另一个上面</strong>：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask：app/main/__init__.py + views.py</div>
+    <div class="code" data-lang="python"><pre>
+from flask import Blueprint
+main = Blueprint('main', __name__)
+from . import views, errors
+
+# views.py
+@main.route('/', methods=['GET', 'POST'])
+def index():
+    ...
+
+# app/__init__.py 的 create_app() 里
+from .main import main as main_blueprint
+app.register_blueprint(main_blueprint)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono：src/routes/main.tsx</div>
+    <div class="code" data-lang="ts"><pre>
+import { Hono } from 'hono'
+import type { AppEnv } from '../types.js'
+
+export const main = new Hono&lt;AppEnv&gt;()
+
+main.get('/', (c) =&gt; { … })
+main.post('/', …)
+
+// src/app.tsx 的 createApp() 里
+import { main } from './routes/main.js'
+app.route('/', main)
+</pre></div>
+  </div>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="用 app.route 把子应用挂到不同前缀下">
+  <rect class="bx-a" x="270" y="20" width="220" height="56" rx="12"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">createApp() 里的 app</text>
+  <text class="sm" x="380" y="64" text-anchor="middle">全局中间件 · notFound · onError</text>
+
+  <path class="ln" d="M320 78 L140 124" marker-end="url(#ar)"/>
+  <path class="ln" d="M380 78 V124" marker-end="url(#ar)"/>
+  <path class="ln" d="M440 78 L620 124" marker-end="url(#ar)"/>
+  <text class="mono" x="200" y="102">route('/')</text>
+  <text class="mono" x="386" y="110">route('/auth')</text>
+  <text class="mono" x="560" y="102">route('/api/v1')</text>
+
+  <rect class="bx-b" x="30" y="128" width="220" height="92" rx="10"/>
+  <text class="ttl on-b" x="140" y="152" text-anchor="middle">main（第 7 章起）</text>
+  <text class="mono" x="46" y="176" style="font-size:11px">GET /  → /</text>
+  <text class="mono" x="46" y="198" style="font-size:11px">GET /user/:name → /user/:name</text>
+  <rect class="bx-g" x="270" y="128" width="220" height="92" rx="10"/>
+  <text class="ttl on-g" x="380" y="152" text-anchor="middle">auth（第 8 章）</text>
+  <text class="mono" x="286" y="176" style="font-size:11px">GET /login → /auth/login</text>
+  <text class="mono" x="286" y="198" style="font-size:11px">POST /logout → /auth/logout</text>
+  <rect class="bx-p" x="510" y="128" width="220" height="92" rx="10"/>
+  <text class="ttl on-p" x="620" y="152" text-anchor="middle">api（第 14 章）</text>
+  <text class="mono" x="526" y="176" style="font-size:11px">GET /posts → /api/v1/posts</text>
+  <text class="mono" x="526" y="198" style="font-size:11px">POST /tokens → /api/v1/tokens</text>
+</svg>
+<figcaption>图 7-4　子应用里的路径是“相对”的，挂载时加上前缀。相当于 <code>register_blueprint(auth, url_prefix='/auth')</code></figcaption>
+</figure>
+
+<p>和原书对照几个细节：</p>
+<ul>
+  <li><strong>错误处理器。</strong>原书指出：在蓝本里用 <code>errorhandler</code> 只对本蓝本的路由生效，要全应用生效得用 <code>app_errorhandler</code>。
+      Hono 也有同样的两层：子应用上的 <code>onError</code> 只管自己的路由（第 14 章的 API 就会用它返回 JSON 错误），<code>createApp()</code> 里的 <code>app.onError</code> / <code>app.notFound</code> 管全局。</li>
+  <li><strong>循环导入。</strong>原书要把 <code>from . import views</code> 放在 <code>__init__.py</code> 的<em>最后</em>，以免循环导入出错。
+      在我们的结构里，路由模块不需要 import 应用，只有 <code>app.tsx</code> 去 import 路由，所以依赖是单向的，不存在这个问题。</li>
+  <li><strong><code>url_for('main.index')</code> 与命名空间。</strong>原书花了一段讲蓝本如何给端点名加前缀。Hono 没有端点名，页面里直接写路径（第 3 章讲过）。</li>
+</ul>
+
+<p>第 4–6 章的首页路由，搬进 <code>routes/main.tsx</code> 后是这样的。注意它不再 import 任何全局的 <code>db</code>、<code>transport</code>，全部从 <code>c.var</code> 获取：</p>
+
+<div class="code" data-lang="ts" data-file="src/routes/main.tsx">
+<pre>
+import { eq } from 'drizzle-orm'
+import { Hono } from 'hono'
+import { z } from 'zod'
+import { users } from '../db/schema.js'
+import { sendEmail } from '../lib/email.js'
+import { validateForm } from '../lib/forms.js'
+import type { AppEnv } from '../types.js'
+import { newUserEmail } from '../views/emails.js'
+import { IndexPage } from '../views/pages.js'
+
+export const main = new Hono&lt;AppEnv&gt;()
+
+const nameSchema = z.object({ name: z.string().trim().min(1, '请填写你的名字') })
+
+main.get('/', (c) =&gt; {
+  const { name, known } = c.var.session
+  return c.render(&lt;IndexPage name={name} known={known} /&gt;)
+})
+
+main.post(
+  '/',
+  validateForm(nameSchema, (c, values, errors) =&gt;
+    c.render(&lt;IndexPage name={c.var.session.name} values={values} errors={errors} /&gt;)),
+  async (c) =&gt; {
+    const { db, config, session } = c.var
+    const { name } = c.req.valid('form')
+    const [user] = await db.select().from(users).where(eq(users.username, name)).limit(1)
+    if (!user) {
+      await db.insert(users).values({ username: name })
+      session.known = false
+      if (config.adminEmail) sendEmail(c, config.adminEmail, '新用户', newUserEmail, { username: name })
+    } else {
+      session.known = true
+    }
+    session.name = name
+    return c.redirect('/')
+  },
+)
+</pre>
+</div>
+
+<p>
+  <code>validateForm()</code> 是把第 4 章那个“校验失败就带着错误重新渲染”的 <code>zValidator</code> 钩子提炼出来的小工具，
+  后面每个表单都会用到：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/lib/forms.ts">
+<pre>
+import { zValidator } from '@hono/zod-validator'
+import type { Context } from 'hono'
+import { z } from 'zod'
+import type { AppEnv } from '../types.js'
+
+export type FormValues = Record&lt;string, unknown&gt;
+export type FieldErrors = Record&lt;string, string[] | undefined&gt;
+
+export function validateForm&lt;S extends z.ZodType&gt;(
+  schema: S,
+  onInvalid: (c: Context&lt;AppEnv&gt;, values: FormValues, errors: FieldErrors) =&gt; Response | Promise&lt;Response&gt;,
+) {
+  return zValidator('form', schema, async (result, c) =&gt; {
+    if (!result.success) {
+      const errors = z.flattenError(result.error).fieldErrors as FieldErrors
+      return onInvalid(c as Context&lt;AppEnv&gt;, result.data as FormValues, errors)
+    }
+  })
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么 import 路径要写 .js，明明文件是 .ts？</div>
+  <p>
+    第 1 章的 <code>tsconfig.json</code> 用了 <code>"module": "NodeNext"</code>。在这个模式下，TypeScript 要求你写的是<strong>编译之后</strong>的文件名：
+    <code>routes/main.tsx</code> 编译后是 <code>routes/main.js</code>，Node.js 运行时找的就是它。TypeScript 知道去找对应的 <code>.ts</code>/<code>.tsx</code> 做类型检查。
+    这是 Node.js 官方 ES Module 规范的要求（Node 不会帮你猜后缀），Hono 官方的 Node.js 模板也是这么写的。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>7a</b>：大型应用结构</div>
+
+<h2 id="script">应用入口与命令脚本</h2>
+
+<p>
+  原书的 <code>flasky.py</code> 做两件事：创建应用实例（交给 <code>flask run</code>），以及注册 <code>flask test</code>、<code>flask db</code> 等命令。
+  我们把它拆成两部分：<code>src/index.ts</code> 负责启动服务器，<code>scripts/</code> 目录放各种命令。
+</p>
+
+<div class="code" data-lang="ts" data-file="src/index.ts">
+<pre>
+import { serve } from '@hono/node-server'
+import { createApp } from './app.js'
+import { loadConfig } from './config.js'
+import { createDb } from './db/index.js'
+import { createMailer } from './lib/email.js'
+
+// 如果项目根目录有 .env 文件，就读进 process.env
+try { process.loadEnvFile() } catch { /* 没有 .env 也没关系 */ }
+
+const config = loadConfig()
+const db = createDb(config.databaseUrl)
+const app = createApp({ config, db, mailer: createMailer(config) })
+
+const port = Number(process.env.PORT ?? 3000)
+serve({ fetch: app.fetch, port }, (info) =&gt; {
+  console.log(`Flasky（${config.name}）运行在 http://localhost:${info.port}`)
+})
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="scripts/migrate.ts">
+<pre>
+import { loadConfig } from '../src/config.js'
+import { createDb, migrateDb } from '../src/db/index.js'
+
+try { process.loadEnvFile() } catch { /* 没有 .env 也行 */ }
+
+const config = loadConfig()
+await migrateDb(createDb(config.databaseUrl))
+console.log(`数据库已迁移到最新版本（${config.databaseUrl}）`)
+process.exit(0)
+</pre>
+</div>
+
+<p>然后在 <code>package.json</code> 里给每个命令起个名字：</p>
+
+<div class="code" data-lang="ts" data-file="package.json（节选）">
+<pre>
+"scripts": {
+  "dev": "tsx watch src/index.ts",
+  "test": "vitest run",
+  "typecheck": "tsc --noEmit",
+  "db:generate": "drizzle-kit generate",
+  "db:migrate": "tsx scripts/migrate.ts",
+  "shell": "tsx scripts/shell.ts"
+}
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <thead><tr><th>原书（Flask CLI）</th><th>本教程（npm scripts）</th></tr></thead>
+  <tbody>
+    <tr><td><code>export FLASK_APP=flasky.py</code></td><td>（不需要，入口写在 <code>dev</code> 脚本里）</td></tr>
+    <tr><td><code>export FLASK_CONFIG=development</code></td><td><code>.env</code> 里写 <code>FLASKY_CONFIG=development</code></td></tr>
+    <tr><td><code>flask run</code></td><td><code>npm run dev</code></td></tr>
+    <tr><td><code>flask shell</code></td><td><code>npm run shell</code></td></tr>
+    <tr><td><code>flask db upgrade</code></td><td><code>npm run db:migrate</code></td></tr>
+    <tr><td><code>flask test</code></td><td><code>npm test</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="项目模块之间的依赖方向">
+  <rect class="bx-a" x="20" y="20" width="150" height="46" rx="8"/>
+  <text class="ttl on-a" x="95" y="48" text-anchor="middle">src/index.ts</text>
+  <rect class="bx-g" x="20" y="90" width="150" height="46" rx="8"/>
+  <text class="ttl on-g" x="95" y="118" text-anchor="middle">tests/*.test.ts</text>
+  <rect class="bx" x="20" y="160" width="150" height="46" rx="8"/>
+  <text class="ttl" x="95" y="188" text-anchor="middle">scripts/*.ts</text>
+
+  <rect class="bx-a" x="240" y="55" width="130" height="46" rx="8"/>
+  <text class="ttl on-a" x="305" y="83" text-anchor="middle">app.tsx</text>
+  <path class="ln" d="M172 43 L236 70" marker-end="url(#ar)"/>
+  <path class="ln" d="M172 113 L236 86" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="440" y="20" width="130" height="46" rx="8"/>
+  <text class="ttl on-b" x="505" y="48" text-anchor="middle">routes/*</text>
+  <path class="ln" d="M372 70 L436 50" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="440" y="90" width="130" height="46" rx="8"/>
+  <text class="ttl on-b" x="505" y="118" text-anchor="middle">lib/* · views/*</text>
+  <path class="ln" d="M372 86 L436 106" marker-end="url(#ar)"/>
+  <path class="ln" d="M505 68 V86" marker-end="url(#ar)"/>
+
+  <rect class="bx-p" x="620" y="55" width="120" height="46" rx="8"/>
+  <text class="ttl on-p" x="680" y="83" text-anchor="middle">models/*</text>
+  <path class="ln" d="M572 43 L616 70" marker-end="url(#ar)"/>
+  <path class="ln" d="M572 113 L616 86" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="560" y="160" width="180" height="46" rx="8"/>
+  <text class="ttl" x="650" y="182" text-anchor="middle">config.ts · db/*</text>
+  <text class="sm" x="650" y="198" text-anchor="middle">最底层，谁都可以依赖</text>
+  <path class="ln" d="M680 103 V156" marker-end="url(#ar)"/>
+  <path class="ln" d="M172 183 H556" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 7-5　依赖只朝一个方向：入口 → 应用 → 路由 → 业务逻辑 → 数据库。下层永远不 import 上层，所以不会循环依赖</figcaption>
+</figure>
+
+<h2 id="deps">依赖清单</h2>
+
+<p>
+  原书用 <code>pip freeze &gt; requirements.txt</code> 记录所有依赖的精确版本，并且在第 11 章把它拆成了 <code>common.txt</code>、<code>dev.txt</code>、<code>prod.txt</code>，
+  区分“开发才需要的包”和“生产也需要的包”。npm 从一开始就内置了这个区分：
+</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>原书</th><th>npm</th></tr></thead>
+  <tbody>
+    <tr><td><code>requirements/common.txt</code> + <code>prod.txt</code></td><td><code>package.json</code> 的 <code>dependencies</code>（<code>npm install 包名</code>）</td></tr>
+    <tr><td><code>requirements/dev.txt</code></td><td><code>devDependencies</code>（<code>npm install -D 包名</code>）：tsx、TypeScript、Vitest、drizzle-kit、faker……</td></tr>
+    <tr><td><code>pip freeze</code> 生成的精确版本</td><td><code>package-lock.json</code>（自动维护）</td></tr>
+    <tr><td><code>pip install -r requirements.txt</code></td><td><code>npm ci</code>；只装生产依赖：<code>npm ci --omit=dev</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="tests">单元测试</h2>
+
+<p>
+  原书用 Python 标准库的 <code>unittest</code> 写了两个最简单的测试：应用存在、应用在用测试配置。
+  我们用 <a href="https://vitest.dev">Vitest</a> —— 速度快、原生支持 TypeScript，API 和流行的 Jest 一样：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install -D vitest
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="vitest.config.ts">
+<pre>
+import { defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: {
+    include: ['tests/**/*.test.ts'],
+    testTimeout: 20_000,     // PGlite 第一次启动要一两秒
+  },
+})
+</pre>
+</div>
+
+<p>先写一个测试辅助函数：用<strong>测试配置</strong>、<strong>内存数据库</strong>和<strong>假邮件发送器</strong>组装一个应用。这正是应用工厂的价值所在：</p>
+
+<div class="code" data-lang="ts" data-file="tests/helpers.ts">
+<pre>
+import { createApp } from '../src/app.js'
+import { loadConfig } from '../src/config.js'
+import { createDb, migrateDb } from '../src/db/index.js'
+import { createMailer } from '../src/lib/email.js'
+
+export async function setupTestApp() {
+  const config = loadConfig('testing')
+  const db = createDb('memory://')      // 每次都是一个全新的空数据库
+  await migrateDb(db)                   // 相当于原书 setUp() 里的 db.create_all()
+  const mailer = createMailer(config)
+  const app = createApp({ config, db, mailer })
+  return { app, db, config, mailer }
+}
+</pre>
+</div>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">unittest：tests/test_basics.py</div>
+    <div class="code" data-lang="python"><pre>
+class BasicsTestCase(unittest.TestCase):
+    def setUp(self):
+        self.app = create_app('testing')
+        self.app_context = self.app.app_context()
+        self.app_context.push()
+        db.create_all()
+
+    def tearDown(self):
+        db.session.remove()
+        db.drop_all()
+        self.app_context.pop()
+
+    def test_app_exists(self):
+        self.assertFalse(current_app is None)
+
+    def test_app_is_testing(self):
+        self.assertTrue(current_app.config['TESTING'])
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Vitest：tests/basics.test.ts</div>
+    <div class="code" data-lang="ts"><pre>
+import { beforeAll, describe, expect, it } from 'vitest'
+import { setupTestApp } from './helpers.js'
+
+describe('基础', () =&gt; {
+  let ctx: Awaited&lt;ReturnType&lt;typeof setupTestApp&gt;&gt;
+
+  beforeAll(async () =&gt; {
+    ctx = await setupTestApp()
+  })
+
+  it('应用存在', () =&gt; {
+    expect(ctx.app).toBeDefined()
+  })
+
+  it('使用的是测试配置', () =&gt; {
+    expect(ctx.config.testing).toBe(true)
+    expect(ctx.config.databaseUrl).toBe('memory://')
+  })
+})
+</pre></div>
+  </div>
+</div>
+
+<p>对照一下概念：</p>
+<ul>
+  <li><code>describe</code> 把相关的测试分成一组（相当于 <code>TestCase</code> 类）；<code>it</code> 是一个测试（相当于 <code>test_</code> 开头的方法）。</li>
+  <li><code>beforeAll</code> / <code>beforeEach</code> / <code>afterEach</code> 相当于 <code>setUpClass</code> / <code>setUp</code> / <code>tearDown</code>。</li>
+  <li><code>expect(x).toBe(y)</code> 相当于 <code>assertEqual</code>。</li>
+  <li>不需要 <code>tearDown</code> 里的 <code>drop_all()</code>：内存数据库随着测试进程结束自然消失。</li>
+  <li>也不需要 <code>app_context.push()</code>：我们没有上下文，所有东西都是显式传的。</li>
+</ul>
+
+<div class="code" data-lang="bash">
+<pre>
+npm test
+
+ ✓ tests/basics.test.ts (2 tests)
+   ✓ 基础 &gt; 应用存在
+   ✓ 基础 &gt; 使用的是测试配置
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 开发时让测试一直跑着</div>
+  <p>
+    <code>npx vitest</code>（不带 <code>run</code>）会进入监听模式：每次保存文件，只重跑受影响的测试，结果几乎是即时的。
+    一边写代码一边看着测试变绿，是非常好的习惯。第 15 章会系统地讲测试。
+  </p>
+</div>
+
+<h2 id="running">数据库初始化与运行</h2>
+
+<p>
+  重构后的应用用的是配置里的数据库地址（开发环境默认 <code>./data/dev</code>），和第 5 章单文件版本用的不一定是同一个。
+  不管数据库在哪、是新是旧，一条命令就能把它升级到最新结构 —— 这正是迁移的好处：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+npm run db:migrate
+npm run dev
+# Flasky（development）运行在 http://localhost:3000
+</pre>
+</div>
+
+<p>
+  原书这一章的结尾说：你已经走完了第一部分，学到了构建 Web 应用的基本要素，但可能还不太清楚这些零件怎么拼成一个真正的应用。
+  第二部分就是来解决这个问题的：我们会用这些零件，一章一章地搭出完整的社交博客。
+</p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>项目按职责分目录：<code>routes</code>（蓝本）、<code>views</code>（模板）、<code>models</code>（业务逻辑）、<code>lib</code>（工具）、<code>db</code>（数据库），命令放 <code>scripts</code>。</li>
+  <li>配置集中在 <code>config.ts</code>，按 <code>FLASKY_CONFIG</code> 选择；机密只来自环境变量，开发时写在不提交的 <code>.env</code> 里，用 <code>process.loadEnvFile()</code> 读取。</li>
+  <li>应用工厂 <code>createApp({ config, db, mailer })</code> 让测试可以用不同的零件组装应用；依赖通过中间件放进 <code>c.var</code>。</li>
+  <li>任何 <code>new Hono()</code> 都能用 <code>app.route(前缀, 子应用)</code> 挂载，这就是 Hono 版的蓝本。</li>
+  <li>npm scripts 代替 Flask CLI；<code>dependencies</code> / <code>devDependencies</code> 代替多个 requirements 文件。</li>
+  <li>Vitest 的 <code>describe</code> / <code>it</code> / <code>expect</code> 对应 unittest 的类、方法和断言；<code>npm test</code> 运行。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给 <code>loadConfig</code> 写一个测试：传入 <code>loadConfig('production', {})</code>，断言它会因为缺少 <code>SECRET_KEY</code> 而抛出异常（提示：<code>expect(() =&gt; …).toThrow()</code>）。</li>
+    <li>新建一个 <code>routes/about.tsx</code> 子应用，里面有 <code>GET /</code> 和 <code>GET /team</code>，把它挂载到 <code>/about</code>，用 <code>showRoutes(app)</code> 确认最终路径。</li>
+    <li>在 <code>setupTestApp</code> 返回的 <code>mailer.outbox</code> 上做文章：写一个测试，提交一个新名字，断言管理员收到了一封主题包含“新用户”的邮件。（提示：记得在测试配置里设置 <code>adminEmail</code>。）</li>
+    <li>把开发数据库删掉（<code>rm -rf data</code>），只用 <code>npm run db:migrate</code> 重建它，体会“迁移即文档”。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 6 章 · 电子邮件 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="6">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 6 章</span>
+<h1>电子邮件</h1>
+<p class="lede">
+  很多应用需要在特定事件发生时通知用户，最常用的渠道就是电子邮件：注册确认、找回密码、新评论提醒……
+  这一章用 <strong>Nodemailer</strong> 从 Hono 应用里发邮件，用 JSX 写邮件模板，并且让发邮件不再拖慢页面响应。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>知道一封邮件从应用到收件箱经过了哪些环节</li>
+    <li>用环境变量配置 SMTP 服务器，并用 Ethereal 在开发时安全地测试</li>
+    <li>写一个 <code>sendEmail()</code> 函数，同时发送纯文本和 HTML 两个版本</li>
+    <li>理解“同步发送会拖慢响应”，用后台发送解决它，并处理好错误</li>
+    <li>知道什么时候该换成邮件服务的 HTTP API 和任务队列</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="smtp">邮件是怎么发出去的</h2>
+
+<p>
+  应用自己并不直接把邮件送到对方邮箱。它把邮件交给一台 <strong>SMTP 服务器</strong>（Simple Mail Transfer Protocol，简单邮件传输协议），
+  由 SMTP 服务器负责投递。原书用的 Flask-Mail 是对 Python 标准库 <code>smtplib</code> 的封装；Node.js 生态里对应的是
+  <a href="https://nodemailer.com">Nodemailer</a>，它是 Node 世界事实上的标准发信库。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="一封邮件的投递路径">
+  <rect class="bx-a" x="20" y="60" width="150" height="70" rx="10"/>
+  <text class="ttl on-a" x="95" y="88" text-anchor="middle">Hono 应用</text>
+  <text class="sm" x="95" y="108" text-anchor="middle">Nodemailer</text>
+  <path class="ln-a" d="M172 95 H232" marker-end="url(#ar-a)"/>
+  <text class="sm" x="202" y="86" text-anchor="middle">SMTP</text>
+  <text class="sm" x="202" y="116" text-anchor="middle">587 端口</text>
+  <rect class="bx-b" x="236" y="60" width="170" height="70" rx="10"/>
+  <text class="ttl on-b" x="321" y="88" text-anchor="middle">发信 SMTP 服务器</text>
+  <text class="sm" x="321" y="108" text-anchor="middle">Gmail / 邮件服务商</text>
+  <path class="ln" d="M408 95 H468" marker-end="url(#ar)"/>
+  <text class="sm" x="438" y="86" text-anchor="middle">投递</text>
+  <rect class="bx" x="472" y="60" width="130" height="70" rx="10"/>
+  <text class="ttl" x="537" y="88" text-anchor="middle">收件方</text>
+  <text class="sm" x="537" y="108" text-anchor="middle">邮件服务器</text>
+  <path class="ln" d="M604 95 H650" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="654" y="60" width="86" height="70" rx="10"/>
+  <text class="ttl on-g" x="697" y="92" text-anchor="middle">收件箱</text>
+  <text class="sm" x="697" y="110" text-anchor="middle">&#128231;</text>
+
+  <text class="sm" x="321" y="160" text-anchor="middle">需要用户名和密码登录（防止被人拿去发垃圾邮件）</text>
+  <text class="sm" x="321" y="178" text-anchor="middle">这就是要配置 MAIL_USERNAME / MAIL_PASSWORD 的原因</text>
+</svg>
+<figcaption>图 6-1　应用只负责把邮件交给 SMTP 服务器，后面的投递由邮件系统完成</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+npm install nodemailer
+npm install -D @types/nodemailer
+</pre>
+</div>
+
+<h2 id="config">配置 SMTP 服务器</h2>
+
+<p>原书表 6-1 列出了 Flask-Mail 的配置项，它们和 Nodemailer 的 <code>createTransport()</code> 选项一一对应：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>Flask-Mail 配置</th><th>Nodemailer 选项</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>MAIL_SERVER</code></td><td><code>host</code></td><td>SMTP 服务器地址</td></tr>
+    <tr><td><code>MAIL_PORT</code></td><td><code>port</code></td><td>通常是 587（STARTTLS）或 465（SSL）</td></tr>
+    <tr><td><code>MAIL_USE_TLS</code> / <code>MAIL_USE_SSL</code></td><td><code>secure</code></td><td><code>secure: true</code> 表示一连上就加密（465 端口）；587 端口设为 <code>false</code>，Nodemailer 会自动用 STARTTLS 升级为加密连接</td></tr>
+    <tr><td><code>MAIL_USERNAME</code> / <code>MAIL_PASSWORD</code></td><td><code>auth: { user, pass }</code></td><td>登录凭据</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+import nodemailer from 'nodemailer'
+
+const transport = nodemailer.createTransport({
+  host: process.env.MAIL_SERVER ?? 'smtp.googlemail.com',
+  port: Number(process.env.MAIL_PORT ?? 587),
+  secure: false,                      // 587 端口：先明文连接，再用 STARTTLS 升级加密
+  auth: {
+    user: process.env.MAIL_USERNAME,
+    pass: process.env.MAIL_PASSWORD,
+  },
+})
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 永远不要把账号密码写进代码</div>
+  <p>
+    原书反复强调：凭据要从<strong>环境变量</strong>读取，尤其是你打算开源的时候。一旦密码进了 Git 历史，就算后来删掉，它也永远留在历史里了。
+    设置环境变量的方法：
+  </p>
+  <div class="code" data-lang="bash"><pre>
+export MAIL_USERNAME=你的邮箱账号       # macOS / Linux
+export MAIL_PASSWORD=你的应用专用密码
+$env:MAIL_USERNAME="你的邮箱账号"      # Windows PowerShell
+</pre></div>
+  <p>第 7 章会改成把它们写进一个不提交到 Git 的 <code>.env</code> 文件，让应用启动时自动读取。</p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 关于 Gmail</div>
+  <p>
+    原书当年的做法是在 Google 账户里打开“允许不够安全的应用”。这个选项 Google 已经彻底停用了。
+    现在要用 Gmail 的 SMTP，需要先给账户开启两步验证，再生成一个<strong>应用专用密码</strong>（App Password），
+    把它填进 <code>MAIL_PASSWORD</code>。原书的另一条建议依然有效：别用个人主邮箱，专门注册一个测试用的账号。
+  </p>
+</div>
+
+<h3>开发时更好的选择：Ethereal</h3>
+
+<p>
+  开发阶段其实不需要真的把邮件发出去 —— 你只想确认“邮件内容对不对”。Nodemailer 的作者提供了一个免费的假 SMTP 服务
+  <a href="https://ethereal.email">Ethereal</a>：发给它的邮件不会投递给任何人，但你能在网页上看到邮件的样子。
+  它甚至不需要注册，代码里就能临时生成一个账号：
+</p>
+
+<div class="code" data-lang="ts" data-file="scripts/send-test-email.ts">
+<pre>
+import nodemailer from 'nodemailer'
+
+const account = await nodemailer.createTestAccount()     // 临时生成一个 Ethereal 账号
+const transport = nodemailer.createTransport({
+  host: 'smtp.ethereal.email',
+  port: 587,
+  auth: { user: account.user, pass: account.pass },
+})
+
+const info = await transport.sendMail({
+  from: 'you@example.com',
+  to: 'you@example.com',
+  subject: 'test email',
+  text: 'This is the plain text body',
+  html: 'This is the &lt;b&gt;HTML&lt;/b&gt; body',
+})
+
+console.log('在浏览器里查看这封邮件：', nodemailer.getTestMessageUrl(info))
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+npx tsx scripts/send-test-email.ts
+# 在浏览器里查看这封邮件： https://ethereal.email/message/Zx…
+</pre>
+</div>
+
+<p>
+  这对应原书“在 Python shell 里发送测试邮件”的一节。原书还特别提到，Flask-Mail 的 <code>send()</code> 要在应用上下文里调用；
+  Nodemailer 没有这种限制，它就是一个普通对象，在哪里调用都行。
+</p>
+
+<h2 id="integrate">把发邮件集成进应用</h2>
+
+<p>
+  每次发邮件都手写 <code>from</code>、主题前缀、正文，很快就会变得重复。原书的做法是把公共部分抽成一个 <code>send_email()</code> 函数，
+  并且邮件正文也用模板生成，一封邮件两个模板：<code>.txt</code> 是纯文本版本，<code>.html</code> 是富文本版本。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="一个邮件模板生成两个版本的正文">
+  <rect class="bx" x="20" y="70" width="160" height="90" rx="10"/>
+  <text class="ttl" x="100" y="96" text-anchor="middle">调用方</text>
+  <text class="mono" x="100" y="120" text-anchor="middle">sendEmail(to,</text>
+  <text class="mono" x="100" y="138" text-anchor="middle">'新用户', tpl, props)</text>
+  <path class="ln" d="M182 115 H232" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="236" y="40" width="200" height="150" rx="12"/>
+  <text class="ttl on-a" x="336" y="64" text-anchor="middle">邮件模板函数</text>
+  <text class="sm" x="336" y="84" text-anchor="middle">tpl(props) 返回</text>
+  <rect class="bx" x="252" y="98" width="168" height="36" rx="6"/>
+  <text class="mono" x="336" y="121" text-anchor="middle">text: 模板字符串</text>
+  <rect class="bx-b" x="252" y="142" width="168" height="36" rx="6"/>
+  <text class="mono on-b" x="336" y="165" text-anchor="middle">html: &lt;JSX /&gt;</text>
+  <path class="ln" d="M438 115 H488" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="492" y="40" width="248" height="150" rx="12"/>
+  <text class="ttl on-g" x="616" y="64" text-anchor="middle">一封 multipart 邮件</text>
+  <text class="sm" x="508" y="92">From: Flasky Admin</text>
+  <text class="sm" x="508" y="112">Subject: [Flasky] 新用户</text>
+  <text class="sm" x="508" y="140">├ text/plain：给纯文本客户端</text>
+  <text class="sm" x="508" y="162">└ text/html：给大多数邮件客户端</text>
+</svg>
+<figcaption>图 6-2　同时提供两个版本，收件人的邮件客户端会挑它能显示的那个</figcaption>
+</figure>
+
+<p>邮件模板就是一个普通函数，接收数据，返回两个版本。HTML 版本用 JSX 写，和网页模板一样享受自动转义：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Jinja2：templates/mail/new_user.txt + .html</div>
+    <div class="code" data-lang="jinja"><pre>
+{# new_user.txt #}
+User {{ user.username }} has joined.
+
+{# new_user.html #}
+User &lt;b&gt;{{ user.username }}&lt;/b&gt; has joined.
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">一个 TSX 文件：src/views/emails.tsx</div>
+    <div class="code" data-lang="ts"><pre>
+export type EmailTemplate&lt;P&gt; =
+  (props: P) =&gt; { text: string; html: unknown }
+
+export const newUserEmail: EmailTemplate&lt;{ username: string }&gt; =
+  ({ username }) =&gt; ({
+    text: `新用户 ${username} 刚刚注册了。`,
+    html: &lt;p&gt;新用户 &lt;b&gt;{username}&lt;/b&gt; 刚刚注册了。&lt;/p&gt;,
+  })
+</pre></div>
+  </div>
+</div>
+
+<p>然后是 <code>sendEmail()</code> 本身。主题前缀和发件人，原书放在应用配置里，我们暂时先写成常量：</p>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+const MAIL_SUBJECT_PREFIX = '[Flasky]'
+const MAIL_SENDER = 'Flasky Admin &lt;flasky@example.com&gt;'
+const FLASKY_ADMIN = process.env.FLASKY_ADMIN        // 管理员的邮箱，新用户注册时通知他
+
+async function sendEmail&lt;P&gt;(to: string, subject: string, template: EmailTemplate&lt;P&gt;, props: P) {
+  const { text, html } = template(props)
+  await transport.sendMail({
+    from: MAIL_SENDER,
+    to,
+    subject: `${MAIL_SUBJECT_PREFIX} ${subject}`,
+    text,
+    html: String(await html),       // JSX 元素转成 HTML 字符串
+  })
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; &lt;P&gt; 是什么</div>
+  <p>
+    这是 TypeScript 的<strong>泛型</strong>：<code>P</code> 代表“某个模板需要的数据类型”。
+    调用 <code>sendEmail(to, '新用户', newUserEmail, { username })</code> 时，TypeScript 会从 <code>newUserEmail</code> 推断出 <code>P</code> 是 <code>{ username: string }</code>，
+    于是你少传或传错字段都会被标红 —— 相当于原书 <code>**kwargs</code> 的类型安全版本。
+  </p>
+</div>
+
+<p>最后，在处理函数里“见到新名字”时通知管理员：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+if user is None:
+    user = User(username=form.name.data)
+    db.session.add(user)
+    session['known'] = False
+    if app.config['FLASKY_ADMIN']:
+        send_email(app.config['FLASKY_ADMIN'],
+                   'New User', 'mail/new_user',
+                   user=user)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+if (!user) {
+  await db.insert(users).values({ username: name })
+  c.var.session.known = false
+  if (FLASKY_ADMIN) {
+    await sendEmail(FLASKY_ADMIN, '新用户',
+                    newUserEmail, { username: name })
+  }
+}
+</pre></div>
+  </div>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+export FLASKY_ADMIN=你的邮箱
+npm run dev
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>6a</b>：用 Flask-Mail 支持电子邮件</div>
+
+<h2 id="async">异步发送邮件</h2>
+
+<p>
+  试着提交几个新名字，你会发现：每次提交页面都要“卡”一两秒。原因是 <code>await sendEmail(…)</code> 要等 SMTP 服务器那边一来一回确认收下，
+  这段时间里浏览器一直在等响应。
+</p>
+<p>
+  原书的解决办法是开一个后台<strong>线程</strong>去发邮件，并且因为 Flask-Mail 需要应用上下文，还得在线程里手动 <code>app.app_context()</code>。
+  在 Node.js 里事情简单得多：I/O 本来就是异步的，只要<strong>不等</strong>它就行 —— 去掉 <code>await</code>，邮件就在后台继续发，响应立刻返回。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="等待发送与后台发送的时间线对比">
+  <text class="ttl on-r" x="20" y="22">await sendEmail(…)：浏览器干等</text>
+  <line class="ln" x1="120" y1="60" x2="740" y2="60"/>
+  <text class="sm" x="20" y="64">处理函数</text>
+  <rect class="bx-b" x="120" y="48" width="70" height="24" rx="4"/><text class="sm" x="155" y="64" text-anchor="middle">查库</text>
+  <rect class="bx-r" x="192" y="48" width="330" height="24" rx="4"/><text class="sm on-r" x="357" y="64" text-anchor="middle">等 SMTP 服务器……（1～3 秒）</text>
+  <rect class="bx-g" x="524" y="48" width="60" height="24" rx="4"/><text class="sm" x="554" y="64" text-anchor="middle">302</text>
+  <text class="sm" x="20" y="100">浏览器</text>
+  <line class="ln-d" x1="120" y1="96" x2="584" y2="96"/>
+  <text class="sm on-r" x="352" y="90" text-anchor="middle">一直在转圈</text>
+  <path class="ln-g" d="M584 96 H640" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="690" y="100" text-anchor="middle">看到页面</text>
+
+  <text class="ttl on-g" x="20" y="146">sendEmail(…) 不 await：响应先走</text>
+  <line class="ln" x1="120" y1="184" x2="740" y2="184"/>
+  <text class="sm" x="20" y="188">处理函数</text>
+  <rect class="bx-b" x="120" y="172" width="70" height="24" rx="4"/><text class="sm" x="155" y="188" text-anchor="middle">查库</text>
+  <rect class="bx-g" x="192" y="172" width="60" height="24" rx="4"/><text class="sm" x="222" y="188" text-anchor="middle">302</text>
+  <text class="sm" x="20" y="224">后台</text>
+  <rect class="bx-a" x="192" y="210" width="330" height="24" rx="4"/><text class="sm on-a" x="357" y="226" text-anchor="middle">邮件在后台慢慢发</text>
+  <text class="sm" x="20" y="256">浏览器</text>
+  <path class="ln-g" d="M252 252 H300" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="350" y="256" text-anchor="middle">立刻看到页面</text>
+</svg>
+<figcaption>图 6-3　Node.js 单线程也能“同时”做两件事：发起 SMTP 请求后不等它，线程就去干别的了</figcaption>
+</figure>
+
+<p>但“不等”有一个陷阱：如果后台发送失败了（密码错、网络断），这个错误没有人接住。<strong>在 Node.js 里，没有被处理的 Promise 拒绝会让整个进程崩溃</strong>。所以要改成这样：</p>
+
+<div class="code" data-lang="ts" data-file="src/index.tsx">
+<pre>
+function sendEmail&lt;P&gt;(to: string, subject: string, template: EmailTemplate&lt;P&gt;, props: P): Promise&lt;void&gt; {
+  const task = (async () =&gt; {
+    const { text, html } = template(props)
+    await transport.sendMail({
+      from: MAIL_SENDER,
+      to,
+      subject: `${MAIL_SUBJECT_PREFIX} ${subject}`,
+      text,
+      html: String(await html),
+    })
+  })().catch((err) =&gt; console.error('邮件发送失败：', err))   // ← 一定要接住错误
+
+  return task      // 调用方想等可以 await，不想等就忽略
+}
+
+// 处理函数里：不加 await
+if (FLASKY_ADMIN) sendEmail(FLASKY_ADMIN, '新用户', newUserEmail, { username: name })
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>6b</b>：异步发送邮件</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 在 Cloudflare Workers 这类环境里</div>
+  <p>
+    Node.js 服务器是一个长期运行的进程，响应发出去之后，后台任务可以继续跑。
+    但在 Serverless / 边缘环境里，运行时可能在响应发出后就立刻“冻结”这次调用，后台任务会被掐断。
+    Hono 为此提供了 <code>c.executionCtx.waitUntil(promise)</code>：告诉运行时“响应先发，但等这个 Promise 完成再收工”。
+    第 7 章的最终版 <code>sendEmail</code> 会顺手兼容这一点。另外，Workers 不支持 SMTP 连接，只能用下面说的 HTTP API 发信。
+  </p>
+</div>
+
+<h2 id="scale">发得多了怎么办</h2>
+
+<p>
+  原书在这一章结尾说：如果应用要发大量邮件，每封都开一个线程并不合适，应该交给专门的任务队列，比如 Celery。
+  这句话在 Node.js 里同样成立。后台 Promise 虽然轻量，但它<strong>活在进程的内存里</strong>：进程重启、部署新版本的那一刻，没发完的邮件就丢了。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="从后台 Promise 到任务队列的演进">
+  <rect class="bx" x="20" y="30" width="220" height="150" rx="10"/>
+  <text class="ttl" x="130" y="54" text-anchor="middle">现在：后台 Promise</text>
+  <text class="sm" x="36" y="82">✔ 零依赖，写起来简单</text>
+  <text class="sm" x="36" y="104">✘ 进程重启就丢</text>
+  <text class="sm" x="36" y="126">✘ 失败了不会自动重试</text>
+  <text class="sm" x="36" y="148">适合：小应用、非关键邮件</text>
+
+  <path class="ln-a" d="M242 105 H292" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-a" x="296" y="30" width="444" height="150" rx="10"/>
+  <text class="ttl on-a" x="518" y="54" text-anchor="middle">以后：任务队列（相当于 Celery）</text>
+  <rect class="bx" x="312" y="70" width="110" height="46" rx="6"/>
+  <text class="sm" x="367" y="90" text-anchor="middle">处理函数</text>
+  <text class="sm" x="367" y="106" text-anchor="middle">只“投递任务”</text>
+  <path class="ln" d="M424 93 H460" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="464" y="70" width="120" height="46" rx="6"/>
+  <text class="sm on-b" x="524" y="90" text-anchor="middle">队列（持久化）</text>
+  <text class="sm" x="524" y="106" text-anchor="middle">Redis / Postgres</text>
+  <path class="ln" d="M586 93 H622" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="626" y="70" width="100" height="46" rx="6"/>
+  <text class="sm on-g" x="676" y="90" text-anchor="middle">工作进程</text>
+  <text class="sm" x="676" y="106" text-anchor="middle">发信 + 重试</text>
+  <text class="sm" x="518" y="146" text-anchor="middle">BullMQ（Redis）· pg-boss（直接用 PostgreSQL）· Cloudflare Queues</text>
+  <text class="sm" x="518" y="166" text-anchor="middle">任务不丢、失败自动重试、可以单独扩容工作进程</text>
+</svg>
+<figcaption>图 6-4　同一个 <code>sendEmail()</code> 接口，内部实现可以从“后台 Promise”换成“投递到队列”，调用方不用改</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 生产环境的发信服务</div>
+  <p>
+    正式上线时，一般不用个人邮箱的 SMTP（原书第 17 章也提到 Gmail 的额度很低，而且禁止商用），
+    而是用专门的事务性邮件服务：Amazon SES、Postmark、Resend、SendGrid、Mailgun……
+    它们都提供 SMTP 接入（改改 <code>createTransport</code> 的配置就行），也提供更快的 HTTP API。以 Resend 为例，一次 <code>fetch</code> 就能发信，这种方式在任何 JavaScript 运行时都能用：
+  </p>
+  <div class="code" data-lang="ts"><pre>
+await fetch('https://api.resend.com/emails', {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ from: MAIL_SENDER, to, subject, text, html }),
+})
+</pre></div>
+</div>
+
+<p>
+  到这里，第一部分“一个 Web 应用必备的功能”就讲完了：路由、模板、表单、会话、数据库、邮件。
+  问题是 <code>src/index.tsx</code> 已经越来越长了。下一章我们把它拆成一个结构清晰、便于测试的多文件项目。
+</p>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>应用把邮件交给 SMTP 服务器投递；Nodemailer 的 <code>createTransport()</code> 配置服务器和凭据，凭据只能来自环境变量。</li>
+  <li>开发时用 Ethereal 这样的假 SMTP 服务查看邮件，不会误发给真实用户。</li>
+  <li><code>sendEmail()</code> 统一处理发件人和主题前缀；每封邮件同时提供纯文本和 HTML 两个版本，HTML 用 JSX 写。</li>
+  <li>去掉 <code>await</code> 就能让邮件在后台发送、响应立刻返回；后台 Promise 一定要 <code>.catch()</code>，否则失败会让进程崩溃。</li>
+  <li>边缘环境要用 <code>waitUntil</code>；邮件量大或不能丢时，换成任务队列和事务性邮件服务。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 Ethereal 跑通 <code>scripts/send-test-email.ts</code>，在浏览器里分别查看邮件的 HTML 和纯文本版本。</li>
+    <li>把应用的 <code>transport</code> 换成 Ethereal，提交一个新名字，确认管理员通知邮件的内容正确。</li>
+    <li>故意把 <code>MAIL_PASSWORD</code> 设成错的，分别测试“有 <code>.catch()</code>”和“去掉 <code>.catch()</code>”两种写法下，服务器进程的表现。</li>
+    <li>在 <code>sendEmail</code> 里用 <code>console.time</code> / <code>console.timeEnd</code> 记录发送耗时，对比 await 和不 await 时处理函数的响应时间。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

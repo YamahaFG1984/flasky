@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 9 章 · 用户角色 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="9">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 9 章</span>
+<h1>用户角色</h1>
+<p class="lede">
+  并不是所有用户都一样。大多数应用里，有一小部分用户被赋予了额外的权力：管理员、内容协管员……
+  这一章给 Flasky 加上角色和权限：用一个整数的各个二进制位表示权限，用中间件保护路由，在页面里按权限显示不同的按钮。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解“角色 + 权限”的混合模型，以及为什么权限值要用 2 的幂</li>
+    <li>用位运算组合、检查、增删权限</li>
+    <li>写一个可以反复执行的 <code>insertRoles()</code>（upsert）</li>
+    <li>注册时自动给用户分配角色，管理员邮箱自动成为管理员</li>
+    <li>用 <code>can(user, perm)</code> 统一检查权限，匿名用户也不用特殊处理</li>
+    <li>用 <code>permissionRequired</code> 中间件保护路由，返回 403 页面</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="model">角色与权限的数据表示</h2>
+
+<p>
+  原书分析了几种实现方式：只有“普通用户”和“管理员”两种人时，一个 <code>is_administrator</code> 布尔字段就够了；
+  角色多、层次复杂时需要更灵活的方案；有的应用甚至不谈角色，直接给每个用户分配一组权限。
+</p>
+<p>
+  原书采用的是折中方案：<strong>每个用户属于一个角色，每个角色由一组权限定义</strong>。第 5 章已经建过一张简单的 <code>roles</code> 表，现在给它加两列：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-SQLAlchemy</div>
+    <div class="code" data-lang="python"><pre>
+class Role(db.Model):
+    __tablename__ = 'roles'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(64), unique=True)
+    default = db.Column(db.Boolean, default=False,
+                        index=True)
+    permissions = db.Column(db.Integer)
+
+    def __init__(self, **kwargs):
+        super(Role, self).__init__(**kwargs)
+        if self.permissions is None:
+            self.permissions = 0
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Drizzle</div>
+    <div class="code" data-lang="ts"><pre>
+export const roles = pgTable('roles', {
+  id: serial('id').primaryKey(),
+  name: varchar('name', { length: 64 }).notNull().unique(),
+  default: boolean('default').notNull().default(false),
+  permissions: integer('permissions').notNull().default(0),
+}, (t) =&gt; [index('ix_roles_default').on(t.default)])
+</pre></div>
+  </div>
+</div>
+
+<ul>
+  <li><strong><code>default</code></strong>：只有一个角色是 <code>true</code>，新用户注册时自动获得这个角色。应用要按它来查找角色，所以加了索引。</li>
+  <li><strong><code>permissions</code></strong>：一个整数，用它的二进制位紧凑地记录这个角色有哪些权限。原书需要在构造函数里把 <code>None</code> 改成 0，我们直接在列上写 <code>.notNull().default(0)</code>，由数据库保证。</li>
+</ul>
+
+<div class="code" data-lang="bash">
+<pre>
+npm run db:generate -- --name user_roles
+npm run db:migrate
+</pre>
+</div>
+
+<h2 id="bits">用二进制位表示权限</h2>
+
+<p>Flasky 需要的权限如下（原书表 9-1）。每个权限的值都是 2 的幂：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>任务</th><th>权限名</th><th>值</th><th>二进制</th></tr></thead>
+  <tbody>
+    <tr><td>关注其他用户</td><td><code>FOLLOW</code></td><td>1</td><td><code>00001</code></td></tr>
+    <tr><td>评论别人的文章</td><td><code>COMMENT</code></td><td>2</td><td><code>00010</code></td></tr>
+    <tr><td>写文章</td><td><code>WRITE</code></td><td>4</td><td><code>00100</code></td></tr>
+    <tr><td>管理别人的评论</td><td><code>MODERATE</code></td><td>8</td><td><code>01000</code></td></tr>
+    <tr><td>管理员权限</td><td><code>ADMIN</code></td><td>16</td><td><code>10000</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  为什么是 2 的幂？因为每个权限在二进制里正好占一个“位”，互不重叠。一个角色拥有哪几个权限，就把对应的位打开，
+  得到的整数就能唯一地表示这个组合。比如“能关注、能评论”就是 <code>1 + 2 = 3</code>，二进制 <code>00011</code>：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="用二进制位表示权限组合与检查">
+  <text class="sm" x="210" y="22" text-anchor="middle">ADMIN</text>
+  <text class="sm" x="290" y="22" text-anchor="middle">MODERATE</text>
+  <text class="sm" x="370" y="22" text-anchor="middle">WRITE</text>
+  <text class="sm" x="450" y="22" text-anchor="middle">COMMENT</text>
+  <text class="sm" x="530" y="22" text-anchor="middle">FOLLOW</text>
+  <text class="mono" x="210" y="38" text-anchor="middle">16</text>
+  <text class="mono" x="290" y="38" text-anchor="middle">8</text>
+  <text class="mono" x="370" y="38" text-anchor="middle">4</text>
+  <text class="mono" x="450" y="38" text-anchor="middle">2</text>
+  <text class="mono" x="530" y="38" text-anchor="middle">1</text>
+
+  <text class="ttl" x="20" y="72">User</text>
+  <rect class="bx" x="180" y="50" width="60" height="34" rx="6"/><text class="mono" x="210" y="72" text-anchor="middle">0</text>
+  <rect class="bx" x="260" y="50" width="60" height="34" rx="6"/><text class="mono" x="290" y="72" text-anchor="middle">0</text>
+  <rect class="bx-g" x="340" y="50" width="60" height="34" rx="6"/><text class="mono on-g" x="370" y="72" text-anchor="middle">1</text>
+  <rect class="bx-g" x="420" y="50" width="60" height="34" rx="6"/><text class="mono on-g" x="450" y="72" text-anchor="middle">1</text>
+  <rect class="bx-g" x="500" y="50" width="60" height="34" rx="6"/><text class="mono on-g" x="530" y="72" text-anchor="middle">1</text>
+  <text class="mono" x="600" y="72">= 7</text>
+
+  <text class="ttl" x="20" y="116">Moderator</text>
+  <rect class="bx" x="180" y="94" width="60" height="34" rx="6"/><text class="mono" x="210" y="116" text-anchor="middle">0</text>
+  <rect class="bx-g" x="260" y="94" width="60" height="34" rx="6"/><text class="mono on-g" x="290" y="116" text-anchor="middle">1</text>
+  <rect class="bx-g" x="340" y="94" width="60" height="34" rx="6"/><text class="mono on-g" x="370" y="116" text-anchor="middle">1</text>
+  <rect class="bx-g" x="420" y="94" width="60" height="34" rx="6"/><text class="mono on-g" x="450" y="116" text-anchor="middle">1</text>
+  <rect class="bx-g" x="500" y="94" width="60" height="34" rx="6"/><text class="mono on-g" x="530" y="116" text-anchor="middle">1</text>
+  <text class="mono" x="600" y="116">= 15</text>
+
+  <text class="ttl" x="20" y="160">Administrator</text>
+  <rect class="bx-g" x="180" y="138" width="60" height="34" rx="6"/><text class="mono on-g" x="210" y="160" text-anchor="middle">1</text>
+  <rect class="bx-g" x="260" y="138" width="60" height="34" rx="6"/><text class="mono on-g" x="290" y="160" text-anchor="middle">1</text>
+  <rect class="bx-g" x="340" y="138" width="60" height="34" rx="6"/><text class="mono on-g" x="370" y="160" text-anchor="middle">1</text>
+  <rect class="bx-g" x="420" y="138" width="60" height="34" rx="6"/><text class="mono on-g" x="450" y="160" text-anchor="middle">1</text>
+  <rect class="bx-g" x="500" y="138" width="60" height="34" rx="6"/><text class="mono on-g" x="530" y="160" text-anchor="middle">1</text>
+  <text class="mono" x="600" y="160">= 31</text>
+
+  <rect class="bx-a" x="20" y="194" width="720" height="62" rx="10"/>
+  <text class="ttl on-a" x="36" y="216">检查“Moderator 能写文章吗？”</text>
+  <text class="mono" x="36" y="240">15 &amp; 4  →  01111 &amp; 00100  =  00100  =  4  ===  4  →  能 ✔</text>
+  <text class="mono" x="440" y="240">7 &amp; 8  =  0  !==  8  →  不能 ✘</text>
+</svg>
+<figcaption>图 9-1　按位与（<code>&amp;</code>）只保留两边都是 1 的位。结果等于要检查的那个权限值，就说明这一位是开着的</figcaption>
+</figure>
+
+<p>代码表示（原书例 9-2、9-3）。Python 的类常量换成一个 <code>as const</code> 对象，Role 上的方法换成几个纯函数：</p>
+
+<div class="code" data-lang="ts" data-file="src/models/permissions.ts">
+<pre>
+export const Permission = {
+  FOLLOW: 1,
+  COMMENT: 2,
+  WRITE: 4,
+  MODERATE: 8,
+  ADMIN: 16,
+} as const        // as const：让这些值不可修改，类型也精确到具体数字
+
+export const hasPermission = (permissions: number, perm: number) =&gt; (permissions &amp; perm) === perm
+export const addPermission = (permissions: number, perm: number) =&gt; permissions | perm
+export const removePermission = (permissions: number, perm: number) =&gt; permissions &amp; ~perm
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么用 | 和 &amp; ~，而不是原书的 + 和 −</div>
+  <p>
+    原书的 <code>add_permission</code> 用加法、<code>remove_permission</code> 用减法，所以必须先检查“有没有”，否则重复添加会把 4 + 4 算成 8（变成了另一个权限！）。
+    按位或 <code>|</code> 和“与非” <code>&amp; ~</code> 天然就是幂等的：<code>7 | 4</code> 还是 7，<code>3 &amp; ~4</code> 还是 3，不需要事先检查。
+  </p>
+</div>
+
+<p>在 shell 里玩一下（对应原书在 <code>flask shell</code> 里的演示）：</p>
+
+<div class="code" data-lang="ts">
+<pre>
+flasky&gt; let p = 0
+flasky&gt; p = models.addPermission(p, models.Permission.FOLLOW)
+flasky&gt; p = models.addPermission(p, models.Permission.WRITE)
+flasky&gt; models.hasPermission(p, models.Permission.FOLLOW)
+true
+flasky&gt; models.hasPermission(p, models.Permission.ADMIN)
+false
+</pre>
+</div>
+
+<h2 id="roles">定义角色：可以反复执行的 insertRoles</h2>
+
+<p>Flasky 支持的角色（原书表 9-2）：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>角色</th><th>权限</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>（匿名）</td><td>无</td><td>没登录的访客，只能看。它不需要出现在数据库里</td></tr>
+    <tr><td>User</td><td>FOLLOW、COMMENT、WRITE</td><td>写文章、写评论、关注别人。<strong>新用户的默认角色</strong></td></tr>
+    <tr><td>Moderator</td><td>+ MODERATE</td><td>还能管理别人的评论</td></tr>
+    <tr><td>Administrator</td><td>+ ADMIN</td><td>全部权限，包括修改其他用户的角色</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  手动往数据库里插角色既费时又容易出错。原书写了一个 <code>Role.insert_roles()</code> 静态方法，它有一个重要特点：
+  <strong>不是直接插入，而是“有就更新，没有才插入”</strong>。这样以后要调整角色的权限，改一下代码里的表，再运行一次就行 —— 单元测试里、生产服务器上都能放心地反复调用。
+</p>
+<p>
+  “有就更新、没有就插入”在数据库里叫 <strong>upsert</strong>。原书需要先查一次再决定插入还是修改；PostgreSQL 一条 <code>INSERT … ON CONFLICT DO UPDATE</code> 就能完成，Drizzle 写作 <code>onConflictDoUpdate</code>：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/permissions.ts">
+<pre>
+import type { Db } from '../db/index.js'
+import { roles } from '../db/schema.js'
+
+const P = Permission
+export const ROLES: Record&lt;string, number[]&gt; = {
+  User: [P.FOLLOW, P.COMMENT, P.WRITE],
+  Moderator: [P.FOLLOW, P.COMMENT, P.WRITE, P.MODERATE],
+  Administrator: [P.FOLLOW, P.COMMENT, P.WRITE, P.MODERATE, P.ADMIN],
+}
+export const DEFAULT_ROLE = 'User'
+
+export async function insertRoles(db: Db) {
+  for (const [name, perms] of Object.entries(ROLES)) {
+    const permissions = perms.reduce(addPermission, 0)      // [1, 2, 4] → 7
+    const isDefault = name === DEFAULT_ROLE
+    await db.insert(roles)
+      .values({ name, permissions, default: isDefault })
+      .onConflictDoUpdate({ target: roles.name, set: { permissions, default: isDefault } })
+  }
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="upsert 的两条路径">
+  <rect class="bx" x="20" y="60" width="200" height="60" rx="10"/>
+  <text class="mono" x="120" y="86" text-anchor="middle">INSERT roles ('User', 7)</text>
+  <text class="mono" x="120" y="104" text-anchor="middle">ON CONFLICT (name) …</text>
+  <path class="ln-g" d="M222 80 L300 40" marker-end="url(#ar-g)"/>
+  <path class="ln-b" d="M222 100 L300 140" marker-end="url(#ar-b)"/>
+  <rect class="bx-g" x="304" y="14" width="436" height="52" rx="8"/>
+  <text class="ttl on-g" x="320" y="36">表里还没有 'User'</text>
+  <text class="sm" x="320" y="56">→ 插入新行（第一次部署、每个单元测试开始时）</text>
+  <rect class="bx-b" x="304" y="114" width="436" height="52" rx="8"/>
+  <text class="ttl on-b" x="320" y="136">已经有 'User'（name 唯一约束冲突）</text>
+  <text class="sm" x="320" y="156">→ 只更新 permissions 和 default，id 不变，用户和角色的关联不受影响</text>
+</svg>
+<figcaption>图 9-2　upsert 让 <code>insertRoles()</code> 成为“幂等”操作：执行一次和执行一百次，结果都一样</figcaption>
+</figure>
+
+<h2 id="assign">分配角色</h2>
+
+<p>
+  新用户注册时应该得到默认角色 User。唯一的例外是管理员：原书用配置项 <code>FLASKY_ADMIN</code> 记录管理员的邮箱，
+  用这个邮箱注册的人一开始就是 Administrator。原书把这段逻辑写在 <code>User</code> 的构造函数里，我们放在 <code>createUser()</code> 里：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export async function createUser(db: Db, input: NewUser, adminEmail?: string): Promise&lt;User&gt; {
+  const email = input.email.toLowerCase()
+  let roleId = input.roleId                         // 调用方可以直接指定角色（测试里常用）
+  if (roleId === undefined) {
+    const isAdmin = !!adminEmail &amp;&amp; email === adminEmail.toLowerCase()
+    const [role] = await db.select({ id: roles.id }).from(roles)
+      .where(isAdmin ? eq(roles.name, 'Administrator') : eq(roles.default, true))
+      .limit(1)
+    roleId = role?.id
+  }
+  const [user] = await db.insert(users).values({
+    email, username: input.username, roleId,
+    passwordHash: await hashPassword(input.password),
+  }).returning()
+  return user
+}
+
+// 注册的处理函数里：
+const user = await createUser(db, { email, username, password }, config.adminEmail)
+</pre>
+</div>
+
+<h2 id="verify">检查权限</h2>
+
+<p>
+  原书给 <code>User</code> 加了 <code>can(perm)</code> 和 <code>is_administrator()</code> 两个方法，
+  又专门写了一个 <code>AnonymousUser</code> 类实现同样的两个方法（永远返回 <code>False</code>），
+  这样模板里可以直接写 <code>current_user.can(...)</code>，不用先判断是否登录。
+</p>
+<p>
+  我们的 <code>c.var.user</code> 是一个普通对象（或者 <code>null</code>），所以写成接收用户的函数更自然 —— 而且 <code>null</code> 天然就代表匿名用户：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+export type User = typeof users.$inferSelect
+export type CurrentUser = User &amp; { permissions: number }     // 用户 + 他所属角色的权限
+
+export const can = (user: CurrentUser | null, perm: number) =&gt;
+  !!user &amp;&amp; hasPermission(user.permissions, perm)             // 匿名用户（null）什么都不能做
+
+export const isAdministrator = (user: CurrentUser | null) =&gt; can(user, Permission.ADMIN)
+</pre>
+</div>
+
+<p>
+  <code>CurrentUser</code> 多了一个 <code>permissions</code> 字段。它从哪来？每个请求加载当前用户时，顺手用一个 <code>LEFT JOIN</code> 把角色的权限一起查出来 ——
+  一次查询搞定，之后整个请求里检查权限都不用再访问数据库：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/models/users.ts">
+<pre>
+async function findOne(db: Db, where: SQL): Promise&lt;CurrentUser | null&gt; {
+  const [row] = await db
+    .select({ user: users, permissions: roles.permissions })
+    .from(users)
+    .leftJoin(roles, eq(users.roleId, roles.id))     // 没有角色的用户也要查出来，所以是 LEFT JOIN
+    .where(where)
+    .limit(1)
+  return row ? { ...row.user, permissions: row.permissions ?? 0 } : null
+}
+
+export const findUserById = (db: Db, id: number) =&gt; findOne(db, eq(users.id, id))
+export const findUserByEmail = (db: Db, email: string) =&gt; findOne(db, eq(users.email, email.toLowerCase()))
+export const findUserByUsername = (db: Db, username: string) =&gt; findOne(db, eq(users.username, username))
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="用 LEFT JOIN 把用户和角色权限一次查出">
+  <rect class="bx-a" x="20" y="20" width="250" height="110" rx="10"/>
+  <text class="ttl on-a" x="145" y="44" text-anchor="middle">users</text>
+  <text class="mono" x="36" y="70">id=7 · john · role_id=3</text>
+  <text class="mono" x="36" y="92">id=8 · susan · role_id=2</text>
+  <text class="mono" x="36" y="114">id=9 · old · role_id=NULL</text>
+  <rect class="bx-b" x="330" y="20" width="200" height="110" rx="10"/>
+  <text class="ttl on-b" x="430" y="44" text-anchor="middle">roles</text>
+  <text class="mono" x="346" y="70">id=2 · Moderator · 15</text>
+  <text class="mono" x="346" y="92">id=3 · User · 7</text>
+  <text class="mono" x="346" y="114">id=4 · Admin · 31</text>
+  <path class="ln-d" d="M272 70 L344 92"/>
+  <path class="ln-d" d="M272 92 L344 70"/>
+  <text class="sm" x="560" y="40">LEFT JOIN roles</text>
+  <text class="sm" x="560" y="56">ON users.role_id = roles.id</text>
+  <rect class="bx-g" x="560" y="68" width="180" height="62" rx="8"/>
+  <text class="mono on-g" x="574" y="90">john → permissions 7</text>
+  <text class="mono on-g" x="574" y="108">susan → 15</text>
+  <text class="mono" x="574" y="126">old → null → 当作 0</text>
+  <text class="sm" x="380" y="170" text-anchor="middle">INNER JOIN 会把没有角色的用户直接丢掉；LEFT JOIN 保留左表的每一行，右表没有匹配时填 NULL</text>
+  <text class="sm" x="380" y="190" text-anchor="middle">一次查询 = 用户资料 + 权限，整个请求期间 can(user, …) 都是纯内存计算</text>
+</svg>
+<figcaption>图 9-3　“把权限跟着用户一起加载”，比每次检查权限都查一次角色表高效得多</figcaption>
+</figure>
+
+<h3>保护路由：permissionRequired 中间件</h3>
+
+<p>
+  原书写了两个装饰器：<code>@permission_required(perm)</code> 和 <code>@admin_required</code>，权限不够时 <code>abort(403)</code>。
+  Hono 里它们是返回中间件的函数：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask：app/decorators.py</div>
+    <div class="code" data-lang="python"><pre>
+def permission_required(permission):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if not current_user.can(permission):
+                abort(403)
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+def admin_required(f):
+    return permission_required(Permission.ADMIN)(f)
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono：src/lib/auth.ts</div>
+    <div class="code" data-lang="ts"><pre>
+export const permissionRequired = (permission: number) =&gt;
+  createMiddleware&lt;AppEnv&gt;(async (c, next) =&gt; {
+    if (!can(c.var.user, permission)) {
+      throw new HTTPException(403)
+    }
+    await next()
+  })
+
+export const adminRequired =
+  permissionRequired(Permission.ADMIN)
+</pre></div>
+  </div>
+</div>
+
+<p>三层嵌套的装饰器变成了“一个返回中间件的函数”，Python 的 <code>functools.wraps</code> 这类细节也不需要了。用法：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python"><pre>
+@main.route('/admin')
+@login_required
+@admin_required
+def for_admins_only():
+    return "For administrators!"
+
+@main.route('/moderate')
+@login_required
+@permission_required(Permission.MODERATE)
+def for_moderators_only():
+    return "For comment moderators!"
+</pre></div>
+  </div>
+  <div class="new">
+    <div class="h">Hono</div>
+    <div class="code" data-lang="ts"><pre>
+main.get('/admin', loginRequired, adminRequired, (c) =&gt;
+  c.text('For administrators!'))
+
+main.get(
+  '/moderate',
+  loginRequired,
+  permissionRequired(Permission.MODERATE),
+  (c) =&gt; c.text('For comment moderators!'),
+)
+</pre></div>
+  </div>
+</div>
+
+<p>
+  原书强调了顺序：先检查登录状态，因为没登录的用户应该被送去登录页，而不是看到 403。Hono 里中间件从左到右执行，把 <code>loginRequired</code> 写在前面即可。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="loginRequired 和 permissionRequired 串联时的三种结局">
+  <rect class="bx" x="20" y="74" width="120" height="50" rx="8"/>
+  <text class="mono" x="80" y="104" text-anchor="middle">GET /moderate</text>
+  <path class="ln" d="M142 99 H180" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="184" y="70" width="140" height="58" rx="10"/>
+  <text class="ttl on-b" x="254" y="96" text-anchor="middle">loginRequired</text>
+  <text class="sm" x="254" y="114" text-anchor="middle">登录了吗？</text>
+  <path class="ln" d="M326 99 H364" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="368" y="70" width="170" height="58" rx="10"/>
+  <text class="ttl on-p" x="453" y="96" text-anchor="middle">permissionRequired</text>
+  <text class="sm" x="453" y="114" text-anchor="middle">有 MODERATE 吗？</text>
+  <path class="ln-g" d="M540 99 H578" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="582" y="70" width="158" height="58" rx="10"/>
+  <text class="ttl on-g" x="661" y="104" text-anchor="middle">处理函数 ✔</text>
+
+  <path class="ln-a" d="M254 68 V30 H600" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="420" y="24" text-anchor="middle">没登录 → 302 去登录页（登录后还会回来）</text>
+  <path class="ln-r" d="M453 130 V170 H600" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="540" y="164" text-anchor="middle">登录了但没权限 → 403</text>
+</svg>
+<figcaption>图 9-4　如果把两个中间件的顺序颠倒，没登录的用户会先被 <code>permissionRequired</code> 拦下，看到的是 403 而不是登录页</figcaption>
+</figure>
+
+<p>最后让 403 错误也显示一个像样的页面。在 <code>createApp()</code> 的 <code>onError</code> 里，按 <code>HTTPException</code> 的状态码分别处理：</p>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+app.onError((err, c) =&gt; {
+  if (err instanceof HTTPException) {
+    if (err.status === 403 || err.status === 404) return errorResponse(c, err.status)
+    if (err.status &lt; 500) return err.getResponse()          // 其他 4xx 原样返回
+  }
+  console.error(err)
+  return errorResponse(c, 500)
+})
+
+function errorResponse(c: Context&lt;AppEnv&gt;, status: 403 | 404 | 500) {
+  c.status(status)
+  return c.render(&lt;ErrorPage status={status} /&gt;)             // “禁止访问”“页面不存在”“服务器内部错误”
+}
+</pre>
+</div>
+
+<h3>在页面里检查权限</h3>
+
+<p>
+  原书为了在模板里使用 <code>Permission</code> 常量，注册了一个上下文处理器（<code>app_context_processor</code>），把它注入到所有模板。
+  JSX 组件是普通的 TypeScript 模块，<strong>直接 import 就行</strong>，不需要任何注入机制。比如导航栏里的“管理评论”链接（第 13 章会用到）：
+</p>
+
+<div class="code" data-lang="ts" data-file="src/views/layout.tsx">
+<pre>
+import { Permission } from '../models/permissions.js'
+import { can } from '../models/users.js'
+
+{can(user, Permission.MODERATE) &amp;&amp; (
+  &lt;li class="nav-item"&gt;&lt;a class="nav-link" href="/moderate"&gt;管理评论&lt;/a&gt;&lt;/li&gt;
+)}
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>9a</b>：用户角色与权限（这一版包含数据库迁移）</div>
+
+<h2 id="tests">单元测试</h2>
+
+<p>原书给每个角色写了一个测试，外加匿名用户。我们把它们合在一起，用数组一次比较多个结果：</p>
+
+<div class="code" data-lang="ts" data-file="tests/user-model.test.ts">
+<pre>
+it('普通用户、协管员、管理员、匿名用户的权限', async () =&gt; {
+  const [moderator] = await db.select().from(roles).where(eq(roles.name, 'Moderator'))
+  const [admin] = await db.select().from(roles).where(eq(roles.name, 'Administrator'))
+
+  const load = async (u: User) =&gt; (await findUserById(db, u.id))!    // 带上权限
+  const u = await load(await createUser(db, { email: 'u@x.com', username: 'u', password: 'p' }))
+  const m = await load(await createUser(db, { email: 'm@x.com', username: 'm', password: 'p', roleId: moderator.id }))
+  const a = await load(await createUser(db, { email: 'a@x.com', username: 'a', password: 'p', roleId: admin.id }))
+
+  expect([u, m, a].map((x) =&gt; can(x, Permission.WRITE))).toEqual([true, true, true])
+  expect([u, m, a].map((x) =&gt; can(x, Permission.MODERATE))).toEqual([false, true, true])
+  expect([u, m, a].map((x) =&gt; can(x, Permission.ADMIN))).toEqual([false, false, true])
+  expect(can(null, Permission.FOLLOW)).toBe(false)                     // 匿名用户
+})
+
+it('FLASKY_ADMIN 邮箱注册时自动成为管理员', async () =&gt; {
+  const u = await createUser(db, { email: 'Boss@Example.com', username: 'boss', password: 'p' }, 'boss@example.com')
+  expect(can(await findUserById(db, u.id), Permission.ADMIN)).toBe(true)
+})
+</pre>
+</div>
+
+<p>测试依赖角色已经存在，所以每个测试开始前要清空数据库并调用 <code>insertRoles()</code> —— 这正是它必须能反复执行的原因：</p>
+
+<div class="code" data-lang="ts" data-file="tests/helpers.ts">
+<pre>
+export async function resetDb(db: Db) {
+  await db.execute(sql`truncate table users, roles restart identity cascade`)
+  await insertRoles(db)
+}
+
+// 测试文件里
+beforeEach(async () =&gt; { await resetDb(db) })
+</pre>
+</div>
+
+<h2 id="existing">给已有的用户补上角色</h2>
+
+<p>
+  原书最后提醒：在加入角色功能之前注册的用户，<code>role_id</code> 都是空的，需要补上。它在 shell 里写了一个循环。
+  用 SQL 的思路，两条 <code>UPDATE</code> 就够了，不需要把用户一个个读出来：
+</p>
+
+<div class="code" data-lang="ts">
+<pre>
+flasky&gt; await models.insertRoles(db)
+flasky&gt; const [admin] = await db.select().from(roles).where(eq(roles.name, 'Administrator'))
+flasky&gt; const [dflt] = await db.select().from(roles).where(eq(roles.default, true))
+flasky&gt; await db.update(users).set({ roleId: admin.id }).where(and(isNull(users.roleId), eq(users.email, config.adminEmail)))
+flasky&gt; await db.update(users).set({ roleId: dflt.id }).where(isNull(users.roleId))
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 用集合操作代替循环</div>
+  <p>
+    原书的循环会对每个用户发一条 UPDATE，用户多了会非常慢。“把所有没有角色的用户设为默认角色”在 SQL 里是<strong>一条</strong>语句，数据库内部一次完成。
+    写数据库代码时，先想想“能不能用一条语句处理一整批数据”，这是写出高性能代码的重要习惯。第 17 章的部署脚本还会遇到同样的思路。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>混合模型：用户属于一个角色，角色用一个整数的二进制位记录权限；权限值取 2 的幂，互不重叠。</li>
+  <li>检查用 <code>(p &amp; perm) === perm</code>，添加用 <code>|</code>，删除用 <code>&amp; ~</code>，天然幂等。</li>
+  <li><code>insertRoles()</code> 用 <code>onConflictDoUpdate</code>（upsert）实现“有则更新、无则插入”，可以放心地反复执行。</li>
+  <li>加载当前用户时用 <code>LEFT JOIN</code> 带出权限；<code>can(user, perm)</code> 对 <code>null</code>（匿名用户）返回 <code>false</code>。</li>
+  <li><code>permissionRequired(perm)</code> / <code>adminRequired</code> 中间件抛出 403；放在 <code>loginRequired</code> 之后。</li>
+  <li>JSX 里直接 import <code>Permission</code>，不需要上下文处理器。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>新增一个权限 <code>UPLOAD: 32</code> 和一个角色 <code>Author</code>（FOLLOW + COMMENT + WRITE + UPLOAD），修改 <code>ROLES</code> 后再运行一次 <code>insertRoles()</code>，确认已有角色没有被重复插入。</li>
+    <li>写一个函数 <code>listPermissions(p: number): string[]</code>，把 15 转换成 <code>['FOLLOW', 'COMMENT', 'WRITE', 'MODERATE']</code>。</li>
+    <li>在首页加一个只有管理员才能看到的“管理后台”链接，然后分别用管理员和普通用户登录验证。</li>
+    <li>故意把 <code>/moderate</code> 路由上两个中间件的顺序对调，在未登录状态下访问，观察现象，再改回来。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

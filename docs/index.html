@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hono 社交博客实战 · 用 Hono + Drizzle 重写《Flask Web 开发》</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="0">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<div class="hero">
+  <span class="chapter-eyebrow">面向初学者的 18 章教程</span>
+  <h1>Hono 社交博客实战</h1>
+  <p class="sub">
+    这套教程改编自 O'Reilly 的经典教材《Flask Web Development》（第 2 版，Miguel Grinberg 著）。
+    原书用 Python 的 Flask 一步步搭出一个叫 <strong>Flasky</strong> 的社交博客；
+    这里保留原书全部的知识骨架和章节顺序 —— 路由、模板、表单、数据库、邮件、认证、权限、分页、关注、评论、API、测试、性能、部署 ——
+    但把所有代码换成了 <strong>Hono</strong> 和它的生态：TypeScript、JSX、Zod、<strong>Drizzle ORM</strong>、Vitest……
+  </p>
+  <p style="margin-top:14px">
+    <span class="pill">Hono</span><span class="pill">TypeScript</span><span class="pill">Node.js</span>
+    <span class="pill">JSX 服务端渲染</span><span class="pill">Zod 校验</span><span class="pill">Drizzle ORM</span>
+    <span class="pill">PostgreSQL / PGlite</span><span class="pill">Nodemailer</span><span class="pill">Vitest</span>
+    <span class="pill">Playwright</span><span class="pill">Docker</span>
+  </p>
+</div>
+
+<h2 id="why">为什么要“换框架重学一遍”？</h2>
+
+<p>
+  原书讲的东西 —— HTTP 请求怎么变成响应、表单为什么要重定向、密码为什么不能明文存、
+  会话 Cookie 为什么要签名、REST API 为什么要无状态 —— <strong>和语言、框架都没有关系</strong>。
+  Flask 只是承载这些知识的一个容器。
+</p>
+<p>
+  <strong>Hono</strong>（日语「炎」）是一个基于 Web 标准的 TypeScript 服务端框架。
+  它不发明自己的请求对象，而是直接使用浏览器里就有的 <code>Request</code>、<code>Response</code>、<code>Headers</code>、<code>URL</code>。
+  一个 Hono 应用本质上就是一个函数：<em>传进一个 Request，返回一个 Response</em>。
+  所以同一份代码能跑在 Node.js、Bun、Deno、Cloudflare Workers、AWS Lambda 上。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="Flask 与 Hono 的整体架构对比">
+  <text class="ttl" x="190" y="24" text-anchor="middle">原书：Flask</text>
+  <text class="ttl on-a" x="570" y="24" text-anchor="middle">本教程：Hono</text>
+
+  <rect class="bx" x="100" y="40" width="180" height="40" rx="8"/>
+  <text x="190" y="65" text-anchor="middle">浏览器</text>
+  <path class="ln" d="M190 82 V104" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="70" y="108" width="240" height="46" rx="8"/>
+  <text class="ttl on-b" x="190" y="128" text-anchor="middle">WSGI 服务器</text>
+  <text class="sm" x="190" y="145" text-anchor="middle">Gunicorn / uWSGI / 开发服务器</text>
+  <path class="ln" d="M190 156 V178" marker-end="url(#ar)"/>
+  <rect class="bx" x="40" y="182" width="300" height="100" rx="10"/>
+  <text class="ttl" x="190" y="204" text-anchor="middle">Flask 应用</text>
+  <text class="sm" x="190" y="226" text-anchor="middle">environ 字典 → 视图函数 → 响应对象</text>
+  <rect class="bx-d" x="56" y="238" width="84" height="30" rx="6"/><text class="sm" x="98" y="257" text-anchor="middle">Werkzeug</text>
+  <rect class="bx-d" x="148" y="238" width="84" height="30" rx="6"/><text class="sm" x="190" y="257" text-anchor="middle">Jinja2</text>
+  <rect class="bx-d" x="240" y="238" width="84" height="30" rx="6"/><text class="sm" x="282" y="257" text-anchor="middle">扩展们</text>
+
+  <path class="ln-d" d="M380 40 V285"/>
+
+  <rect class="bx" x="480" y="40" width="180" height="40" rx="8"/>
+  <text x="570" y="65" text-anchor="middle">浏览器</text>
+  <path class="ln-a" d="M570 82 V104" marker-end="url(#ar-a)"/>
+  <rect class="bx-g" x="420" y="108" width="300" height="46" rx="8"/>
+  <text class="ttl on-g" x="570" y="128" text-anchor="middle">任意 JavaScript 运行时</text>
+  <text class="sm" x="570" y="145" text-anchor="middle">Node.js（@hono/node-server）· Bun · Deno · Workers</text>
+  <path class="ln-a" d="M570 156 V178" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="420" y="182" width="300" height="100" rx="10"/>
+  <text class="ttl on-a" x="570" y="204" text-anchor="middle">Hono 应用</text>
+  <text class="mono" x="570" y="226" text-anchor="middle">(Request) =&gt; Response</text>
+  <rect class="bx-d" x="436" y="238" width="84" height="30" rx="6"/><text class="sm" x="478" y="257" text-anchor="middle">路由</text>
+  <rect class="bx-d" x="528" y="238" width="84" height="30" rx="6"/><text class="sm" x="570" y="257" text-anchor="middle">中间件</text>
+  <rect class="bx-d" x="620" y="238" width="84" height="30" rx="6"/><text class="sm" x="662" y="257" text-anchor="middle">JSX</text>
+</svg>
+<figcaption>图 0-1　两者的分层几乎一一对应：服务器负责收发网络数据，框架负责“把请求变成响应”</figcaption>
+</figure>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#127760;</span><h4>基于 Web 标准</h4><p>学到的 <code>Request</code> / <code>Response</code> / <code>FormData</code> 在浏览器、Service Worker 里一样能用。</p></div>
+  <div class="card"><span class="ic">&#128290;</span><h4>从头到尾都有类型</h4><p>表单、数据库行、API 返回值全部有 TypeScript 类型，写错字段名编辑器立刻标红。</p></div>
+  <div class="card"><span class="ic">&#129513;</span><h4>核心很小</h4><p>和 Flask 一样是“微框架”：只管路由和请求响应，其他能力按需组合。</p></div>
+  <div class="card"><span class="ic">&#9889;</span><h4>部署选择多</h4><p>传统服务器、Docker、PaaS、边缘函数，第 17 章都会讲到。</p></div>
+</div>
+
+<h2 id="map">Flask 生态 → Hono 生态 对照表</h2>
+
+<p>原书每用到一个 Flask 扩展，本教程都换成 Hono 生态里对应的方案。先混个眼熟，后面每章都会细讲：</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>用途</th><th>原书（Python / Flask）</th><th>本教程（TypeScript / Hono）</th><th>章节</th></tr></thead>
+  <tbody>
+    <tr><td>语言与运行时</td><td>Python 3 + venv + pip</td><td>Node.js + npm（<code>package.json</code>）</td><td>1</td></tr>
+    <tr><td>框架核心</td><td>Flask（Werkzeug）</td><td><code>hono</code> + <code>@hono/node-server</code></td><td>2</td></tr>
+    <tr><td>开发服务器 / 自动重载</td><td><code>flask run</code> + <code>FLASK_DEBUG</code></td><td><code>tsx watch</code></td><td>2</td></tr>
+    <tr><td>模板</td><td>Jinja2</td><td>Hono JSX（<code>hono/jsx</code>）+ <code>jsxRenderer</code></td><td>3</td></tr>
+    <tr><td>界面样式</td><td>Flask-Bootstrap（Bootstrap 3）</td><td>Bootstrap 5（直接用 CDN）</td><td>3</td></tr>
+    <tr><td>本地化时间</td><td>Flask-Moment（Moment.js）</td><td>浏览器内置的 <code>Intl</code> API</td><td>3</td></tr>
+    <tr><td>表单校验</td><td>Flask-WTF / WTForms</td><td>Zod + <code>@hono/zod-validator</code></td><td>4</td></tr>
+    <tr><td>CSRF 防护</td><td>Flask-WTF 的隐藏令牌</td><td><code>hono/csrf</code> + <code>SameSite</code> Cookie</td><td>4</td></tr>
+    <tr><td>会话</td><td>Flask <code>session</code>（签名 Cookie）</td><td><code>hono/cookie</code> 的签名 Cookie + 自写中间件</td><td>4</td></tr>
+    <tr><td>ORM</td><td>Flask-SQLAlchemy</td><td><strong>Drizzle ORM</strong></td><td>5</td></tr>
+    <tr><td>数据库</td><td>SQLite（开发）/ Postgres、MySQL（生产）</td><td>PGlite（开发、测试）/ PostgreSQL（生产）</td><td>5</td></tr>
+    <tr><td>数据库迁移</td><td>Flask-Migrate（Alembic）</td><td><code>drizzle-kit</code></td><td>5</td></tr>
+    <tr><td>交互式 shell</td><td><code>flask shell</code></td><td>Node REPL 脚本 / Drizzle Studio</td><td>5</td></tr>
+    <tr><td>发邮件</td><td>Flask-Mail</td><td>Nodemailer</td><td>6</td></tr>
+    <tr><td>蓝本</td><td>Blueprint</td><td>子应用 <code>new Hono()</code> + <code>app.route()</code></td><td>7</td></tr>
+    <tr><td>密码哈希</td><td>Werkzeug <code>security</code></td><td>Node.js 内置 <code>crypto.scrypt</code></td><td>8</td></tr>
+    <tr><td>登录状态</td><td>Flask-Login</td><td>会话 + 自写的 <code>loadCurrentUser</code> 中间件</td><td>8</td></tr>
+    <tr><td>签名令牌</td><td>itsdangerous</td><td><code>hono/jwt</code></td><td>8、14</td></tr>
+    <tr><td>Markdown 富文本</td><td>Flask-PageDown + Markdown + Bleach</td><td>marked + sanitize-html（浏览器端预览：marked + DOMPurify）</td><td>11</td></tr>
+    <tr><td>假数据</td><td>Faker</td><td>@faker-js/faker</td><td>11</td></tr>
+    <tr><td>API 认证</td><td>Flask-HTTPAuth</td><td><code>hono/basic-auth</code> + Bearer 令牌</td><td>14</td></tr>
+    <tr><td>单元测试</td><td>unittest + Flask 测试客户端</td><td>Vitest + <code>app.request()</code></td><td>15</td></tr>
+    <tr><td>端到端测试</td><td>Selenium</td><td>Playwright</td><td>15</td></tr>
+    <tr><td>覆盖率</td><td>coverage.py</td><td><code>vitest --coverage</code>（V8）</td><td>15</td></tr>
+    <tr><td>性能剖析</td><td>Werkzeug ProfilerMiddleware</td><td><code>node --cpu-prof</code> + <code>hono/timing</code></td><td>16</td></tr>
+    <tr><td>生产服务器</td><td>Gunicorn / Waitress</td><td>Node.js 本身（<code>@hono/node-server</code>）</td><td>17</td></tr>
+    <tr><td>读取 <code>.env</code></td><td>python-dotenv</td><td>Node 内置 <code>process.loadEnvFile()</code></td><td>17</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="app">贯穿全书的例子：Flasky</h2>
+
+<p>
+  和原书一样，我们一路只做一个应用 —— 一个叫 <strong>Flasky</strong> 的社交博客
+  （为了方便你对照原书，名字保留不变）。
+  它从第 2 章一个只有两行的“Hello World”开始，每章长出一点新东西，到第 17 章部署上线。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="Flasky 在各章中逐步长大的过程">
+  <text class="sm" x="20" y="20">第一部分 · 打地基</text>
+  <rect class="bx" x="20" y="30" width="110" height="52" rx="8"/>
+  <text class="ttl" x="75" y="52" text-anchor="middle">第 2 章</text>
+  <text class="sm" x="75" y="70" text-anchor="middle">Hello World</text>
+  <rect class="bx" x="143" y="30" width="110" height="52" rx="8"/>
+  <text class="ttl" x="198" y="52" text-anchor="middle">第 3 章</text>
+  <text class="sm" x="198" y="70" text-anchor="middle">JSX 页面</text>
+  <rect class="bx" x="266" y="30" width="110" height="52" rx="8"/>
+  <text class="ttl" x="321" y="52" text-anchor="middle">第 4 章</text>
+  <text class="sm" x="321" y="70" text-anchor="middle">表单 + 会话</text>
+  <rect class="bx" x="389" y="30" width="110" height="52" rx="8"/>
+  <text class="ttl" x="444" y="52" text-anchor="middle">第 5 章</text>
+  <text class="sm" x="444" y="70" text-anchor="middle">数据库</text>
+  <rect class="bx" x="512" y="30" width="110" height="52" rx="8"/>
+  <text class="ttl" x="567" y="52" text-anchor="middle">第 6 章</text>
+  <text class="sm" x="567" y="70" text-anchor="middle">发邮件</text>
+  <rect class="bx-a" x="635" y="30" width="105" height="52" rx="8"/>
+  <text class="ttl on-a" x="687" y="52" text-anchor="middle">第 7 章</text>
+  <text class="sm" x="687" y="70" text-anchor="middle">拆成多文件</text>
+  <path class="ln" d="M131 56 H141" marker-end="url(#ar)"/>
+  <path class="ln" d="M254 56 H264" marker-end="url(#ar)"/>
+  <path class="ln" d="M377 56 H387" marker-end="url(#ar)"/>
+  <path class="ln" d="M500 56 H510" marker-end="url(#ar)"/>
+  <path class="ln" d="M623 56 H633" marker-end="url(#ar)"/>
+
+  <path class="ln-a" d="M687 84 V106 H75 V124" marker-end="url(#ar-a)"/>
+
+  <text class="sm" x="20" y="120">第二部分 · 社交博客</text>
+  <rect class="bx-b" x="20" y="130" width="92" height="52" rx="8"/>
+  <text class="ttl on-b" x="66" y="152" text-anchor="middle">8 认证</text>
+  <text class="sm" x="66" y="170" text-anchor="middle">注册 / 登录</text>
+  <rect class="bx-b" x="124" y="130" width="92" height="52" rx="8"/>
+  <text class="ttl on-b" x="170" y="152" text-anchor="middle">9 角色</text>
+  <text class="sm" x="170" y="170" text-anchor="middle">权限位</text>
+  <rect class="bx-b" x="228" y="130" width="92" height="52" rx="8"/>
+  <text class="ttl on-b" x="274" y="152" text-anchor="middle">10 资料</text>
+  <text class="sm" x="274" y="170" text-anchor="middle">头像</text>
+  <rect class="bx-b" x="332" y="130" width="92" height="52" rx="8"/>
+  <text class="ttl on-b" x="378" y="152" text-anchor="middle">11 文章</text>
+  <text class="sm" x="378" y="170" text-anchor="middle">分页 / MD</text>
+  <rect class="bx-b" x="436" y="130" width="92" height="52" rx="8"/>
+  <text class="ttl on-b" x="482" y="152" text-anchor="middle">12 关注</text>
+  <text class="sm" x="482" y="170" text-anchor="middle">多对多</text>
+  <rect class="bx-b" x="540" y="130" width="92" height="52" rx="8"/>
+  <text class="ttl on-b" x="586" y="152" text-anchor="middle">13 评论</text>
+  <text class="sm" x="586" y="170" text-anchor="middle">协管</text>
+  <rect class="bx-p" x="644" y="130" width="96" height="52" rx="8"/>
+  <text class="ttl on-p" x="692" y="152" text-anchor="middle">14 API</text>
+  <text class="sm" x="692" y="170" text-anchor="middle">给 App 用</text>
+  <path class="ln" d="M113 156 H122" marker-end="url(#ar)"/>
+  <path class="ln" d="M217 156 H226" marker-end="url(#ar)"/>
+  <path class="ln" d="M321 156 H330" marker-end="url(#ar)"/>
+  <path class="ln" d="M425 156 H434" marker-end="url(#ar)"/>
+  <path class="ln" d="M529 156 H538" marker-end="url(#ar)"/>
+  <path class="ln" d="M633 156 H642" marker-end="url(#ar)"/>
+
+  <path class="ln-a" d="M692 184 V206 H75 V224" marker-end="url(#ar-a)"/>
+
+  <text class="sm" x="20" y="220">第三部分 · 最后一公里</text>
+  <rect class="bx-g" x="20" y="230" width="160" height="52" rx="8"/>
+  <text class="ttl on-g" x="100" y="252" text-anchor="middle">15 测试</text>
+  <text class="sm" x="100" y="270" text-anchor="middle">Vitest · Playwright</text>
+  <rect class="bx-g" x="200" y="230" width="160" height="52" rx="8"/>
+  <text class="ttl on-g" x="280" y="252" text-anchor="middle">16 性能</text>
+  <text class="sm" x="280" y="270" text-anchor="middle">慢查询 · CPU 剖析</text>
+  <rect class="bx-a" x="380" y="230" width="200" height="52" rx="8"/>
+  <text class="ttl on-a" x="480" y="252" text-anchor="middle">17 部署上线 &#127881;</text>
+  <text class="sm" x="480" y="270" text-anchor="middle">PaaS · Docker · 自己的服务器</text>
+  <rect class="bx-d" x="600" y="230" width="140" height="52" rx="8"/>
+  <text class="ttl" x="670" y="252" text-anchor="middle">18 继续深入</text>
+  <text class="sm" x="670" y="270" text-anchor="middle">生态与社区</text>
+  <path class="ln" d="M181 256 H198" marker-end="url(#ar)"/>
+  <path class="ln" d="M361 256 H378" marker-end="url(#ar)"/>
+  <path class="ln" d="M581 256 H598" marker-end="url(#ar)"/>
+
+  <rect class="bx-d" x="20" y="296" width="720" height="28" rx="6"/>
+  <text class="lbl" x="380" y="315" text-anchor="middle">每一章结束时，你手上都有一个能跑的版本</text>
+</svg>
+<figcaption>图 0-2　Flasky 的成长路线：和原书的章节一一对应</figcaption>
+</figure>
+
+<p>最终完成的 Flasky 有这些功能：</p>
+<ul>
+  <li>用邮箱注册、邮件确认账户、登录 / 退出、修改密码、找回密码、修改邮箱；</li>
+  <li>三种角色（普通用户、协管员、管理员），不同角色能做的事不同；</li>
+  <li>个人资料页、Gravatar 头像、管理员可以编辑任何人的资料；</li>
+  <li>用 Markdown 写博客、实时预览、分页浏览、永久链接、编辑文章；</li>
+  <li>关注其他用户，首页只看关注的人写的文章；</li>
+  <li>评论文章，协管员可以屏蔽不当评论；</li>
+  <li>一套 REST API，让手机 App 之类的客户端也能读写博客。</li>
+</ul>
+
+<h2 id="stack">最终的项目长什么样</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 310" role="img" aria-label="最终项目的分层结构">
+  <rect class="bx" x="20" y="16" width="720" height="44" rx="8"/>
+  <text class="ttl" x="36" y="43">浏览器</text>
+  <text class="sm" x="120" y="43">Bootstrap 5 页面 · 表单 · 小段 JS（本地化时间、Markdown 预览）</text>
+  <rect class="bx-d" x="560" y="24" width="170" height="28" rx="6"/>
+  <text class="sm" x="645" y="43" text-anchor="middle">API 客户端（curl / App）</text>
+
+  <path class="ln" d="M200 62 V82" marker-end="url(#ar)"/>
+  <path class="ln" d="M645 62 V82" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="20" y="84" width="720" height="118" rx="10"/>
+  <text class="ttl on-a" x="36" y="106">src/app.tsx · createApp()</text>
+  <text class="sm" x="260" y="106">中间件链：config/db 注入 → 静态文件 → 布局渲染器 → CSRF → 会话 → 当前用户</text>
+  <rect class="bx" x="36" y="118" width="210" height="72" rx="8"/>
+  <text class="ttl" x="141" y="140" text-anchor="middle">routes/main.tsx</text>
+  <text class="sm" x="141" y="158" text-anchor="middle">首页 · 资料 · 文章 · 关注 · 评论</text>
+  <text class="sm" x="141" y="176" text-anchor="middle">（原书 main 蓝本）</text>
+  <rect class="bx" x="274" y="118" width="210" height="72" rx="8"/>
+  <text class="ttl" x="379" y="140" text-anchor="middle">routes/auth.tsx</text>
+  <text class="sm" x="379" y="158" text-anchor="middle">登录 · 注册 · 确认 · 改密码</text>
+  <text class="sm" x="379" y="176" text-anchor="middle">（原书 auth 蓝本）</text>
+  <rect class="bx-p" x="512" y="118" width="212" height="72" rx="8"/>
+  <text class="ttl on-p" x="618" y="140" text-anchor="middle">routes/api/</text>
+  <text class="sm" x="618" y="158" text-anchor="middle">/api/v1 下的 JSON 接口</text>
+  <text class="sm" x="618" y="176" text-anchor="middle">（原书 api 蓝本）</text>
+
+  <path class="ln" d="M380 204 V222" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="20" y="224" width="350" height="72" rx="10"/>
+  <text class="ttl on-b" x="36" y="246">models/ · views/ · lib/</text>
+  <text class="sm" x="36" y="266">业务逻辑、JSX 页面组件、会话/认证/分页/邮件等工具</text>
+  <text class="sm" x="36" y="284">（原书 models.py、templates/、email.py、decorators.py）</text>
+  <rect class="bx-g" x="390" y="224" width="350" height="72" rx="10"/>
+  <text class="ttl on-g" x="406" y="246">db/schema.ts + Drizzle ORM</text>
+  <text class="sm" x="406" y="266">开发和测试：PGlite（进程内的 PostgreSQL）</text>
+  <text class="sm" x="406" y="284">生产：真正的 PostgreSQL 服务器</text>
+</svg>
+<figcaption>图 0-3　最终项目的分层。括号里是它在原书 Flask 项目中对应的部分</figcaption>
+</figure>
+
+<h2 id="who">这套教程写给谁</h2>
+<ul>
+  <li><strong>会一点 JavaScript，但没写过服务端</strong>的人。每章都从“为什么需要这个东西”讲起，而不是直接甩 API。</li>
+  <li><strong>读过（或正在读）《Flask Web Development》，想换到 TypeScript 技术栈</strong>的人。很多地方有「Flask 这样写 / Hono 这样写」的左右对照。</li>
+  <li><strong>想系统补齐 Web 后端基础</strong>的前端工程师。认证、会话、CSRF、迁移、分页、REST、部署，这些概念换了框架也带得走。</li>
+</ul>
+
+<div class="box note">
+  <div class="t">&#9432; 需要什么前置知识</div>
+  <p>
+    会用变量、函数、数组、对象、<code>async/await</code> 就够了。TypeScript 不熟也没关系 ——
+    用到的类型写法第一次出现时都会解释。HTML 会写基本标签即可。命令行只需要会 <code>cd</code> 和敲命令。
+    <strong>不需要会 Python</strong>：出现 Flask 代码的地方只是对照，看不懂可以跳过。
+  </p>
+</div>
+
+<h2 id="how">怎么用这套教程</h2>
+<ol class="steps">
+  <li><strong>按顺序读。</strong>和原书一样，后面的章节建立在前面的代码之上。第 1–7 章是基础，第 8–14 章是实战，第 15–17 章是上线前后的工作。</li>
+  <li><strong>亲手敲代码。</strong>每章末尾有「动手练习」。看懂和写出来之间的差距，比你想象的大。</li>
+  <li><strong>遇到 <span class="pill" style="margin:0">对照</span> 卡片时看一眼左边。</strong>左边是原书的 Flask 写法，右边是 Hono 写法。没学过 Flask 就只看右边。</li>
+  <li><strong>留意“原书检查点”。</strong>原书代码仓库给每个版本打了标签（如 <code>5a</code>、<code>8c</code>），教程里对应的位置会标出来，方便你去翻原书。</li>
+</ol>
+
+<div class="box tip">
+  <div class="t">&#128161; 本教程的代码都跑过</div>
+  <p>
+    教程里的完整示例来自一个真实的 Hono 版 Flasky 项目：TypeScript 类型检查通过，
+    27 个 Vitest 测试（覆盖用户模型、网页流程、REST API）全部通过。
+    使用的版本：Node.js 24、Hono 4.13、Drizzle ORM 0.45、Zod 4、Vitest 5。
+    你读到时如果版本更新了，API 细节可能略有出入，以官方文档为准。
+  </p>
+</div>
+
+<h2 id="toc">全部章节</h2>
+<div id="toc-grid"></div>
+
+<div class="box key" style="margin-top:32px">
+  <div class="t">&#9733; 一句话总结</div>
+  <p>
+    <strong>Hono 应用就是一个 <code>(Request) =&gt; Response</code> 的函数；中间件是包在它外面的一层层洋葱皮；
+    Drizzle 让你用 TypeScript 写出类型安全的 SQL。</strong>
+    剩下的 18 章，就是用这三样东西，把原书的 Flasky 一砖一瓦重新盖起来。
+  </p>
+</div>
+
+<p style="font-size:13px;color:var(--fg-faint);margin-top:40px">
+  原书：Miguel Grinberg，《Flask Web Development: Developing Web Applications with Python》第 2 版，O'Reilly，2018。
+  本教程是基于原书知识结构的独立改写，所有代码均为重新编写的 Hono / TypeScript 实现。
+</p>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

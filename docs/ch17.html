@@ -1,0 +1,897 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 17 章 · 部署 — Hono 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="17">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 17 章</span>
+<h1>部署</h1>
+<p class="lede">
+  开发时的 <code>tsx watch</code> 是为了方便改代码，不是为了上线。这一章把 Flasky 真正部署出去：
+  先写一个每次部署都能放心执行的部署脚本、处理好生产环境的错误日志，
+  然后依次介绍三种主流的部署方式 —— 平台即服务（PaaS）、Docker 容器、以及自己管理的传统服务器。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>把“编译、迁移、初始化数据”变成一个可以重复执行的部署脚本</li>
+    <li>让生产环境的错误被记录下来，并通知到管理员</li>
+    <li>理解虚拟机、容器、PaaS 三种云部署模型的区别</li>
+    <li>在 PaaS 上部署：配置环境变量、数据库、HTTPS 与反向代理</li>
+    <li>用多阶段构建写 Dockerfile，用 Docker Compose 同时运行应用和 PostgreSQL</li>
+    <li>在自己的服务器上用 systemd + Nginx 部署</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="workflow">部署流程</h2>
+
+<p>
+  不管用哪种方式托管，每次安装或升级应用时，都有一系列任务要完成，比如创建或升级数据库的表。
+  原书指出，每次手动做这些事既容易出错又浪费时间，于是写了一个 <code>flask deploy</code> 命令把它们打包在一起。我们对应地写一个脚本：
+</p>
+
+<div class="code" data-lang="ts" data-file="scripts/deploy.ts">
+<pre>
+import { loadConfig } from '../src/config.js'
+import { createDb, migrateDb } from '../src/db/index.js'
+import { insertRoles } from '../src/models/permissions.js'
+import { addSelfFollows } from '../src/models/users.js'
+
+try { process.loadEnvFile() } catch { /* 没有 .env 也行 */ }
+
+// 部署时要做的所有事，每一步都可以重复执行，不会出副作用
+const config = loadConfig()
+const db = createDb(config.databaseUrl)
+
+await migrateDb(db)          // 1. 数据库结构升级到最新（第 5 章）
+await insertRoles(db)        // 2. 创建或更新角色（第 9 章）
+await addSelfFollows(db)     // 3. 确保每个用户都关注了自己（第 12 章）
+
+console.log('部署任务完成')
+process.exit(0)
+</pre>
+</div>
+
+<p>
+  原书强调了一个设计原则：这些函数<strong>执行多少次都不会出问题</strong>。迁移只执行还没执行过的；角色用 upsert；自关注用 <code>ON CONFLICT DO NOTHING</code>。
+  这样每次安装或升级时直接运行部署脚本就行，不用担心“某个函数在不该运行的时候运行了”。
+</p>
+
+<p>
+  另一件上线前必须做的事是<strong>编译</strong>。开发时 <code>tsx</code> 在内存里即时转换 TypeScript；生产环境应该提前编译成 JavaScript，启动更快，也不需要带着开发依赖。
+  编译时只需要 <code>src</code> 和 <code>scripts</code>，所以单独写一个构建用的 tsconfig：
+</p>
+
+<div class="code" data-lang="ts" data-file="tsconfig.build.json">
+<pre>
+{
+  "extends": "./tsconfig.json",
+  "include": ["src", "scripts"]
+}
+</pre>
+</div>
+
+<div class="code" data-lang="ts" data-file="package.json（节选）">
+<pre>
+"scripts": {
+  "build": "tsc -p tsconfig.build.json",     // src/*.ts → dist/src/*.js，scripts/*.ts → dist/scripts/*.js
+  "start": "node dist/src/index.js",
+  "deploy": "node dist/scripts/deploy.js"
+},
+"engines": { "node": "&gt;=24" }
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="从代码到上线的部署流水线">
+  <rect class="bx" x="20" y="60" width="120" height="60" rx="10"/>
+  <text class="ttl" x="80" y="86" text-anchor="middle">git push</text>
+  <text class="sm" x="80" y="104" text-anchor="middle">代码 + 迁移</text>
+  <path class="ln" d="M142 90 H172" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="176" y="60" width="130" height="60" rx="10"/>
+  <text class="ttl on-b" x="241" y="86" text-anchor="middle">npm ci</text>
+  <text class="sm" x="241" y="104" text-anchor="middle">按 lock 装依赖</text>
+  <path class="ln" d="M308 90 H338" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="342" y="60" width="130" height="60" rx="10"/>
+  <text class="ttl on-b" x="407" y="86" text-anchor="middle">npm run build</text>
+  <text class="sm" x="407" y="104" text-anchor="middle">tsc → dist/</text>
+  <path class="ln" d="M474 90 H504" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="508" y="60" width="110" height="60" rx="10"/>
+  <text class="ttl on-a" x="563" y="86" text-anchor="middle">deploy</text>
+  <text class="sm" x="563" y="104" text-anchor="middle">迁移 + 数据</text>
+  <path class="ln" d="M620 90 H650" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="654" y="60" width="86" height="60" rx="10"/>
+  <text class="ttl on-g" x="697" y="86" text-anchor="middle">start</text>
+  <text class="sm" x="697" y="104" text-anchor="middle">启动服务</text>
+  <text class="sm" x="380" y="154" text-anchor="middle">不管是 PaaS、Docker 还是自己的服务器，都是这五步，只是由不同的人（平台 / Dockerfile / 你）来执行</text>
+</svg>
+<figcaption>图 17-1　部署流水线。后面三节会分别看到它在三种部署方式下长什么样</figcaption>
+</figure>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>17a</b>：部署命令</div>
+
+<h2 id="errors">记录生产环境的错误</h2>
+
+<p>
+  开发时出了错，终端里马上能看到调用栈。生产环境里，用户只会看到一个 500 页面（第 3 章），错误详情去哪了？
+  原书说，Flask 会把它们写进日志 —— 但生产模式下日志默认没有配置任何输出，不加处理器的话，日志就丢了。
+</p>
+<p>
+  Node.js 的约定比这简单：<strong>日志一律写到标准输出和标准错误</strong>（<code>console.log</code> / <code>console.error</code>），
+  由运行它的平台负责收集 —— PaaS 有 <code>logs</code> 命令，Docker 有 <code>docker logs</code>，systemd 有 <code>journalctl</code>。
+  原书为 Heroku、Docker、Unix 各写了一个配置类来“把日志输出到 stderr / syslog”，在我们这里都不需要了。
+</p>
+
+<p>原书还配置了一个把 ERROR 级别的日志<strong>通过邮件发给管理员</strong>的处理器。我们在全局的 <code>onError</code> 里做同样的事：</p>
+
+<div class="code" data-lang="ts" data-file="src/app.tsx">
+<pre>
+app.onError((err, c) =&gt; {
+  if (err instanceof HTTPException) {
+    if (err.status === 403 || err.status === 404) return errorResponse(c, err.status)
+    if (err.status &lt; 500) return err.getResponse()
+  }
+  console.error(err)                                   // 所有环境：写进标准错误
+  if (!config.debug &amp;&amp; !config.testing &amp;&amp; config.adminEmail) {
+    // 生产环境：再给管理员发一封邮件（原书的 SMTPHandler）
+    sendEmail(c, config.adminEmail, '应用出错', ({ stack }: { stack: string }) =&gt; ({
+      text: stack, html: `&lt;pre&gt;${stack.replace(/&lt;/g, '&amp;lt;')}&lt;/pre&gt;`,
+    }), { stack: String((err as Error).stack ?? err) })
+  }
+  return errorResponse(c, 500)
+})
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 错误邮件的升级版</div>
+  <p>
+    一个 bug 在高峰期可能每秒触发几十次，邮件会瞬间塞满管理员的收件箱。真实项目通常改用<strong>错误监控服务</strong>（Sentry 等）：
+    同样的错误会被自动归并、统计次数、附带请求信息，并且只在首次出现或频率异常时通知你。Hono 有现成的中间件 <code>@hono/sentry</code>。
+  </p>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>17b</b>：用邮件通知应用错误</div>
+
+<h2 id="cloud">云部署的几种方式</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="三种部署模型中各自由谁负责哪些层">
+  <text class="sm" x="120" y="22" text-anchor="middle">虚拟机 / 自己的服务器</text>
+  <text class="sm" x="380" y="22" text-anchor="middle">容器（Docker）</text>
+  <text class="sm" x="640" y="22" text-anchor="middle">PaaS（Heroku、Render…）</text>
+
+  <rect class="bx-a" x="40" y="34" width="160" height="34" rx="6"/><text class="sm on-a" x="120" y="56" text-anchor="middle">你的代码</text>
+  <rect class="bx-a" x="40" y="72" width="160" height="34" rx="6"/><text class="sm on-a" x="120" y="94" text-anchor="middle">Node.js 与依赖</text>
+  <rect class="bx-a" x="40" y="110" width="160" height="34" rx="6"/><text class="sm on-a" x="120" y="132" text-anchor="middle">进程管理 · 反向代理 · TLS</text>
+  <rect class="bx-a" x="40" y="148" width="160" height="34" rx="6"/><text class="sm on-a" x="120" y="170" text-anchor="middle">操作系统 · 安全更新</text>
+  <rect class="bx-d" x="40" y="186" width="160" height="34" rx="6"/><text class="sm" x="120" y="208" text-anchor="middle">硬件（云厂商）</text>
+
+  <rect class="bx-a" x="300" y="34" width="160" height="34" rx="6"/><text class="sm on-a" x="380" y="56" text-anchor="middle">你的代码</text>
+  <rect class="bx-a" x="300" y="72" width="160" height="34" rx="6"/><text class="sm on-a" x="380" y="94" text-anchor="middle">Node.js 与依赖（镜像里）</text>
+  <rect class="bx-b" x="300" y="110" width="160" height="34" rx="6"/><text class="sm on-b" x="380" y="132" text-anchor="middle">编排 · 网络 · 存储</text>
+  <rect class="bx-d" x="300" y="148" width="160" height="34" rx="6"/><text class="sm" x="380" y="170" text-anchor="middle">宿主机操作系统</text>
+  <rect class="bx-d" x="300" y="186" width="160" height="34" rx="6"/><text class="sm" x="380" y="208" text-anchor="middle">硬件</text>
+
+  <rect class="bx-a" x="560" y="34" width="160" height="34" rx="6"/><text class="sm on-a" x="640" y="56" text-anchor="middle">你的代码</text>
+  <rect class="bx-d" x="560" y="72" width="160" height="34" rx="6"/><text class="sm" x="640" y="94" text-anchor="middle">运行时（平台装）</text>
+  <rect class="bx-d" x="560" y="110" width="160" height="34" rx="6"/><text class="sm" x="640" y="132" text-anchor="middle">路由 · TLS · 扩容</text>
+  <rect class="bx-d" x="560" y="148" width="160" height="34" rx="6"/><text class="sm" x="640" y="170" text-anchor="middle">操作系统</text>
+  <rect class="bx-d" x="560" y="186" width="160" height="34" rx="6"/><text class="sm" x="640" y="208" text-anchor="middle">硬件</text>
+
+  <rect class="bx-a" x="210" y="236" width="18" height="14" rx="3"/><text class="sm" x="234" y="248">你负责</text>
+  <rect class="bx-d" x="310" y="236" width="18" height="14" rx="3"/><text class="sm" x="334" y="248">平台负责</text>
+  <text class="sm" x="440" y="248">越往右越省心，越往左越自由</text>
+</svg>
+<figcaption>图 17-2　原书介绍的三种云部署模型。第四种“Serverless / 边缘函数”（如 Cloudflare Workers）连进程都不用管，Hono 同样支持</figcaption>
+</figure>
+
+<h2 id="paas">平台即服务（PaaS）</h2>
+
+<p>
+  原书以 Heroku 为例讲 PaaS：开发者只需要把代码推送上去，平台自动完成安装、配置和启动，还能按需增减服务器数量。
+  Heroku 至今仍在运营（2022 年起取消了免费套餐），Render、Railway、Fly.io 等新平台的用法大同小异。下面以 Heroku 为例，关键在于理解每一步<strong>为什么</strong>要做。
+</p>
+
+<h3>创建应用和数据库</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+heroku login
+heroku create &lt;应用名&gt;                      # 同时会给 Git 仓库加一个名为 heroku 的远程地址
+heroku addons:create heroku-postgresql:essential-0
+# 平台会自动设置 DATABASE_URL 环境变量 —— 我们的 config.ts 本来就读取它
+</pre>
+</div>
+
+<h3>配置环境变量</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+heroku config:set FLASKY_CONFIG=heroku
+heroku config:set SECRET_KEY=$(openssl rand -hex 32)       # 一个谁都猜不到的随机密钥
+heroku config:set MAIL_SERVER=… MAIL_USERNAME=… MAIL_PASSWORD=… FLASKY_ADMIN=你的邮箱
+heroku config:set PGSSLMODE=no-verify                       # Heroku 的 Postgres 要求 SSL 连接，node-postgres 会读取这个变量
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; SECRET_KEY 必须设置</div>
+  <p>
+    原书反复强调：开发时用默认的密钥没关系，但生产环境必须设置一个谁都不知道的随机字符串，否则攻击者可以伪造会话、生成有效的令牌。
+    第 7 章的 <code>loadConfig</code> 在生产配置下缺少 <code>SECRET_KEY</code> 时会直接拒绝启动，就是为了防止忘记。
+  </p>
+</div>
+
+<h3>HTTPS 与反向代理</h3>
+
+<p>
+  Heroku 为 <code>*.herokuapp.com</code> 下的应用免费提供 HTTPS。原书用 Flask-SSLify 把所有 <code>http://</code> 的请求重定向到 <code>https://</code>，
+  并指出了一个很容易忽视的细节：用户连接的并不是你的应用，而是 Heroku 的<strong>反向代理</strong>。加密连接在代理那里就结束了，
+  代理再用普通 HTTP 把请求转发给应用。于是应用看到的请求永远是 <code>http://</code> —— 生成确认邮件里的链接时就会出错。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="反向代理后面的应用如何得知原始协议">
+  <rect class="bx" x="20" y="70" width="120" height="60" rx="10"/>
+  <text class="ttl" x="80" y="96" text-anchor="middle">浏览器</text>
+  <text class="sm" x="80" y="114" text-anchor="middle">https://…</text>
+  <path class="ln-g" d="M142 100 H220" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="181" y="92" text-anchor="middle">HTTPS 🔒</text>
+  <rect class="bx-b" x="224" y="60" width="200" height="80" rx="10"/>
+  <text class="ttl on-b" x="324" y="84" text-anchor="middle">平台的反向代理</text>
+  <text class="sm" x="324" y="104" text-anchor="middle">在这里解密，然后加上请求头：</text>
+  <text class="mono" x="324" y="124" text-anchor="middle">X-Forwarded-Proto: https</text>
+  <path class="ln" d="M426 100 H504" marker-end="url(#ar)"/>
+  <text class="sm" x="465" y="92" text-anchor="middle">HTTP</text>
+  <rect class="bx-a" x="508" y="50" width="232" height="100" rx="10"/>
+  <text class="ttl on-a" x="624" y="74" text-anchor="middle">Hono 应用</text>
+  <text class="mono" x="524" y="98">c.req.url → http://… ✘</text>
+  <text class="mono" x="524" y="120">X-Forwarded-Proto → https ✔</text>
+  <text class="sm" x="624" y="140" text-anchor="middle">trustProxy: true 时才相信这个头</text>
+  <text class="sm" x="380" y="186" text-anchor="middle">原书用 Werkzeug 的 ProxyFix 中间件解决；我们在 externalUrl() 和 httpsRedirect 里读取这些头</text>
+</svg>
+<figcaption>图 17-3　代理后面的应用只能从请求头里得知“用户其实用的是 HTTPS”。这对 Nginx 等任何反向代理都成立</figcaption>
+</figure>
+
+<div class="code" data-lang="ts" data-file="src/lib/url.ts">
+<pre>
+// 生成完整网址（发邮件、API 里的链接都要用）
+export function externalUrl(c: Context&lt;AppEnv&gt;, path: string): string {
+  const url = new URL(path, c.req.url)
+  if (c.var.config.trustProxy) {
+    // 反向代理后面：真实的协议和域名在代理加的请求头里（相当于 ProxyFix）
+    const proto = c.req.header('x-forwarded-proto')?.split(',')[0].trim()
+    const host = c.req.header('x-forwarded-host')?.split(',')[0].trim()
+    if (proto) url.protocol = `${proto}:`
+    if (host) url.host = host
+  }
+  return url.href
+}
+
+// 相当于 Flask-SSLify：HTTP 请求一律 301 到 HTTPS
+export const httpsRedirect = createMiddleware&lt;AppEnv&gt;(async (c, next) =&gt; {
+  const proto = c.var.config.trustProxy
+    ? c.req.header('x-forwarded-proto')?.split(',')[0].trim()
+    : new URL(c.req.url).protocol.replace(':', '')
+  if (proto === 'http') {
+    const url = new URL(externalUrl(c, c.req.path + new URL(c.req.url).search))
+    url.protocol = 'https:'
+    return c.redirect(url.href, 301)
+  }
+  await next()
+})
+</pre>
+</div>
+
+<p>对应的配置：只有真正跑在 Heroku 上（存在 <code>DYNO</code> 环境变量）时才强制 HTTPS，这样用 Heroku 配置在本地测试时不会被重定向（原书同样的做法）：</p>
+
+<div class="code" data-lang="ts" data-file="src/config.ts">
+<pre>
+case 'heroku': {
+  // …先得到 production 配置…
+  return { ...production, name: 'heroku', sslRedirect: Boolean(env.DYNO), trustProxy: true }
+}
+
+// createApp() 里
+if (config.sslRedirect) app.use('*', httpsRedirect)
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 不在代理后面时，不要相信 X-Forwarded-* 头</div>
+  <p>
+    这些请求头任何客户端都可以随便伪造。只有确定应用前面有一个会覆盖它们的代理时，才把 <code>trustProxy</code> 打开。
+    所以它默认是关的，只在 Heroku 配置、或者设置了 <code>TRUST_PROXY=1</code> 环境变量时（自己的 Nginx 后面，见本章最后）才打开。
+  </p>
+</div>
+
+<h3>生产环境的 Web 服务器</h3>
+
+<p>
+  原书说，Flask 自带的开发服务器性能差、不安全，生产环境要换成 Gunicorn 或 uWSGI（Windows 上用 Waitress）。
+  Node.js 不一样：<strong><code>@hono/node-server</code> 基于 Node 内置的 <code>http</code> 模块，它本身就是生产级的服务器</strong>，不需要再套一层。
+  开发和生产的区别只在于：生产环境运行编译后的 <code>dist/</code>，而且不开 <code>tsx watch</code>。
+</p>
+<p>
+  平台会通过 <code>PORT</code> 环境变量告诉应用该监听哪个端口，第 2 章起我们的入口文件就在读它。
+</p>
+
+<h3>Procfile</h3>
+
+<p>Heroku 通过项目根目录的 <code>Procfile</code> 知道怎么启动应用：</p>
+
+<div class="code" data-lang="text" data-file="Procfile">
+<pre>
+release: node dist/scripts/deploy.js
+web: node dist/src/index.js
+</pre>
+</div>
+
+<ul>
+  <li><strong><code>web</code></strong>：启动 Web 服务器的命令，平台会给它设置 <code>PORT</code>。</li>
+  <li><strong><code>release</code></strong>：Heroku 的“发布阶段”，在新版本上线<strong>之前</strong>自动执行。原书是部署完之后手动运行 <code>heroku run flask deploy</code> 再重启；
+      用发布阶段，部署脚本成为发布流程的一部分，脚本失败时新版本根本不会上线。</li>
+</ul>
+
+<p>
+  那 <code>npm ci</code> 和 <code>npm run build</code> 谁来执行？Heroku 的 Node.js 构建包看到 <code>package.json</code> 就会自动安装依赖、运行 <code>build</code> 脚本，
+  然后删掉开发依赖。原书需要专门准备一个顶层的 <code>requirements.txt</code>，我们什么都不用加。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>17c</b>：Heroku 支持（原书用 Gunicorn / Waitress）</div>
+
+<h3>本地测试、推送与升级</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+# 在本地按 Procfile 运行（从 .env 读取环境变量），上线前先试一试
+npm run build
+heroku local
+
+# 部署：推送代码，平台自动构建、执行 release、启动 web
+git push heroku main
+
+# 查看日志（原书的 heroku logs -t）
+heroku logs --tail
+</pre>
+</div>
+
+<p>
+  升级应用时，原书的流程是：打开维护模式 → 推送 → 运行 deploy → 重启 → 关闭维护模式。
+  有了发布阶段，大多数升级只需要 <code>git push</code>。如果某次迁移会让新旧代码无法同时运行（比如删除了旧代码还在用的列），
+  仍然应该用 <code>heroku maintenance:on</code> / <code>off</code> 把升级过程包起来，期间用户会看到一个“马上回来”的静态页面。
+</p>
+
+<h2 id="docker">Docker 容器</h2>
+
+<p>
+  Heroku 是一种相当“高层”的部署方式。原书接着介绍了容器：它不像 PaaS 那样自动化，但更灵活，也不绑定任何一家云厂商。
+  容器是一种特殊的虚拟机，运行在宿主操作系统的内核之上 —— 虚拟化只到内核为止，所以比完整的虚拟机轻量高效得多。
+</p>
+
+<h3>编写 Dockerfile</h3>
+
+<p>
+  容器从<strong>镜像</strong>启动，镜像是容器文件系统的一个快照。构建镜像的指令写在 <code>Dockerfile</code> 里。
+  和原书相比，我们多了一个“编译”步骤，所以用<strong>多阶段构建</strong>：第一阶段装全部依赖并编译，第二阶段只装生产依赖、只拷贝编译结果，得到的镜像更小：
+</p>
+
+<div class="code" data-lang="dockerfile" data-file="Dockerfile">
+<pre>
+# ---------- 第一阶段：安装全部依赖，编译 TypeScript ----------
+FROM node:24-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json tsconfig.build.json ./
+COPY src src
+COPY scripts scripts
+RUN npx tsc -p tsconfig.build.json
+
+# ---------- 第二阶段：只装生产依赖，拷贝编译结果 ----------
+FROM node:24-alpine
+ENV NODE_ENV=production \
+    FLASKY_CONFIG=production
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev &amp;&amp; npm cache clean --force
+
+COPY --from=build /app/dist ./dist
+COPY drizzle ./drizzle
+COPY static ./static
+COPY --chmod=755 boot.sh ./
+
+# 没配 DATABASE_URL 时 PGlite 要往 ./data 写数据，先给普通用户准备好目录
+RUN mkdir -p data &amp;&amp; chown node:node data
+USER node
+
+EXPOSE 3000
+ENTRYPOINT ["./boot.sh"]
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="多阶段构建：只把编译结果带进最终镜像">
+  <rect class="bx-b" x="20" y="20" width="330" height="210" rx="12"/>
+  <text class="ttl on-b" x="185" y="44" text-anchor="middle">阶段一：build（用完即弃）</text>
+  <rect class="bx" x="36" y="58" width="298" height="30" rx="6"/><text class="sm" x="48" y="78">node:24-alpine</text>
+  <rect class="bx" x="36" y="94" width="298" height="30" rx="6"/><text class="sm" x="48" y="114">node_modules（含 TypeScript、Vitest…）</text>
+  <rect class="bx" x="36" y="130" width="298" height="30" rx="6"/><text class="sm" x="48" y="150">src/*.ts · scripts/*.ts</text>
+  <rect class="bx-a" x="36" y="166" width="298" height="30" rx="6"/><text class="sm on-a" x="48" y="186">dist/*.js ← tsc 编译出来的</text>
+
+  <path class="ln-a" d="M336 181 H410" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="382" y="172" text-anchor="middle">COPY --from</text>
+
+  <rect class="bx-g" x="414" y="20" width="326" height="210" rx="12"/>
+  <text class="ttl on-g" x="577" y="44" text-anchor="middle">阶段二：最终镜像</text>
+  <rect class="bx" x="430" y="58" width="294" height="30" rx="6"/><text class="sm" x="442" y="78">node:24-alpine（Alpine Linux，体积小）</text>
+  <rect class="bx" x="430" y="94" width="294" height="30" rx="6"/><text class="sm" x="442" y="114">node_modules（只有生产依赖）</text>
+  <rect class="bx-a" x="430" y="130" width="294" height="30" rx="6"/><text class="sm on-a" x="442" y="150">dist/</text>
+  <rect class="bx" x="430" y="166" width="294" height="30" rx="6"/><text class="sm" x="442" y="186">drizzle/ · static/ · boot.sh</text>
+  <text class="sm" x="577" y="218" text-anchor="middle">没有源码、没有编译器、没有测试工具</text>
+</svg>
+<figcaption>图 17-4　多阶段构建：编译需要的工具留在第一阶段，最终镜像里只有运行需要的东西</figcaption>
+</figure>
+
+<p>对照原书逐条解释这些指令：</p>
+<ul>
+  <li><strong><code>FROM</code></strong>：指定基础镜像。原书用 <code>python:3.6-alpine</code>，我们用 Docker Hub 上官方的 <code>node:24-alpine</code>。Alpine 是一个很小的 Linux 发行版，常用来做容器的基础。</li>
+  <li><strong><code>ENV</code></strong>：定义运行时的环境变量。<code>FLASKY_CONFIG=production</code> 相当于原书的 <code>FLASK_CONFIG docker</code>。</li>
+  <li><strong><code>USER</code></strong>：原书特别建议不要用 root 运行容器。官方的 Node 镜像里已经有一个叫 <code>node</code> 的普通用户，直接切换过去即可（原书需要自己 <code>adduser</code>）。</li>
+  <li><strong><code>WORKDIR</code></strong> / <strong><code>COPY</code></strong>：设定工作目录，把文件拷进镜像。先拷 <code>package.json</code> 装依赖、再拷源码，这样只改源码时 Docker 可以复用“装依赖”那一层的缓存，构建快得多。</li>
+  <li><strong><code>RUN</code></strong>：在构建时执行命令。原书在这里创建虚拟环境、<code>pip install</code>；我们 <code>npm ci</code>。</li>
+  <li><strong><code>EXPOSE</code></strong>：声明应用在容器里监听的端口。</li>
+  <li><strong><code>ENTRYPOINT</code></strong>：容器启动时执行的命令。</li>
+</ul>
+
+<p>别忘了 <code>.dockerignore</code>，免得把本地的 <code>node_modules</code>、数据库文件和机密拷进镜像：</p>
+
+<div class="code" data-lang="text" data-file=".dockerignore">
+<pre>
+node_modules
+dist
+data
+coverage
+tests
+.env
+.env-*
+</pre>
+</div>
+
+<p>容器的启动脚本（原书例 17-11 和 17-13），先运行部署脚本，再启动服务器：</p>
+
+<div class="code" data-lang="bash" data-file="boot.sh">
+<pre>
+#!/bin/sh
+# 数据库容器可能还没准备好，部署任务失败就等 5 秒重试
+until node dist/scripts/deploy.js; do
+  echo "部署任务失败，5 秒后重试……"
+  sleep 5
+done
+
+# exec：让 Node 进程接替 shell 成为容器的主进程，才能收到 docker stop 发出的 SIGTERM
+exec node dist/src/index.js
+</pre>
+</div>
+
+<p>
+  原书解释了为什么要用 <code>exec</code>：Docker 特别关注启动容器的那个进程，它结束，容器就结束。<code>exec</code> 让 Node 进程<em>替换掉</em> shell 进程。
+  这样 <code>docker stop</code> 发出的 SIGTERM 信号直接送到 Node，第 16 章写的优雅退出代码就能生效：先处理完正在进行的请求，再退出。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>17d</b>：Docker 支持</div>
+
+<h3>构建和运行容器</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+docker build -t flasky:latest .          # -t 给镜像起名字和标签；最后的点表示“用当前目录构建”
+docker images                            # 查看本地的镜像
+# REPOSITORY   TAG       IMAGE ID       SIZE
+# flasky       latest    a9d5c738aca2   ~320MB（压缩后约 70MB）
+
+docker run --name flasky -d -p 8000:3000 \
+  -e SECRET_KEY=$(openssl rand -hex 32) \
+  flasky:latest
+</pre>
+</div>
+
+<ul>
+  <li><code>--name</code>：给容器起名字（不给的话 Docker 会随机生成一个）。</li>
+  <li><code>-d</code>：在后台运行（detached）。</li>
+  <li><code>-p 8000:3000</code>：把宿主机的 8000 端口映射到容器里的 3000 端口。同一个镜像可以启动多个容器，映射到宿主机的不同端口。</li>
+  <li><code>-e</code>：设置环境变量。</li>
+</ul>
+
+<p>现在可以访问 <code>http://localhost:8000</code> 了。常用的管理命令：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+docker ps                       # 正在运行的容器
+docker logs -f flasky           # 查看（并持续跟踪）日志
+docker exec -it flasky sh       # 在运行中的容器里打开一个 shell，排查问题
+docker stop flasky              # 停止（会收到 SIGTERM，优雅退出）
+docker rm flasky                # 删除已停止的容器
+docker rm -f flasky             # 停止并删除
+</pre>
+</div>
+
+<p>要把镜像分享给别人（或者给服务器使用），推送到镜像仓库，比如 Docker Hub 或 GitHub Container Registry：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+docker login
+docker tag flasky:latest &lt;你的用户名&gt;/flasky:latest
+docker push &lt;你的用户名&gt;/flasky:latest
+</pre>
+</div>
+
+<h3>使用外部数据库</h3>
+
+<p>
+  原书指出了上面这种部署方式的一个缺点：数据库（原书是 SQLite，我们是 PGlite）就在应用容器里，容器一旦删除，数据就跟着没了，升级应用变得很麻烦。
+  更好的做法是让数据库在<strong>单独的容器</strong>里运行，应用容器随时可以替换。Docker Hub 上有官方的 PostgreSQL 镜像。
+  原书用 <code>docker run --link</code> 把两个容器连起来，这个参数现在已经不推荐使用了，更好的办法是直接用下一节的 Docker Compose。
+</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>17e</b>：为 Docker 使用外部数据库（原书用 MySQL，我们用 PostgreSQL）</div>
+
+<h3>用 Docker Compose 编排容器</h3>
+
+<p>
+  一个应用往往由好几个容器组成：应用本身、数据库，将来可能还有缓存、队列……原书介绍了 Docker 自带的编排工具 Compose：
+  在一个 <code>docker-compose.yml</code> 文件里描述所有容器，一条命令全部启动：
+</p>
+
+<div class="code" data-lang="yaml" data-file="docker-compose.yml">
+<pre>
+services:
+  flasky:
+    build: .                    # 用当前目录的 Dockerfile 构建
+    ports:
+      - "8000:3000"
+    env_file: .env              # 应用的环境变量
+    restart: always             # 意外退出时自动重启
+    depends_on:
+      - postgres                # 先启动 postgres
+
+  postgres:
+    image: postgres:17-alpine   # 直接用官方镜像，不需要构建
+    env_file: .env-postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # 数据存在命名卷里，删掉容器数据也还在
+    restart: always
+
+volumes:
+  pgdata:
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="Docker Compose 启动的两个容器及其网络和数据卷">
+  <rect class="bx" x="20" y="80" width="120" height="60" rx="10"/>
+  <text class="ttl" x="80" y="106" text-anchor="middle">浏览器</text>
+  <text class="sm" x="80" y="124" text-anchor="middle">localhost:8000</text>
+  <path class="ln" d="M142 110 H204" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="208" y="20" width="532" height="190" rx="14"/>
+  <text class="sm" x="224" y="40">Compose 自动创建的内部网络（容器之间用服务名互相访问）</text>
+  <rect class="bx-a" x="240" y="70" width="210" height="80" rx="10"/>
+  <text class="ttl on-a" x="345" y="94" text-anchor="middle">flasky 容器</text>
+  <text class="mono" x="345" y="116" text-anchor="middle">:3000 · boot.sh</text>
+  <text class="sm" x="345" y="136" text-anchor="middle">env_file: .env</text>
+  <path class="ln-b" d="M452 110 H520" marker-end="url(#ar-b)"/>
+  <text class="mono on-b" x="486" y="62" text-anchor="middle">postgres:5432</text>
+  <rect class="bx-b" x="524" y="70" width="190" height="80" rx="10"/>
+  <text class="ttl on-b" x="619" y="94" text-anchor="middle">postgres 容器</text>
+  <text class="sm" x="619" y="116" text-anchor="middle">env_file: .env-postgres</text>
+  <text class="sm" x="619" y="136" text-anchor="middle">官方镜像</text>
+  <path class="ln-g" d="M619 152 V176"/>
+  <rect class="bx-g" x="544" y="176" width="150" height="26" rx="6"/>
+  <text class="sm on-g" x="619" y="194" text-anchor="middle">卷 pgdata（持久化）</text>
+</svg>
+<figcaption>图 17-5　DATABASE_URL 里的主机名写 <code>postgres</code>（服务名），Compose 的内部 DNS 会把它解析成数据库容器的地址</figcaption>
+</figure>
+
+<p>两个环境变量文件。原书特意把数据库的变量放在单独的文件里：好习惯是<strong>别让一个容器能看到另一个容器的机密</strong>：</p>
+
+<div class="code" data-lang="env" data-file=".env">
+<pre>
+FLASKY_CONFIG=production
+SECRET_KEY=3128b4588e7f4305b5501025c13ceca5
+DATABASE_URL=postgres://flasky:&lt;数据库密码&gt;@postgres:5432/flasky
+MAIL_USERNAME=…
+MAIL_PASSWORD=…
+FLASKY_ADMIN=你的邮箱
+</pre>
+</div>
+
+<div class="code" data-lang="env" data-file=".env-postgres">
+<pre>
+POSTGRES_USER=flasky
+POSTGRES_PASSWORD=&lt;数据库密码&gt;
+POSTGRES_DB=flasky
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 这两个文件永远不要提交到 Git</div>
+  <p>它们包含密码和其他敏感信息。<code>.gitignore</code> 和 <code>.dockerignore</code> 里都要排除 <code>.env</code> 和 <code>.env-*</code>。</p>
+</div>
+
+<p>
+  原书讨论了编排系统的一个典型问题：容器启动的顺序。<code>depends_on</code> 保证 postgres 先启动，但<strong>不会等</strong>它真正准备好接受连接（PostgreSQL 初始化要几秒钟）。
+  原书的建议是：连接外部服务时总要考虑重试。这正是 <code>boot.sh</code> 里那个重试循环的用途 —— 部署脚本连不上数据库就等 5 秒再试：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="flasky 容器等待数据库就绪的时间线">
+  <line class="ln" x1="120" y1="50" x2="740" y2="50"/>
+  <text class="sm" x="20" y="54">postgres</text>
+  <rect class="bx-d" x="120" y="38" width="260" height="24" rx="4"/><text class="sm" x="250" y="54" text-anchor="middle">初始化数据库……</text>
+  <rect class="bx-b" x="382" y="38" width="358" height="24" rx="4"/><text class="sm on-b" x="561" y="54" text-anchor="middle">可以接受连接</text>
+  <line class="ln" x1="120" y1="110" x2="740" y2="110"/>
+  <text class="sm" x="20" y="114">flasky</text>
+  <rect class="bx-r" x="130" y="98" width="70" height="24" rx="4"/><text class="sm on-r" x="165" y="114" text-anchor="middle">deploy ✘</text>
+  <text class="sm" x="232" y="114" text-anchor="middle">等 5 秒</text>
+  <rect class="bx-r" x="262" y="98" width="70" height="24" rx="4"/><text class="sm on-r" x="297" y="114" text-anchor="middle">deploy ✘</text>
+  <text class="sm" x="362" y="114" text-anchor="middle">等 5 秒</text>
+  <rect class="bx-g" x="392" y="98" width="80" height="24" rx="4"/><text class="sm on-g" x="432" y="114" text-anchor="middle">deploy ✔</text>
+  <rect class="bx-a" x="476" y="98" width="264" height="24" rx="4"/><text class="sm on-a" x="608" y="114" text-anchor="middle">exec node dist/src/index.js</text>
+  <text class="sm" x="380" y="152" text-anchor="middle">另一种做法：给 postgres 加 healthcheck，并写 depends_on: { postgres: { condition: service_healthy } }</text>
+</svg>
+<figcaption>图 17-6　“连不上就重试”比“精确控制启动顺序”更健壮：数据库以后重启时，同样的逻辑依然有效</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+docker compose up -d --build      # 构建镜像（--build），按依赖顺序启动所有容器（-d 后台运行）
+docker compose logs -f            # 所有容器的日志合在一起看
+docker compose ps                 # 各容器的状态
+docker compose down               # 停止并删除容器（数据卷保留）
+</pre>
+</div>
+
+<p>升级应用：改完代码后再执行一次 <code>docker compose up -d --build</code>，Compose 会重新构建有变化的镜像，用新容器替换旧容器，启动时 <code>boot.sh</code> 自动完成迁移。</p>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>17f</b>：Docker Compose 支持</div>
+
+<h3>清理旧的容器和镜像</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+docker ps -a                      # 包括已停止的容器
+docker rm -f &lt;名字或ID&gt; …
+docker images
+docker rmi &lt;镜像&gt;
+docker volume ls
+docker system prune               # 一次性清理停止的容器、无用的镜像和网络
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 小心 --volumes</div>
+  <p>
+    原书提到 <code>docker system prune --volumes</code> 可以连同没用的数据卷一起清理。但数据库的数据就存在卷里 ——
+    如果那一刻数据库容器恰好是停止状态，它的卷就会被当成“没用的”删掉。清理卷之前，务必确认里面没有你需要的数据。
+  </p>
+</div>
+
+<h3>在生产环境使用 Docker</h3>
+
+<p>原书列出了只用 Docker 本身部署生产环境的几个局限，今天依然成立：</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128680;</span><h4>监控与告警</h4><p>Docker 能在容器崩溃时重启它，但不会监控它的健康状况，也不会在异常时通知你。</p></div>
+  <div class="card"><span class="ic">&#128220;</span><h4>日志</h4><p>每个容器有自己的日志流，缺乏长期存储、搜索和过滤。</p></div>
+  <div class="card"><span class="ic">&#128273;</span><h4>机密管理</h4><p>通过环境变量传递密码并不安全，<code>docker inspect</code> 就能看到。</p></div>
+  <div class="card"><span class="ic">&#128200;</span><h4>可靠性与扩容</h4><p>要容错和扩容，需要在多台主机上运行多个实例，前面再放负载均衡器。</p></div>
+</div>
+
+<p>
+  这些问题通常交给更高级的编排系统解决：原书提到了 Docker Swarm、Apache Mesos 和 Kubernetes。
+  今天更常见的是直接使用云厂商托管的容器服务（AWS ECS、Google Cloud Run、Fly.io 等），你只需要提供镜像。
+</p>
+
+<h2 id="traditional">传统部署：自己的服务器</h2>
+
+<p>
+  最后一种方式：买或租一台服务器（物理机或虚拟机），手动装好所有组件。这是最费力的方式，但当你能直接登录生产服务器时，它也最直接。
+  原书列出了服务器上要做的准备工作，我们逐条对应到今天的 Node.js 生态：
+</p>
+
+<div class="tw">
+<table>
+  <thead><tr><th>原书的清单</th><th>本教程的做法</th></tr></thead>
+  <tbody>
+    <tr><td>安装数据库（MySQL / Postgres）</td><td>PostgreSQL（或者用云厂商托管的数据库，省去备份和升级的麻烦）</td></tr>
+    <tr><td>安装邮件传输代理（Sendmail / Postfix）</td><td>自己搭邮件服务器很难保证送达率，推荐用事务性邮件服务（第 6 章）</td></tr>
+    <tr><td>安装生产级 Web 服务器（Gunicorn / uWSGI）</td><td>不需要：Node.js 本身就是（前面“生产环境的 Web 服务器”一节）</td></tr>
+    <tr><td>安装进程监控工具（Supervisor）</td><td>systemd（现代 Linux 发行版自带），或者 pm2</td></tr>
+    <tr><td>配置 SSL 证书</td><td>Let's Encrypt 免费证书（certbot 自动续期），或者用会自动申请证书的 Caddy</td></tr>
+    <tr><td>（强烈推荐）前置反向代理（Nginx / Apache），由它直接提供静态文件</td><td>Nginx 或 Caddy</td></tr>
+    <tr><td>加固服务器：防火墙、移除无用软件……</td><td>防火墙只开 22/80/443、SSH 只允许密钥登录、开启自动安全更新</td></tr>
+  </tbody>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="传统服务器上的部署架构">
+  <rect class="bx" x="20" y="90" width="110" height="60" rx="10"/>
+  <text class="ttl" x="75" y="116" text-anchor="middle">浏览器</text>
+  <text class="sm" x="75" y="134" text-anchor="middle">:443 HTTPS</text>
+  <path class="ln-g" d="M132 120 H176" marker-end="url(#ar-g)"/>
+  <rect class="bx-d" x="180" y="20" width="560" height="204" rx="14"/>
+  <text class="sm" x="196" y="40">一台 Linux 服务器</text>
+  <rect class="bx-b" x="200" y="70" width="160" height="100" rx="10"/>
+  <text class="ttl on-b" x="280" y="94" text-anchor="middle">Nginx</text>
+  <text class="sm" x="280" y="116" text-anchor="middle">TLS 证书 · HTTP→HTTPS</text>
+  <text class="sm" x="280" y="134" text-anchor="middle">/static/ 直接读磁盘</text>
+  <text class="sm" x="280" y="152" text-anchor="middle">其余转发给 Node</text>
+  <path class="ln" d="M362 120 H408" marker-end="url(#ar)"/>
+  <text class="mono" x="385" y="112" text-anchor="middle">:3000</text>
+  <rect class="bx-a" x="412" y="70" width="160" height="100" rx="10"/>
+  <text class="ttl on-a" x="492" y="94" text-anchor="middle">Node.js（Flasky）</text>
+  <text class="sm" x="492" y="116" text-anchor="middle">只监听 127.0.0.1</text>
+  <text class="sm" x="492" y="134" text-anchor="middle">由 systemd 启动、守护</text>
+  <text class="sm" x="492" y="152" text-anchor="middle">日志进 journald</text>
+  <path class="ln" d="M574 120 H608" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="612" y="70" width="112" height="100" rx="10"/>
+  <text class="ttl on-g" x="668" y="112" text-anchor="middle">PostgreSQL</text>
+  <text class="sm" x="668" y="134" text-anchor="middle">:5432 仅本机</text>
+  <text class="sm" x="460" y="206" text-anchor="middle">防火墙只放行 22、80、443；应用和数据库都不直接暴露在公网</text>
+</svg>
+<figcaption>图 17-7　传统部署的经典架构：反向代理在前，应用在中间，数据库在后</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 用脚本自动化这些步骤</div>
+  <p>原书建议：不要手动执行这些配置，而是用 Ansible、Chef、Puppet 这样的自动化工具写成脚本。这样换一台服务器、或者出了问题要重建时，几分钟就能恢复。</p>
+</div>
+
+<h3>导入环境变量</h3>
+
+<p>
+  和 Heroku、Docker 一样，应用在服务器上也依赖环境变量来获取数据库地址、邮件密码等配置。原书在 <code>flasky.py</code> 里用 python-dotenv 读取 <code>.env</code> 文件。
+  我们从第 7 章起就在入口文件和所有脚本里调用了 Node 内置的 <code>process.loadEnvFile()</code>，所以只要在服务器上的项目目录里放一个 <code>.env</code> 就行：
+</p>
+
+<div class="code" data-lang="env" data-file="/home/flasky/flasky/.env">
+<pre>
+FLASKY_CONFIG=production
+SECRET_KEY=…
+DATABASE_URL=postgres://flasky:…@localhost:5432/flasky
+TRUST_PROXY=1
+MAIL_SERVER=… MAIL_USERNAME=… MAIL_PASSWORD=…
+FLASKY_ADMIN=…
+</pre>
+</div>
+
+<p><code>TRUST_PROXY=1</code> 告诉应用：前面有 Nginx，可以相信它加上的 <code>X-Forwarded-*</code> 请求头（图 17-3）。</p>
+
+<h3>用 systemd 守护进程</h3>
+
+<p>
+  原书推荐用 Supervisor 这样的进程监控工具，在应用崩溃或服务器重启后自动把它拉起来。现代 Linux 自带的 systemd 就能做到：
+</p>
+
+<div class="code" data-lang="ini" data-file="/etc/systemd/system/flasky.service">
+<pre>
+[Unit]
+Description=Flasky (Hono)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=flasky
+WorkingDirectory=/home/flasky/flasky
+ExecStartPre=/usr/bin/node dist/scripts/deploy.js
+ExecStart=/usr/bin/node dist/src/index.js
+Restart=always
+Environment=PORT=3000
+
+[Install]
+WantedBy=multi-user.target
+</pre>
+</div>
+
+<ul>
+  <li><code>ExecStartPre</code>：每次启动前先运行部署脚本（相当于容器里的 <code>boot.sh</code>）。</li>
+  <li><code>Restart=always</code>：进程退出就自动重启，服务器重启后也会自动启动（配合下面的 <code>enable</code>）。</li>
+  <li><code>systemctl stop</code> 会发送 SIGTERM，第 16 章的优雅退出代码同样生效。</li>
+</ul>
+
+<div class="code" data-lang="bash">
+<pre>
+sudo systemctl daemon-reload
+sudo systemctl enable --now flasky       # 开机自启，并立即启动
+
+# 升级：拉代码 → 装依赖 → 编译 → 重启（重启时会自动跑部署脚本）
+git pull &amp;&amp; npm ci &amp;&amp; npm run build &amp;&amp; npm prune --omit=dev &amp;&amp; sudo systemctl restart flasky
+</pre>
+</div>
+
+<h3>日志</h3>
+
+<p>
+  原书为 Unix 服务器写了一个 <code>UnixConfig</code>，把日志发给 syslog 守护进程。用 systemd 运行的程序，写到标准输出和标准错误的内容会自动进入 systemd 的日志系统 journald，所以什么都不用配置：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+journalctl -u flasky -f              # 实时跟踪 Flasky 的日志
+journalctl -u flasky --since today   # 今天的日志
+</pre>
+</div>
+
+<h3>Nginx 反向代理</h3>
+
+<div class="code" data-lang="nginx" data-file="/etc/nginx/sites-available/flasky">
+<pre>
+server {
+    listen 80;
+    server_name flasky.example.com;
+    return 301 https://$host$request_uri;          # HTTP 一律跳转到 HTTPS
+}
+
+server {
+    listen 443 ssl;
+    server_name flasky.example.com;
+    ssl_certificate     /etc/letsencrypt/live/flasky.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/flasky.example.com/privkey.pem;
+
+    location /static/ {                            # 静态文件由 Nginx 直接提供，不经过 Node
+        alias /home/flasky/flasky/static/;
+        expires 7d;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;          # 应用靠它知道用户用的是 HTTPS
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+</pre>
+</div>
+
+<div class="checkpoint">&#128204; 原书检查点 <b>17g</b>：传统部署</div>
+
+<h2 id="summary">小结</h2>
+<ul>
+  <li>部署流水线：<code>npm ci</code> → <code>npm run build</code> → 部署脚本（迁移、角色、自关注，全部可重复执行）→ <code>node dist/src/index.js</code>。</li>
+  <li>日志一律写标准输出 / 标准错误，由平台收集；生产环境的错误额外通知管理员，更好的做法是用错误监控服务。</li>
+  <li>PaaS：平台装依赖、跑 <code>build</code>；<code>Procfile</code> 的 <code>release</code> 自动执行部署脚本；在反向代理后面要通过 <code>X-Forwarded-Proto</code> 判断 HTTPS。</li>
+  <li><code>@hono/node-server</code> 本身就是生产级服务器，不需要 Gunicorn 那样的额外一层。</li>
+  <li>Docker：多阶段构建让镜像只包含运行所需；<code>boot.sh</code> 用重试等待数据库、用 <code>exec</code> 让 Node 接收信号；Compose 用服务名互联、用卷持久化数据。</li>
+  <li>自己的服务器：Nginx（TLS、静态文件、反向代理）+ systemd（守护、自动重启、journald 日志）+ PostgreSQL；设置 <code>TRUST_PROXY=1</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 Docker Compose 在本地把 Flasky 和 PostgreSQL 跑起来，注册一个账号，然后 <code>docker compose down</code> 再 <code>up</code>，确认数据还在。</li>
+    <li>给 <code>postgres</code> 服务加上 <code>healthcheck</code>（提示：<code>pg_isready -U flasky</code>），把 <code>depends_on</code> 改成 <code>condition: service_healthy</code>，观察 flasky 容器还需不需要重试。</li>
+    <li>在 <code>docker compose up</code> 运行时执行 <code>docker compose stop flasky</code>，在日志里找到“收到 SIGTERM，正在关闭……”。再把 <code>boot.sh</code> 里的 <code>exec</code> 去掉重试一次，比较有什么不同。</li>
+    <li>选一个 PaaS（Heroku、Render、Railway 或 Fly.io），把 Flasky 部署上去，通过“找回密码”邮件里的链接确认它生成的是 <code>https://</code> 地址。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
