@@ -53,6 +53,18 @@ public class User {
     @Column(name = "avatar_file", length = 80)
     private String avatarFile;
 
+    // ---------- 第 22 章：两步验证 ----------
+
+    @Column(name = "totp_secret", length = 64)
+    private String totpSecret;
+
+    @Column(name = "totp_enabled", nullable = false)
+    private boolean totpEnabled = false;
+
+    /** 最近一次用掉的时间片。防止同一个码在 30 秒内被重复使用 */
+    @Column(name = "totp_last_slot")
+    private Long totpLastSlot;
+
     /** 关系的"多"这一侧：真正的外键列在这里 */
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "role_id")
@@ -120,6 +132,13 @@ public class User {
         }
         return avatarHash;
     }
+
+    public String  getTotpSecret()             { return totpSecret; }
+    public void    setTotpSecret(String s)     { this.totpSecret = s; }
+    public boolean isTotpEnabled()             { return totpEnabled; }
+    public void    setTotpEnabled(boolean v)   { this.totpEnabled = v; }
+    public Long    getTotpLastSlot()           { return totpLastSlot; }
+    public void    setTotpLastSlot(Long slot)  { this.totpLastSlot = slot; }
 
     public String getAvatarFile()              { return avatarFile; }
     public void   setAvatarFile(String file)   { this.avatarFile = file; }

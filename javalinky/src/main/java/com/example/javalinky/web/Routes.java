@@ -14,6 +14,12 @@ public final class Routes {
     public static final String DELETE_AVATAR = "/edit-profile/avatar/delete";
     public static final String LIVE = "/live";          // 第 21 章：SSE
 
+    // 第 22 章：两步验证
+    public static final String TWO_FACTOR         = "/auth/2fa";
+    public static final String TWO_FACTOR_SETUP   = "/auth/2fa/setup";
+    public static final String TWO_FACTOR_ENABLE  = "/auth/2fa/enable";
+    public static final String TWO_FACTOR_DISABLE = "/auth/2fa/disable";
+
     /** 第 20 章：上传的头像 */
     public static String avatar(String filename) {
         return "/avatars/" + filename;

@@ -5,11 +5,18 @@ import com.example.javalinky.db.Db;
 import com.example.javalinky.model.Role;
 import com.example.javalinky.model.User;
 import com.example.javalinky.service.AuthService;
+import com.example.javalinky.model.OAuthIdentity;
+import com.example.javalinky.service.OAuthClient;
+import com.example.javalinky.service.TwoFactorService;
 import com.example.javalinky.util.Tokens;
+import com.example.javalinky.util.Totp;
+
+import java.time.Instant;
 import com.example.javalinky.web.*;
 import com.example.javalinky.web.form.*;
 import io.javalin.config.JavalinConfig;
 import io.javalin.http.Context;
+import io.javalin.http.NotFoundResponse;
 
 import java.util.*;
 
@@ -39,6 +46,19 @@ public class AuthRoutes implements RouteModule {
             get("/confirm/{token}", this::confirm);
             get("/confirm",         this::resendConfirmation);
             get("/unconfirmed",     this::unconfirmed);
+
+            // 第 22 章：两步验证
+            // 注意这里的路径是<b>相对</b> path("/auth") 的 ——
+            // 写成 Routes.TWO_FACTOR（"/auth/2fa"）会变成 /auth/auth/2fa
+            // 第 22 章：第三方登录
+            get("/oauth/{provider}",          this::oauthStart);
+            get("/oauth/{provider}/callback", this::oauthCallback);
+
+            get("/2fa",  this::twoFactorChallengeForm);   // 登录中途，还没登录成功
+            post("/2fa", this::twoFactorChallenge);
+            get("/2fa/setup",    this::twoFactorSetupForm, Access.AUTHENTICATED);
+            post("/2fa/enable",  this::twoFactorEnable,    Access.AUTHENTICATED);
+            post("/2fa/disable", this::twoFactorDisable,   Access.AUTHENTICATED);
 
             get("/change-password",  this::changePasswordForm);
             post("/change-password", this::changePassword);
@@ -102,9 +122,319 @@ public class AuthRoutes implements RouteModule {
         // 登录成功，把这个 IP 的失败记录清掉
         services.loginLimiter().reset(limitKey);
 
+        // 第 22 章：开了两步验证的话，密码只是第一步。
+        // 关键：这里<b>还没有</b>调 CurrentUser.login —— 会话里只放一个「待验证」的标记，
+        // 它不是登录态，拿着它访问任何受保护页面都会被挡住。
+        if (user.isTotpEnabled()) {
+            ctx.sessionAttribute(PENDING_2FA_USER, user.getId());
+            ctx.sessionAttribute(PENDING_2FA_SINCE, System.currentTimeMillis());
+            ctx.sessionAttribute(PENDING_2FA_NEXT, safeNext(ctx, Routes.INDEX));
+            ctx.redirect(Routes.TWO_FACTOR);
+            return;
+        }
+
         CurrentUser.login(ctx, user);
         Flash.success(ctx, "欢迎回来，" + user.getUsername() + "！");
         ctx.redirect(safeNext(ctx, Routes.INDEX));
+    }
+
+    // ---------- 第 22 章：第三方登录 ----------
+
+    private static final String OAUTH_STATE    = "oauthState";
+    private static final String OAUTH_VERIFIER = "oauthVerifier";
+    private static final String OAUTH_NEXT     = "oauthNext";
+
+    private void oauthStart(Context ctx) {
+        var provider = providerOrNull(ctx.pathParam("provider"));
+        if (provider == null) throw new NotFoundResponse("没有配置这个登录方式");
+
+        // state 防 CSRF：回调时必须带回同一个值，证明这次回调是我们发起的。
+        // 少了它，攻击者可以把自己的授权码塞给受害者，把受害者的账号绑到自己头上。
+        String state = OAuthClient.randomUrlSafe();
+        // PKCE 的 verifier 防「授权码被截获」：换令牌时要出示它
+        String verifier = OAuthClient.randomUrlSafe();
+
+        ctx.sessionAttribute(OAUTH_STATE, state);
+        ctx.sessionAttribute(OAUTH_VERIFIER, verifier);
+        ctx.sessionAttribute(OAUTH_NEXT, safeNext(ctx, Routes.INDEX));
+
+        ctx.redirect(services.oauth().authorizeUrl(
+            provider, redirectUri(ctx, provider.name()),
+            state, OAuthClient.codeChallenge(verifier)));
+    }
+
+    private void oauthCallback(Context ctx) {
+        var provider = providerOrNull(ctx.pathParam("provider"));
+        if (provider == null) throw new NotFoundResponse("没有配置这个登录方式");
+
+        String expectedState = ctx.sessionAttribute(OAUTH_STATE);
+        String verifier      = ctx.sessionAttribute(OAUTH_VERIFIER);
+        String next          = ctx.sessionAttribute(OAUTH_NEXT);
+
+        // 会话里的一次性值用完就清，别留着给下一次复用
+        ctx.sessionAttribute(OAUTH_STATE, null);
+        ctx.sessionAttribute(OAUTH_VERIFIER, null);
+        ctx.sessionAttribute(OAUTH_NEXT, null);
+
+        String state = ctx.queryParam("state");
+        if (expectedState == null || state == null || !expectedState.equals(state)) {
+            Flash.danger(ctx, "登录请求已失效，请重试。");
+            ctx.redirect(Routes.LOGIN);
+            return;
+        }
+
+        String code = ctx.queryParam("code");
+        if (code == null || code.isBlank()) {
+            // 用户在服务商页面点了「取消」，或者对方报错
+            Flash.info(ctx, "已取消第三方登录。");
+            ctx.redirect(Routes.LOGIN);
+            return;
+        }
+
+        var token = services.oauth().exchangeCode(
+            provider, redirectUri(ctx, provider.name()), code, verifier);
+        var external = token.flatMap(t -> services.oauth().fetchUser(provider, t));
+        if (external.isEmpty()) {
+            Flash.danger(ctx, "第三方登录失败，请稍后再试或用密码登录。");
+            ctx.redirect(Routes.LOGIN);
+            return;
+        }
+
+        User user = linkOrCreate(ctx, provider.name(), external.get());
+        if (user == null) {
+            ctx.redirect(Routes.LOGIN);
+            return;
+        }
+
+        CurrentUser.login(ctx, user);
+        Flash.success(ctx, "欢迎回来，" + user.getUsername() + "！");
+        ctx.redirect(next == null ? Routes.INDEX : next);
+    }
+
+    /**
+     * 找到或创建本地账号。
+     * 顺序很重要：<b>先按服务商 id 找</b>，找不到才考虑按邮箱关联。
+     */
+    private User linkOrCreate(Context ctx, String providerName,
+                              OAuthClient.ExternalUser external) {
+        var em = Db.em(ctx);
+
+        var existing = em.createQuery("""
+                select i.user from OAuthIdentity i
+                 where i.provider = :p and i.providerUserId = :id
+                """, User.class)
+            .setParameter("p", providerName)
+            .setParameter("id", external.providerId())
+            .getResultStream().findFirst();
+        if (existing.isPresent()) return existing.get();
+
+        String email = external.email() == null ? null : external.email().toLowerCase();
+        if (email == null || email.isBlank()) {
+            // 很多服务商默认不给邮箱（GitHub 的邮箱可以设为私密）。
+            // 没有邮箱就没法安全地关联已有账号 —— 让用户先用密码登录再去绑定。
+            Flash.danger(ctx, "没能从第三方拿到你的邮箱，请先用密码登录后在设置里绑定。");
+            return null;
+        }
+
+        var byEmail = services.users(ctx).findByEmail(email);
+        if (byEmail.isPresent()) {
+            User user = byEmail.get();
+            // 这里是账号接管风险最高的一步，见正文的说明
+            if (!user.isConfirmed()) {
+                Flash.danger(ctx, "这个邮箱对应的账号还没有验证，请先完成邮箱验证。");
+                return null;
+            }
+            em.persist(new OAuthIdentity(user, providerName, external.providerId()));
+            return user;
+        }
+
+        // 全新用户：建一个账号。邮箱由服务商验证过，所以直接标记为已确认
+        String username = uniqueUsername(ctx, external.name(), email);
+        User user = new User(email, username);
+        user.setPassword(OAuthClient.randomUrlSafe());   // 随机密码 = 只能用第三方登录
+        user.setConfirmed(true);
+        user.setRole(services.roles(ctx).defaultRole());
+        services.users(ctx).save(user);
+        em.flush();
+        em.persist(new OAuthIdentity(user, providerName, external.providerId()));
+        return user;
+    }
+
+    private String uniqueUsername(Context ctx, String preferred, String email) {
+        String base = preferred == null || preferred.isBlank()
+            ? email.substring(0, email.indexOf('@'))
+            : preferred;
+        base = base.replaceAll("[^A-Za-z0-9_.]", "");
+        if (base.isEmpty() || !Character.isLetter(base.charAt(0))) base = "u" + base;
+        if (base.length() > 48) base = base.substring(0, 48);
+
+        var users = services.users(ctx);
+        String candidate = base;
+        for (int i = 2; users.usernameExists(candidate); i++) {
+            candidate = base + i;
+        }
+        return candidate;
+    }
+
+    private OAuthClient.Provider providerOrNull(String name) {
+        if (!"github".equals(name)) return null;
+        var p = new OAuthClient.Provider("github",
+            cfg.githubClientId(), cfg.githubClientSecret(),
+            cfg.githubAuthorizeUrl(), cfg.githubTokenUrl(), cfg.githubUserInfoUrl(),
+            "read:user user:email", "id", "email", "login");
+        return p.configured() ? p : null;
+    }
+
+    /**
+     * 回调地址。必须和在服务商后台登记的完全一致，而且
+     * <b>要用配置里的 siteBaseUrl，不能用请求里的 Host 头</b> ——
+     * Host 是客户端可控的，拿它拼地址等于把授权码送给攻击者。
+     */
+    private String redirectUri(Context ctx, String providerName) {
+        return cfg.siteBaseUrl() + "/auth/oauth/" + providerName + "/callback";
+    }
+
+    // ---------- 第 22 章：两步验证 ----------
+
+    private static final String PENDING_2FA_USER  = "pending2faUserId";
+    private static final String PENDING_2FA_SINCE = "pending2faSince";
+    private static final String PENDING_2FA_NEXT  = "pending2faNext";
+
+    /** 待验证状态的有效期。超时就要重新输密码 */
+    private static final long PENDING_2FA_TTL_MILLIS = 5 * 60 * 1000L;
+
+    private void twoFactorChallengeForm(Context ctx) {
+        if (pendingUser(ctx) == null) {
+            ctx.redirect(Routes.LOGIN);
+            return;
+        }
+        View.render(ctx, "auth/two_factor.jte", "两步验证", "form", FormView.empty());
+    }
+
+    private void twoFactorChallenge(Context ctx) {
+        User user = pendingUser(ctx);
+        if (user == null) {
+            Flash.danger(ctx, "验证超时，请重新登录。");
+            ctx.redirect(Routes.LOGIN);
+            return;
+        }
+
+        // 验证码一样要限流：六位数只有一百万种可能，不限流几分钟就能爆破完
+        if (!services.loginLimiter().tryAcquire("2fa:" + ctx.ip())) {
+            ctx.status(429);
+            Flash.danger(ctx, "尝试过于频繁，请稍后再试。");
+            View.render(ctx, "auth/two_factor.jte", "两步验证", "form", FormView.empty());
+            return;
+        }
+
+        var result = services.twoFactor(ctx).verify(user, ctx.formParam("code"), Instant.now());
+        if (result != TwoFactorService.Result.OK) {
+            Flash.danger(ctx, result == TwoFactorService.Result.REPLAYED
+                ? "这个验证码已经用过了，请等下一个。"
+                : "验证码不对。");
+            View.render(ctx, "auth/two_factor.jte", "两步验证", "form", FormView.empty());
+            return;
+        }
+
+        String next = ctx.sessionAttribute(PENDING_2FA_NEXT);
+        clearPending(ctx);
+        CurrentUser.login(ctx, user);
+        Flash.success(ctx, "欢迎回来，" + user.getUsername() + "！");
+        ctx.redirect(next == null ? Routes.INDEX : next);
+    }
+
+    private void twoFactorSetupForm(Context ctx) {
+        User me = CurrentUser.require(ctx);
+
+        if (me.isTotpEnabled()) {
+            View.render(ctx, "auth/two_factor_setup.jte", "两步验证",
+                        "enabled", true, "secret", null, "uri", null,
+                        "remaining", services.twoFactor(ctx).unusedRecoveryCodeCount(me),
+                        "codes", List.<String>of());
+            return;
+        }
+
+        // 密钥先放会话里，<b>验证通过之后才写进数据库</b> ——
+        // 否则用户扫到一半走了，账号就带着一个没人知道的密钥，下次登录直接被锁死
+        String secret = ctx.sessionAttribute(SETUP_SECRET);
+        if (secret == null) {
+            secret = Totp.newSecret();
+            ctx.sessionAttribute(SETUP_SECRET, secret);
+        }
+
+        View.render(ctx, "auth/two_factor_setup.jte", "两步验证",
+                    "enabled", false,
+                    "secret", secret,
+                    "uri", Totp.provisioningUri("Javalinky", me.getEmail(), secret),
+                    "remaining", 0L,
+                    "codes", List.<String>of());
+    }
+
+    private void twoFactorEnable(Context ctx) {
+        User me = CurrentUser.require(ctx);
+        String secret = ctx.sessionAttribute(SETUP_SECRET);
+
+        if (me.isTotpEnabled() || secret == null) {
+            ctx.redirect(Routes.TWO_FACTOR_SETUP);
+            return;
+        }
+
+        // 要求用户先输一次码，证明他的认证器确实配好了。
+        // 跳过这一步的话，配错了也不知道，等到下次登录才发现 —— 那时已经进不来了。
+        if (Totp.verify(secret, ctx.formParam("code"), Instant.now().getEpochSecond()) == -1) {
+            Flash.danger(ctx, "验证码不对，请确认手机上的时间是自动同步的。");
+            ctx.redirect(Routes.TWO_FACTOR_SETUP);
+            return;
+        }
+
+        me.setTotpSecret(secret);
+        me.setTotpEnabled(true);
+        me.setTotpLastSlot(null);
+        ctx.sessionAttribute(SETUP_SECRET, null);
+
+        var codes = services.twoFactor(ctx).regenerateRecoveryCodes(me);
+        Flash.success(ctx, "两步验证已开启。");
+
+        // 恢复码只在这一次显示 —— 存的是哈希，之后谁也拿不回来
+        View.render(ctx, "auth/two_factor_setup.jte", "两步验证",
+                    "enabled", true, "secret", null, "uri", null,
+                    "remaining", (long) codes.size(), "codes", codes);
+    }
+
+    private void twoFactorDisable(Context ctx) {
+        User me = CurrentUser.require(ctx);
+
+        // 关掉它是降低安全等级的操作，必须重新验证密码
+        if (!me.checkPassword(ctx.formParam("password"))) {
+            Flash.danger(ctx, "密码不对。");
+            ctx.redirect(Routes.TWO_FACTOR_SETUP);
+            return;
+        }
+
+        services.twoFactor(ctx).disable(me);
+        Flash.info(ctx, "两步验证已关闭。");
+        ctx.redirect(Routes.TWO_FACTOR_SETUP);
+    }
+
+    private static final String SETUP_SECRET = "totpSetupSecret";
+
+    /** 取「密码已通过、等待第二步」的那个用户。超时或不存在返回 null */
+    private User pendingUser(Context ctx) {
+        Long userId = ctx.sessionAttribute(PENDING_2FA_USER);
+        Long since  = ctx.sessionAttribute(PENDING_2FA_SINCE);
+        if (userId == null || since == null) return null;
+
+        if (System.currentTimeMillis() - since > PENDING_2FA_TTL_MILLIS) {
+            clearPending(ctx);
+            return null;
+        }
+        return services.users(ctx).findById(userId).orElse(null);
+    }
+
+    private void clearPending(Context ctx) {
+        ctx.sessionAttribute(PENDING_2FA_USER, null);
+        ctx.sessionAttribute(PENDING_2FA_SINCE, null);
+        ctx.sessionAttribute(PENDING_2FA_NEXT, null);
     }
 
     private void logout(Context ctx) {

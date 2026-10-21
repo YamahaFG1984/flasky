@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 22 章 · 第三方登录与两步验证 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="22">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 22 章</span>
+<h1>第三方登录与两步验证</h1>
+<p class="lede">
+  第 8 章的认证只有一样东西：密码。这一章加两条路 ——
+  <strong>用 GitHub 账号登录</strong>（少记一个密码），
+  和<strong>两步验证</strong>（密码泄露了也进不来）。
+  两个功能都是「照着抄很容易、抄错了很难发现」的典型，
+  所以本章花很多篇幅在<strong>每一步防的是什么攻击</strong>上。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>讲清 OAuth2 授权码流程的每一步，以及 <code>state</code> 和 PKCE 各自防什么</li>
+    <li>知道第三方登录最危险的那一步是「按邮箱关联已有账号」</li>
+    <li>自己实现 TOTP，并用 RFC 6238 的官方向量验证它</li>
+    <li>理解「密码过了但第二步没过」这个中间态为什么绝不能等于登录态</li>
+    <li>知道为什么必须有恢复码，以及为什么必须防重放</li>
+    <li><strong>在测试里自己起一个假的服务商</strong>，把所有失败分支都覆盖掉</li>
+  </ul>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128230; 本章代码</div>
+  <p>
+    这一章结束时的完整项目在仓库的 <code>javalinky/</code> 目录里，对应标签 <code>jv-ch22</code>：
+  </p>
+<div class="code" data-lang="bash">
+<pre>
+git checkout jv-ch22
+cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7070
+</pre>
+</div>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="oauth-flow">OAuth2：到底在干什么</h2>
+
+<p>
+  先把名词理清楚，因为这是最容易混的地方：
+</p>
+
+<div class="box key">
+  <div class="t">&#9728; OAuth2 是<strong>授权</strong>协议，不是认证协议</div>
+  <p>
+    OAuth2 回答的问题是「这个应用能不能代表用户去访问某些资源」。
+    「这个用户是谁」是我们<strong>借用</strong>它顺便做的 ——
+    拿到令牌之后再调一次「给我看看你是谁」的接口。
+  </p>
+  <p>
+    真正为认证设计的是 <strong>OpenID Connect</strong>（OIDC），
+    它在 OAuth2 上加了一个签名的 <code>id_token</code>。
+    Google、微软、Keycloak 都支持 OIDC；GitHub 只有纯 OAuth2。
+    本章走的是通用的 OAuth2 路线，<strong>因为它到哪都能用</strong>。
+  </p>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 420" role="img" aria-label="OAuth2 授权码流程">
+  <text class="ttl" x="20" y="18">授权码流程（Authorization Code + PKCE）</text>
+
+  <rect class="bx" x="20" y="30" width="130" height="34" rx="6"/>
+  <text class="sm" x="85" y="52" text-anchor="middle">浏览器</text>
+  <rect class="bx" x="315" y="30" width="130" height="34" rx="6"/>
+  <text class="sm" x="380" y="52" text-anchor="middle">我们的应用</text>
+  <rect class="bx" x="610" y="30" width="130" height="34" rx="6"/>
+  <text class="sm" x="675" y="52" text-anchor="middle">GitHub</text>
+
+  <path class="ln-d" d="M85 64 V400"/>
+  <path class="ln-d" d="M380 64 V400"/>
+  <path class="ln-d" d="M675 64 V400"/>
+
+  <path class="ln-a" d="M85 88 H375" marker-end="url(#ar-a)"/>
+  <text class="sm" x="110" y="82">① 点「用 GitHub 登录」</text>
+
+  <rect class="bx-a" x="200" y="100" width="360" height="40" rx="6"/>
+  <text class="sm on-a" x="212" y="118">② 生成 state 和 code_verifier，<tspan class="on-a">存进会话</tspan>，</text>
+  <text class="sm on-a" x="212" y="134">　 带上 state + code_challenge 重定向到 GitHub</text>
+
+  <path class="ln-a" d="M85 160 H670" marker-end="url(#ar-a)"/>
+  <text class="sm" x="200" y="154">③ 浏览器跳到 GitHub 授权页</text>
+
+  <path class="ln-a" d="M670 190 H90" marker-end="url(#ar-a)"/>
+  <text class="sm" x="330" y="184">④ 用户同意，GitHub 带 <tspan class="mono">code</tspan> + <tspan class="mono">state</tspan> 跳回来</text>
+
+  <rect class="bx-r" x="150" y="202" width="460" height="40" rx="6"/>
+  <text class="sm on-r" x="162" y="220">⑤ <tspan class="on-r">核对 state</tspan> —— 和会话里存的一致吗？</text>
+  <text class="sm on-r" x="162" y="236">　 不一致立刻终止。这一步挡住的是「登录 CSRF / 账号绑架」</text>
+
+  <path class="ln-a" d="M375 268 H670" marker-end="url(#ar-a)"/>
+  <text class="sm" x="400" y="262">⑥ 后端直连：code + verifier + <tspan class="mono">client_secret</tspan></text>
+
+  <path class="ln-a" d="M670 298 H385" marker-end="url(#ar-a)"/>
+  <text class="sm" x="440" y="292">⑦ 换到 access_token</text>
+
+  <path class="ln-a" d="M375 328 H670" marker-end="url(#ar-a)"/>
+  <text class="sm" x="430" y="322">⑧ 拿令牌问「这是谁」</text>
+
+  <path class="ln-a" d="M670 358 H385" marker-end="url(#ar-a)"/>
+  <text class="sm" x="440" y="352">⑨ {id, email, login}</text>
+
+  <rect class="bx-g" x="150" y="372" width="460" height="36" rx="6"/>
+  <text class="sm on-g" x="162" y="394">⑩ 按 <tspan class="mono on-g">(provider, id)</tspan> 找本地账号 —— 找不到才考虑建号或按邮箱关联</text>
+</svg>
+<figcaption>图 22-1　⑥⑦⑧⑨ 都是<strong>后端对后端</strong>，浏览器看不到，所以 <code>client_secret</code> 才安全</figcaption>
+</figure>
+
+<div class="box warn">
+  <div class="t">&#9888; 为什么要绕这么一大圈：<code>code</code> 和 <code>token</code> 的区别</div>
+  <p>
+    最直观的设计是 GitHub 直接把 <code>access_token</code> 放在跳转地址里送回来
+    （历史上确实有这种模式，叫 implicit flow，<strong>现在已经不推荐了</strong>）。
+    问题是跳转地址会出现在：浏览器历史、<code>Referer</code> 头、
+    服务器访问日志、代理日志……<strong>令牌等于到处都是</strong>。
+  </p>
+  <p>
+    授权码流程把它拆成两半：跳转地址里只有一个<strong>一次性、短期有效</strong>的
+    <code>code</code>，拿它换令牌时还要出示只有服务端知道的
+    <code>client_secret</code>。所以就算 <code>code</code> 泄露了，别人也换不走。
+  </p>
+</div>
+
+<h3>两个防护：<code>state</code> 和 PKCE</h3>
+
+<div class="tw">
+<table>
+<tr><th></th><th><code>state</code></th><th>PKCE（<code>code_verifier</code>）</th></tr>
+<tr><td>防什么</td>
+    <td><strong>登录 CSRF</strong>：攻击者把<strong>自己的</strong>授权码塞给受害者，
+        让受害者在不知情的情况下登进攻击者的账号（之后受害者填的信息都进了攻击者手里）</td>
+    <td><strong>授权码被截获</strong>：移动端/SPA 的回调可能被别的应用抢注，
+        拿到 code 就能换令牌</td></tr>
+<tr><td>怎么工作</td>
+    <td>发起时生成随机串存会话，回调时比对</td>
+    <td>发起时送 <code>SHA256(verifier)</code>，换令牌时出示 <code>verifier</code> 原文</td></tr>
+<tr><td>后端应用也要吗</td>
+    <td><strong>必须</strong></td>
+    <td>理论上有 client_secret 就够了，但 <strong>OAuth 2.1 要求所有客户端都用</strong>，
+        而且加上几乎零成本</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java">
+<pre>
+private void oauthStart(Context ctx) {
+    var provider = providerOrNull(ctx.pathParam("provider"));
+    if (provider == null) throw new NotFoundResponse("没有配置这个登录方式");
+
+    // state 防 CSRF：回调时必须带回同一个值，证明这次回调是我们发起的。
+    // 少了它，攻击者可以把自己的授权码塞给受害者，把受害者的账号绑到自己头上。
+    String state = OAuthClient.randomUrlSafe();
+    // PKCE 的 verifier 防「授权码被截获」：换令牌时要出示它
+    String verifier = OAuthClient.randomUrlSafe();
+
+    ctx.sessionAttribute(OAUTH_STATE, state);
+    ctx.sessionAttribute(OAUTH_VERIFIER, verifier);
+    ctx.sessionAttribute(OAUTH_NEXT, safeNext(ctx, Routes.INDEX));
+
+    ctx.redirect(services.oauth().authorizeUrl(
+        provider, redirectUri(ctx, provider.name()),
+        state, OAuthClient.codeChallenge(verifier)));
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 回调地址<strong>必须</strong>从配置里取，不能从请求里拼</div>
+<div class="code" data-lang="java">
+<pre>
+// ❌ 看着很聪明，实际是个洞
+String redirectUri = ctx.scheme() + "://" + ctx.host() + "/auth/oauth/github/callback";
+
+// ✅
+private String redirectUri(Context ctx, String providerName) {
+    return cfg.siteBaseUrl() + "/auth/oauth/" + providerName + "/callback";
+}
+</pre>
+</div>
+  <p>
+    <code>Host</code> 头是<strong>客户端可控</strong>的。攻击者伪造一个
+    <code>Host: evil.com</code>，你就把回调地址拼成了他的域名 ——
+    授权码直接送上门。（服务商那边登记的回调白名单能挡住一部分，
+    但不是所有服务商都严格匹配。）
+  </p>
+  <p>
+    这和第 17 章「<code>behindProxy</code> 必须是显式配置」是同一类问题：
+    <strong>凡是从请求头推导出来的「自己的身份」，都是不可信的</strong>。
+  </p>
+</div>
+
+<h2 id="link">最危险的一步：找到或创建本地账号</h2>
+
+<p>
+  拿到 <code>{id, email, login}</code> 之后，怎么对应到本地账号？
+  <strong>顺序决定安全性。</strong>
+</p>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java">
+<pre>
+/**
+ * 找到或创建本地账号。
+ * 顺序很重要：<b>先按服务商 id 找</b>，找不到才考虑按邮箱关联。
+ */
+private User linkOrCreate(Context ctx, String providerName,
+                          OAuthClient.ExternalUser external) {
+    var em = Db.em(ctx);
+
+    // ① 这个 GitHub 账号以前绑过吗
+    var existing = em.createQuery("""
+            select i.user from OAuthIdentity i
+             where i.provider = :p and i.providerUserId = :id
+            """, User.class)
+        .setParameter("p", providerName)
+        .setParameter("id", external.providerId())
+        .getResultStream().findFirst();
+    if (existing.isPresent()) return existing.get();
+
+    String email = external.email() == null ? null : external.email().toLowerCase();
+    if (email == null || email.isBlank()) {
+        // 很多服务商默认不给邮箱（GitHub 的邮箱可以设为私密）。
+        // 没有邮箱就没法安全地关联已有账号 —— 让用户先用密码登录再去绑定。
+        Flash.danger(ctx, "没能从第三方拿到你的邮箱，请先用密码登录后在设置里绑定。");
+        return null;
+    }
+
+    // ② 本地有同邮箱的账号吗
+    var byEmail = services.users(ctx).findByEmail(email);
+    if (byEmail.isPresent()) {
+        User user = byEmail.get();
+        if (!user.isConfirmed()) {
+            Flash.danger(ctx, "这个邮箱对应的账号还没有验证，请先完成邮箱验证。");
+            return null;
+        }
+        em.persist(new OAuthIdentity(user, providerName, external.providerId()));
+        return user;
+    }
+
+    // ③ 全新用户
+    String username = uniqueUsername(ctx, external.name(), email);
+    User user = new User(email, username);
+    user.setPassword(OAuthClient.randomUrlSafe());   // 随机密码 = 只能用第三方登录
+    user.setConfirmed(true);
+    user.setRole(services.roles(ctx).defaultRole());
+    /* ... */
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 「按邮箱自动关联」是一个真实存在的账号接管手法</div>
+  <p>
+    想象这个攻击：
+  </p>
+  <ol>
+    <li>攻击者知道受害者的邮箱是 <code>victim@example.com</code></li>
+    <li>攻击者用这个邮箱在你的站上注册 —— <strong>但不去验证邮箱</strong>
+        （他也收不到验证信）</li>
+    <li>一段时间后，受害者用自己的 GitHub 登录。GitHub 返回的邮箱正是
+        <code>victim@example.com</code></li>
+    <li>如果你无条件「按邮箱关联」，<strong>受害者的 GitHub 就被绑到了攻击者创建的那个账号上</strong>。
+        攻击者用他当初设的密码随时能登进去，看到受害者之后的一切活动</li>
+  </ol>
+  <p>
+    所以代码里那一句 <code>if (!user.isConfirmed())</code> 不是在挑剔，
+    <strong>它是这段逻辑里最重要的一行</strong>。
+    配套测试里专门有一条 <code>不会关联到未验证邮箱的已有账号</code> 盯着它。
+  </p>
+  <p>
+    更严格的做法是<strong>完全不自动关联</strong>：发现同邮箱就要求用户
+    「先用密码登录，再到设置里手动绑定」。GitHub 和 Google 自己用的就是这种。
+    本章选了「已验证邮箱才自动关联」这个折中，
+    <strong>因为它在体验和安全之间的位置比较常见</strong> —— 但你要知道它是个取舍。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么用服务商的 <code>id</code> 而不是邮箱当主键</div>
+  <p>
+    <code>oauth_identities</code> 表上那条唯一索引是
+    <code>(provider, provider_user_id)</code>，不是邮箱。原因：
+    <strong>邮箱会变，用户名会变，只有数字 id 不变。</strong>
+  </p>
+  <p>
+    用邮箱当关联键的后果是：用户在 GitHub 上改了邮箱，
+    下次登录你的站就认不出他了，于是又建了一个新账号。
+  </p>
+</div>
+
+<h2 id="totp">两步验证：TOTP 是怎么算出来的</h2>
+
+<p>
+  认证器 App 里那个每 30 秒跳一次的六位数，原理比想象中简单得多 ——
+  <strong>而且手机和服务器之间不需要任何通信</strong>：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="TOTP 的计算过程">
+  <rect class="bx-d" x="20" y="24" width="340" height="180" rx="9"/>
+  <text class="ttl" x="40" y="48">手机上的认证器</text>
+  <rect class="bx" x="40" y="60" width="300" height="26" rx="5"/>
+  <text class="mono sm" x="52" y="78">密钥 = JBSWY3DPEHPK3PXP（扫码时存下的）</text>
+  <rect class="bx" x="40" y="94" width="300" height="26" rx="5"/>
+  <text class="mono sm" x="52" y="112">计数器 = 当前时间戳 / 30</text>
+  <rect class="bx" x="40" y="128" width="300" height="26" rx="5"/>
+  <text class="mono sm" x="52" y="146">HMAC-SHA1(密钥, 计数器)</text>
+  <rect class="bx-g" x="40" y="162" width="300" height="26" rx="5"/>
+  <text class="mono sm on-g" x="52" y="180">取 4 字节 → 取模 10^6 → 492039</text>
+
+  <rect class="bx-d" x="400" y="24" width="340" height="180" rx="9"/>
+  <text class="ttl" x="420" y="48">服务器</text>
+  <rect class="bx" x="420" y="60" width="300" height="26" rx="5"/>
+  <text class="mono sm" x="432" y="78">密钥 = JBSWY3DPEHPK3PXP（库里存的同一个）</text>
+  <rect class="bx" x="420" y="94" width="300" height="26" rx="5"/>
+  <text class="mono sm" x="432" y="112">计数器 = 当前时间戳 / 30</text>
+  <rect class="bx" x="420" y="128" width="300" height="26" rx="5"/>
+  <text class="mono sm" x="432" y="146">HMAC-SHA1(密钥, 计数器)</text>
+  <rect class="bx-g" x="420" y="162" width="300" height="26" rx="5"/>
+  <text class="mono sm on-g" x="432" y="180">492039 —— 对上了</text>
+
+  <rect class="bx-a" x="20" y="212" width="720" height="22" rx="5"/>
+  <text class="sm on-a" x="380" y="228" text-anchor="middle">两边算的是同一个函数，所以手机<tspan class="on-a">完全离线</tspan>也能用 —— 共享的只有那个密钥和时间</text>
+</svg>
+<figcaption>图 22-2　TOTP：把「时间」当成双方约好的计数器</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/util/Totp.java">
+<pre>
+public static String code(byte[] key, long counter, int digits) {
+    byte[] data = new byte[8];
+    for (int i = 7; i &gt;= 0; i--) {          // 计数器按大端写成 8 字节
+        data[i] = (byte) (counter &amp; 0xFF);
+        counter &gt;&gt;&gt;= 8;
+    }
+
+    Mac mac = Mac.getInstance("HmacSHA1");
+    mac.init(new SecretKeySpec(key, "HmacSHA1"));
+    byte[] hash = mac.doFinal(data);
+
+    // 「动态截断」：用最后一个字节的低 4 位决定从哪里取 4 个字节。
+    // 这一步是为了让结果均匀，不要总是取同一段。
+    int offset = hash[hash.length - 1] &amp; 0x0F;
+    int binary = ((hash[offset]     &amp; 0x7F) &lt;&lt; 24)
+               | ((hash[offset + 1] &amp; 0xFF) &lt;&lt; 16)
+               | ((hash[offset + 2] &amp; 0xFF) &lt;&lt; 8)
+               |  (hash[offset + 3] &amp; 0xFF);
+
+    int mod = (int) Math.pow(10, digits);
+    return String.format("%0" + digits + "d", binary % mod);
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 自己实现密码学相关的东西，<strong>必须</strong>拿官方向量对一遍</div>
+  <p>
+    「我这边跑着像是对的」完全不算数：算法差一位，结果<strong>照样是六位数字</strong>，
+    看不出任何异常，但用户永远登不进来 —— 而且你会先怀疑用户的手机时间。
+  </p>
+  <p>
+    RFC 6238 附录 B 给了一张表，照抄成测试就行：
+  </p>
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/TotpTest.java">
+<pre>
+/** RFC 6238 附录 B 规定的种子：ASCII 的 "12345678901234567890" */
+private static final byte[] RFC_SEED =
+    "12345678901234567890".getBytes(StandardCharsets.US_ASCII);
+
+@Test
+void 符合RFC6238的官方测试向量() {
+    assertCode("94287082", 59L);
+    assertCode("07081804", 1111111109L);
+    assertCode("14050471", 1111111111L);
+    assertCode("89005924", 1234567890L);
+    assertCode("69279037", 2000000000L);
+    assertCode("65353130", 20000000000L);
+}
+</pre>
+</div>
+  <p>
+    这六行测试的价值，超过其余所有 TOTP 测试加起来 ——
+    它们证明的是<strong>「我的实现和全世界的认证器 App 算的是同一个东西」</strong>。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 比较验证码必须用常量时间</div>
+<div class="code" data-lang="java">
+<pre>
+// ❌ 第一个字符不同就返回 —— 耗时泄露了「前几位对了」
+if (expected.equals(input)) { ... }
+
+// ✅
+if (MessageDigest.isEqual(expected.getBytes(UTF_8), input.getBytes(UTF_8))) { ... }
+</pre>
+</div>
+  <p>
+    攻击者反复提交、测量响应时间的微小差异，理论上能一位一位地把码试出来 ——
+    六位数从 10&#8310; 次尝试降到 10×6 次。这叫<strong>计时攻击</strong>。
+  </p>
+  <p>
+    网络抖动会让这件事在真实环境里很难做成，但<strong>这是一行代码的成本</strong>。
+    凡是比较密钥、令牌、哈希、验证码，都用 <code>MessageDigest.isEqual</code>。
+  </p>
+</div>
+
+<h2 id="state-machine">真正难的是状态机</h2>
+
+<p>
+  算法有 RFC 兜底，<strong>容易写错的是「密码过了、第二步还没过」这个中间态</strong>。
+</p>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java">
+<pre>
+// 第 22 章：开了两步验证的话，密码只是第一步。
+// 关键：这里<b>还没有</b>调 CurrentUser.login —— 会话里只放一个「待验证」的标记，
+// 它不是登录态，拿着它访问任何受保护页面都会被挡住。
+if (user.isTotpEnabled()) {
+    ctx.sessionAttribute(PENDING_2FA_USER, user.getId());
+    ctx.sessionAttribute(PENDING_2FA_SINCE, System.currentTimeMillis());
+    ctx.sessionAttribute(PENDING_2FA_NEXT, safeNext(ctx, Routes.INDEX));
+    ctx.redirect(Routes.TWO_FACTOR);
+    return;
+}
+
+CurrentUser.login(ctx, user);
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 一个经典的真实漏洞：第二步形同虚设</div>
+  <p>
+    有一类反复出现的 2FA 漏洞是这样的：登录成功后就<strong>先把用户登录了</strong>，
+    然后跳到验证码页面「挡」一下。于是攻击者只要
+    <strong>不访问那个页面</strong>，直接去 <code>/edit-profile</code>，就进去了 ——
+    两步验证完全没起作用。
+  </p>
+  <p>
+    所以配套测试里第一条就是盯这个的：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+var res = postFormWithCsrf(client, "/auth/login", "/auth/login",
+    form("email", "john@example.com", "password", "cat12345"));
+assertThat(res.headers().get("Location").get(0)).contains("/auth/2fa");
+
+// 关键断言：这时候还不是登录态
+var home = client.get("/edit-profile", req -&gt; req.header("Accept", "text/html"));
+assertThat(home.code())
+    .as("待验证状态绝不能等于已登录")
+    .isIn(302, 401);
+</pre>
+</div>
+  <p>
+    另外两个容易漏的：<strong>待验证状态要有超时</strong>（这里是 5 分钟），
+    以及<strong>验证码也要限流</strong> ——
+    六位数只有一百万种可能，不限流的话几分钟就能爆破完，
+    那还不如不开两步验证。
+  </p>
+</div>
+
+<h3>防重放：同一个码不能用两次</h3>
+
+<div class="code" data-lang="java" data-file="service/TwoFactorService.java">
+<pre>
+long slot = Totp.verify(user.getTotpSecret(), cleaned, now.getEpochSecond());
+if (slot != -1) {
+    Long last = user.getTotpLastSlot();
+    // 同一个时间片只认一次。不做这一步的话，攻击者在用户登录后的
+    // 30 秒内拿到同一个码（肩窥、中间人、剪贴板）就能再登一次。
+    if (last != null &amp;&amp; slot &lt;= last) return Result.REPLAYED;
+    user.setTotpLastSlot(slot);
+    return Result.OK;
+}
+</pre>
+</div>
+
+<p>
+  <code>Totp.verify</code> 返回的不是布尔值，而是<strong>匹配上的那个时间片编号</strong> ——
+  就是为了让调用方能记下来。这个设计上的小决定，是防重放能成立的前提。
+</p>
+
+<h3>恢复码：必须有的那条后路</h3>
+
+<div class="box warn">
+  <div class="t">&#9888; 没有恢复码的两步验证，是在给自己造客服工单</div>
+  <p>
+    手机丢了、换新机没迁移、重装系统 —— 这些事天天都在发生。
+    没有自助的后路，用户就只能找人工，而「人工帮你关掉两步验证」
+    <strong>本身就是一个社会工程攻击面</strong>。
+  </p>
+  <p>实现上有三个点：</p>
+  <ul>
+    <li><strong>存哈希，不存明文。</strong>它们等价于密码，这里直接复用了第 8 章的 bcrypt</li>
+    <li><strong>只显示一次。</strong>生成时返回明文给页面，之后谁也拿不回来</li>
+    <li><strong>一码一次。</strong>用过就记 <code>used_at</code></li>
+  </ul>
+<div class="code" data-lang="java">
+<pre>
+/** 形如 ABCD-EFGH-JKMN */
+private static final String ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+</pre>
+</div>
+  <p>
+    注意这个字母表<strong>去掉了 0/O 和 1/I/l</strong> ——
+    用户是要把它抄在纸上的，少一类「我到底抄的是哪个」的工单。
+  </p>
+</div>
+
+<h2 id="fake-provider">测试：自己起一个假的服务商</h2>
+
+<p>
+  第三方登录看起来「必须连外网才能测」。<strong>其实不是</strong> ——
+  所谓服务商就是几个 HTTP 端点，在测试里用 Javalin 自己起一个就行。
+</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/OAuthLoginTest.java">
+<pre>
+/** 假服务商：记下收到的参数，好断言我们发出去的请求是对的 */
+private void startFakeProvider() {
+    fakeProvider = Javalin.create(config -&gt; {
+        config.routes.post("/token", ctx -&gt; {
+            received.put("code", String.valueOf(ctx.formParam("code")));
+            received.put("code_verifier", String.valueOf(ctx.formParam("code_verifier")));
+            received.put("client_secret", String.valueOf(ctx.formParam("client_secret")));
+            ctx.status(tokenStatus).contentType("application/json").result(tokenResponse);
+        });
+        config.routes.get("/userinfo", ctx -&gt; {
+            received.put("authorization", String.valueOf(ctx.header("Authorization")));
+            ctx.status(userStatus).contentType("application/json").result(userResponse);
+        });
+    }).start(0);
+    providerPort = fakeProvider.port();
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 这个做法的三个好处</div>
+  <ol>
+    <li>
+      <strong>能断言「我们发出去的请求对不对」。</strong>
+      <code>code_verifier</code> 有没有带上？<code>client_secret</code> 对不对？
+      用 mock 库也能做，但假服务商测的是<strong>真实的 HTTP 报文</strong>，
+      连「GitHub 默认返回表单编码、要显式要 JSON」这种细节都能覆盖。
+    </li>
+    <li>
+      <strong>失败分支随便造。</strong>换令牌返回 401、用户信息里
+      <code>email</code> 是 null、对方超时 —— 改一个字段就行。
+      这些分支在真实环境里<strong>几乎没法复现</strong>，
+      但线上恰恰是它们出问题。
+    </li>
+    <li>
+      <strong>不需要网络，不需要密钥。</strong>CI 上能跑，而且永远不会因为
+      GitHub 抽风而变红。
+    </li>
+  </ol>
+  <p>
+    为此 <code>OAuthClient.Provider</code> 把四个 URL 做成了配置项
+    （而不是写死常量）。<strong>「为了能测而留的接缝」几乎总是也让代码更灵活</strong> ——
+    这里顺带就支持了 GitLab、Gitea 这些自托管的服务商。
+  </p>
+</div>
+
+<p>于是这些分支全都测到了：</p>
+
+<div class="tw">
+<table>
+<tr><th>测试</th><th>盯住的是</th></tr>
+<tr><td><code>没配clientId时第三方登录是404</code></td><td>没配置就不该暴露入口</td></tr>
+<tr><td><code>跳转地址带着state和PKCE</code></td><td>并断言<strong>不含</strong> client_secret</td></tr>
+<tr><td><code>state对不上就拒绝</code></td><td>而且<strong>不去换令牌</strong>（断言假服务商没收到请求）</td></tr>
+<tr><td><code>没有state的回调也拒绝</code></td><td>直接打回调地址的情况</td></tr>
+<tr><td><code>完整流程会创建一个新账号</code></td><td>参数正确 + 账号已确认 + 真的登录了</td></tr>
+<tr><td><code>第二次用同一个第三方账号登录不会重复建号</code></td><td>按 provider id 关联</td></tr>
+<tr><td><code>服务商不给邮箱时不创建账号</code></td><td>GitHub 可以把邮箱设为私密</td></tr>
+<tr><td><code>不会关联到未验证邮箱的已有账号</code></td><td><strong>账号接管</strong></td></tr>
+<tr><td><code>服务商换令牌失败时不创建账号</code></td><td>失败分支不留脏数据</td></tr>
+<tr><td><code>用户点取消时不报错</code></td><td><code>error=access_denied</code></td></tr>
+</table>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书没有对应章节。本章新增 30 个测试（TOTP 11 + 两步验证流程 8 + OAuth 11）。</div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>
+      <strong>用真的 GitHub 跑一遍。</strong>去
+      Settings → Developer settings → OAuth Apps 建一个应用，
+      回调填 <code>http://localhost:7070/auth/oauth/github/callback</code>，
+      然后 <code>GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... mvn -q compile exec:exec</code>。
+    </li>
+    <li>
+      <strong>亲手验证 state 的作用。</strong>把 <code>oauthCallback</code> 里
+      比对 state 的那几行注释掉。然后构造一个攻击：用你的 A 账号走到第④步，
+      把带 <code>code</code> 的回调地址发给「受害者」（另一个浏览器），
+      确认受害者被登进了 A 账号。改回来再试一次。
+    </li>
+    <li>
+      <strong>复现账号接管。</strong>把 <code>if (!user.isConfirmed())</code> 删掉，
+      按正文里那四步走一遍，确认第三方身份被绑到了未验证的账号上。
+    </li>
+    <li>
+      用手机上的认证器扫一下 <code>/auth/2fa/setup</code> 里给的 otpauth 链接
+      （用任意在线二维码生成器把它变成二维码），确认 App 显示的码
+      和 <code>Totp.currentCode()</code> 算出来的一致。
+    </li>
+    <li>
+      <strong>把时间调歪。</strong>把手机时间往前调 2 分钟，试着登录 —— 会失败。
+      然后把 <code>Totp.WINDOW</code> 从 1 改成 5，再试。
+      想清楚：放宽窗口换来了什么，又付出了什么。
+    </li>
+    <li>
+      给两步验证的设置页加一个<strong>二维码</strong>。
+      不要引第三方 JS 库，用 <code>ZXing</code> 在服务端生成 PNG，
+      走第 20 章那个发文件的路子。
+    </li>
+    <li>
+      实现「<strong>重新生成恢复码</strong>」。想清楚两个问题：
+      要不要先验证密码？旧的恢复码要不要立刻作废？
+    </li>
+    <li>
+      （进阶）加一个 <strong>WebAuthn / Passkey</strong> 登录。
+      它比 TOTP 安全得多（<strong>天然防钓鱼</strong>：凭据和域名绑定，
+      假网站拿不到）。Java 这边可以用 <code>webauthn4j</code>。
+    </li>
+    <li>
+      （进阶）给账号设置页加一个<strong>「已绑定的登录方式」</strong>列表，
+      支持解绑。注意一个边界：<strong>如果用户是第三方登录创建的（密码是随机的），
+      解绑最后一个绑定就等于把自己锁在门外</strong>——怎么处理？
+    </li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

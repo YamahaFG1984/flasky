@@ -30,6 +30,7 @@ public final class TestFixtures {
             1000, 60,                           // 限流：测试里放得很宽
             "target/test-avatars/" + UUID.randomUUID(),   // 每个测试一个独立目录
             200,                                // SSE 心跳：测试里 200ms
+            "", "", "", "", "",                 // OAuth：默认不配（= 关闭）
             false, false, true);
     }
 
@@ -59,6 +60,13 @@ public final class TestFixtures {
     }
 
     /** 在一个独立事务里准备数据（给集成测试用） */
+    /** 和 withTransaction 一样，但能把结果带出来 */
+    public static <T> T withTransactionReturning(java.util.function.Function<EntityManager, T> work) {
+        var box = new java.util.concurrent.atomic.AtomicReference<T>();
+        withTransaction(em -> box.set(work.apply(em)));
+        return box.get();
+    }
+
     public static void withTransaction(java.util.function.Consumer<EntityManager> work) {
         EntityManager em = Db.emf().createEntityManager();
         try {

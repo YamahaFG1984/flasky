@@ -10,6 +10,8 @@ import com.example.javalinky.db.UserRepository;
 import com.example.javalinky.mail.MailService;
 import com.example.javalinky.service.AuthService;
 import com.example.javalinky.service.AvatarStore;
+import com.example.javalinky.service.OAuthClient;
+import com.example.javalinky.service.TwoFactorService;
 import io.javalin.http.Context;
 
 /**
@@ -25,7 +27,8 @@ public record Services(
     RateLimiter loginLimiter,     // 第 19 章：应用级单例，所有请求线程共用
     AvatarStore avatars,          // 第 20 章
     LiveHub live,                 // 第 21 章：连着的 SSE 客户端
-    PostPresence presence         // 第 21 章：WebSocket，文章页的在场者
+    PostPresence presence,        // 第 21 章：WebSocket，文章页的在场者
+    OAuthClient oauth             // 第 22 章：第三方登录
 ) {
 
     public static Services wire(AppConfig cfg, MailService mail) {
@@ -36,7 +39,7 @@ public record Services(
         return new Services(cfg, mail, new AuthService(cfg, mail),
                             loginLimiter, avatars,
                             new LiveHub(java.time.Duration.ofMillis(cfg.sseHeartbeatMillis())),
-                            new PostPresence());
+                            new PostPresence(), new OAuthClient());
     }
 
     // ---- 请求级别的仓储（每次调用都用当前请求的 EntityManager）----
@@ -45,4 +48,5 @@ public record Services(
     public PostRepository postRepo(Context ctx) { return new PostRepository(Db.em(ctx)); }
     public FollowRepository follows(Context ctx) { return new FollowRepository(Db.em(ctx)); }
     public CommentRepository commentRepo(Context ctx) { return new CommentRepository(Db.em(ctx)); }
+    public TwoFactorService twoFactor(Context ctx)    { return new TwoFactorService(Db.em(ctx)); }   // 第 22 章
 }

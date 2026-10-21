@@ -39,6 +39,13 @@ public record AppConfig(
     // 实时（第 21 章）：SSE 心跳间隔（毫秒）
     long sseHeartbeatMillis,
 
+    // 第三方登录（第 22 章）。没配 clientId 就等于关闭
+    String githubClientId,
+    String githubClientSecret,
+    String githubAuthorizeUrl,
+    String githubTokenUrl,
+    String githubUserInfoUrl,
+
     // 开发辅助
     boolean devLogging,
     boolean routeOverview,
@@ -73,6 +80,10 @@ public record AppConfig(
             env.getInt("LOGIN_ATTEMPTS", 10), env.getInt("LOGIN_WINDOW_SECONDS", 300),
             env.get("AVATAR_DIR", "data/avatars"),
             env.getInt("SSE_HEARTBEAT_MILLIS", 20_000),
+            env.get("GITHUB_CLIENT_ID", ""), env.get("GITHUB_CLIENT_SECRET", ""),
+            env.get("GITHUB_AUTHORIZE_URL", "https://github.com/login/oauth/authorize"),
+            env.get("GITHUB_TOKEN_URL", "https://github.com/login/oauth/access_token"),
+            env.get("GITHUB_USERINFO_URL", "https://api.github.com/user"),
             true, true, true
         );
     }
@@ -98,6 +109,9 @@ public record AppConfig(
             1000, 60,                // 限流在测试里形同虚设，免得干扰别的用例
             env.get("AVATAR_DIR", "target/test-avatars"),
             env.getInt("SSE_HEARTBEAT_MILLIS", 300),   // 测试里调小，好验证清理
+            env.get("GITHUB_CLIENT_ID", ""), env.get("GITHUB_CLIENT_SECRET", ""),
+            env.get("GITHUB_AUTHORIZE_URL", ""), env.get("GITHUB_TOKEN_URL", ""),
+            env.get("GITHUB_USERINFO_URL", ""),
             false, false, true
         );
     }
@@ -123,6 +137,10 @@ public record AppConfig(
             env.getInt("LOGIN_ATTEMPTS", 5), env.getInt("LOGIN_WINDOW_SECONDS", 300),
             env.require("AVATAR_DIR"),      // ← 生产必须显式给，别写在容器的临时层里
             env.getInt("SSE_HEARTBEAT_MILLIS", 20_000),
+            env.get("GITHUB_CLIENT_ID", ""), env.get("GITHUB_CLIENT_SECRET", ""),
+            env.get("GITHUB_AUTHORIZE_URL", "https://github.com/login/oauth/authorize"),
+            env.get("GITHUB_TOKEN_URL", "https://github.com/login/oauth/access_token"),
+            env.get("GITHUB_USERINFO_URL", "https://api.github.com/user"),
             false, false, false                // 生产环境关掉所有开发辅助
         );
     }
