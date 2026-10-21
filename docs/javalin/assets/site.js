@@ -27,7 +27,17 @@
     { n: 19, t: '并发与线程安全',     d: '竞态、可见性、原子操作、限流与虚拟线程', part: '第四部分 · 进阶专题' }
   ];
 
+  var APPENDICES = [
+    { id: 'a', t: 'Flask → Javalin 对照', d: '按功能点逐条对应，从路由到部署' },
+    { id: 'b', t: '速查表',               d: '一页纸：Context、JTE、JPQL、Maven 常用写法' },
+    { id: 'c', t: '报错速查',             d: '按报错信息查原因：编译不过、启动失败、行为不对' },
+    { id: 'd', t: 'TypeScript 对照',      d: '同一个问题用 TS 和 Java 各写一遍' }
+  ];
+
   var cur = parseInt(document.body.dataset.chapter || '0', 10);
+  var curApp = document.body.dataset.appendix || '';
+  function appFile(id) { return 'appendix-' + id + '.html'; }
+  function appName(id) { return id.toUpperCase(); }
 
   /* ---------- 侧边栏 ---------- */
   var side = document.getElementById('sidebar');
@@ -38,6 +48,11 @@
       if (c.part) html += '<div class="part">' + c.part + '</div>';
       html += '<a class="ch' + (c.n === cur ? ' active' : '') + '" href="ch' +
         pad(c.n) + '.html"><span class="n">' + c.n + '</span><span>' + c.t + '</span></a>';
+    });
+    html += '<div class="part">附录</div>';
+    APPENDICES.forEach(function (a) {
+      html += '<a class="ch' + (a.id === curApp ? ' active' : '') + '" href="' +
+        appFile(a.id) + '"><span class="n">' + appName(a.id) + '</span><span>' + a.t + '</span></a>';
     });
     side.innerHTML = html;
     var active = side.querySelector('a.ch.active');
@@ -100,7 +115,7 @@
   if (slot && main) {
     var hs = main.querySelectorAll('h2');
     if (hs.length > 2) {
-      var t = '<div class="h">本章目录</div><ol>';
+      var t = '<div class="h">' + (curApp ? '目录' : '本章目录') + '</div><ol>';
       hs.forEach(function (h, i) {
         if (!h.id) h.id = 'sec-' + (i + 1);
         t += '<li><a href="#' + h.id + '">' + h.textContent + '</a></li>';
@@ -244,10 +259,26 @@
     var h = '';
     h += prev ? '<a class="prev" href="ch' + pad(prev.n) + '.html"><span>&larr; 上一章</span>第 ' + prev.n + ' 章 · ' + prev.t + '</a>'
               : '<a class="prev" href="index.html"><span>&larr; 返回</span>课程首页</a>';
-    h += next ? '<a class="next" href="ch' + pad(next.n) + '.html"><span>下一章 &rarr;</span>第 ' + next.n + ' 章 · ' + next.t + '</a>'
-              : '<a class="next" href="index.html"><span>完结 &#127881;</span>回到课程首页</a>';
+    if (next) {
+      h += '<a class="next" href="ch' + pad(next.n) + '.html"><span>下一章 &rarr;</span>第 ' + next.n + ' 章 · ' + next.t + '</a>';
+    } else {
+      var a0 = APPENDICES[0];
+      h += '<a class="next" href="' + appFile(a0.id) + '"><span>附录 &rarr;</span>附录 ' + appName(a0.id) + ' · ' + a0.t + '</a>';
+    }
     pager.className = 'pager';
     pager.innerHTML = h;
+  }
+  if (pager && curApp) {
+    var i = APPENDICES.findIndex(function (a) { return a.id === curApp; });
+    var pa = APPENDICES[i - 1], na = APPENDICES[i + 1];
+    var last = CHAPTERS[CHAPTERS.length - 1];
+    var h2 = '';
+    h2 += pa ? '<a class="prev" href="' + appFile(pa.id) + '"><span>&larr; 上一篇</span>附录 ' + appName(pa.id) + ' · ' + pa.t + '</a>'
+             : '<a class="prev" href="ch' + pad(last.n) + '.html"><span>&larr; 上一章</span>第 ' + last.n + ' 章 · ' + last.t + '</a>';
+    h2 += na ? '<a class="next" href="' + appFile(na.id) + '"><span>下一篇 &rarr;</span>附录 ' + appName(na.id) + ' · ' + na.t + '</a>'
+             : '<a class="next" href="index.html"><span>完结 &#127881;</span>回到课程首页</a>';
+    pager.className = 'pager';
+    pager.innerHTML = h2;
   }
 
   /* ---------- 首页目录 ---------- */
@@ -260,6 +291,13 @@
         '<div class="n">第 ' + c.n + ' 章</div>' +
         '<div class="t">' + c.t + '</div>' +
         '<div class="d">' + c.d + '</div></a>';
+    });
+    g += '<div class="toc-part">附录</div>';
+    APPENDICES.forEach(function (a) {
+      g += '<a class="toc-card" href="' + appFile(a.id) + '">' +
+        '<div class="n">附录 ' + appName(a.id) + '</div>' +
+        '<div class="t">' + a.t + '</div>' +
+        '<div class="d">' + a.d + '</div></a>';
     });
     grid.className = 'toc-grid';
     grid.innerHTML = g;

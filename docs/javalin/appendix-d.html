@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>附录 D · TypeScript 对照 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-appendix="d">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">附录 D</span>
+<h1>TypeScript 对照</h1>
+<p class="lede">
+  很多人是从 TypeScript 过来的，而不是 Python。
+  对这些人来说 Java 的障碍不是「静态类型」—— 那个早就熟了 ——
+  而是<strong>两套类型系统在哲学上的差别</strong>：
+  结构 vs 名义、擦除 vs 具化、<code>strictNullChecks</code> vs 一个三十年的历史包袱。
+  这份附录把同一个问题用两边各写一遍。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 一句话先定调</div>
+  <p>
+    <strong>TypeScript 的类型是「写给编译器看的注解」，运行时全部消失；
+    Java 的类型是「运行时真实存在的东西」—— 除了泛型参数，它也擦除。</strong>
+  </p>
+  <p>
+    这一句能解释这份附录里八成的差别。
+  </p>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="shape">同题一：定义一个数据结构</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">TypeScript</div>
+    <div class="code" data-lang="ts">
+<pre>
+interface Post {
+  id: number;
+  body: string;
+  authorName: string;
+  commentCount: number;
+}
+
+// 任何「形状对得上」的对象都是 Post
+const p: Post = {
+  id: 1, body: "...",
+  authorName: "john", commentCount: 3
+};
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Java</div>
+    <div class="code" data-lang="java">
+<pre>
+public record Post(
+    long id,
+    String body,
+    String authorName,
+    long commentCount
+) {}
+
+// 必须显式 new 这个类型
+var p = new Post(1, "...", "john", 3);
+
+// 字段访问没有 get 前缀
+p.body();
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 最根本的差别：结构类型 vs 名义类型</div>
+  <p>
+    TypeScript 是<strong>结构类型</strong>（structural）：只要字段对得上就是同一个类型，
+    不管它叫什么、从哪来。
+  </p>
+  <p>
+    Java 是<strong>名义类型</strong>（nominal）：<code>record UserId(long v)</code> 和
+    <code>record PostId(long v)</code> 字段完全一样，但<strong>互相不能赋值</strong>。
+  </p>
+  <p>
+    这听起来像是 Java 更啰嗦，但它换来一个 TS 要费劲才能做到的事：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+// Java：天然不会把 userId 传给要 postId 的方法
+void deletePost(PostId id) { ... }
+deletePost(userId);        // ❌ 编译不过
+
+// TypeScript：要靠 branded type 这种技巧才能模拟
+type PostId = number &amp; { readonly __brand: 'PostId' };
+</pre>
+</div>
+  <p>
+    反过来，TS 的结构类型让「临时拼一个对象传进去」非常自然，
+    Java 这边你得先有一个类。两种风格各有代价。
+  </p>
+</div>
+
+<h2 id="null">同题二：处理「可能没有」</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">TypeScript（开了 strictNullChecks）</div>
+    <div class="code" data-lang="ts">
+<pre>
+function findUser(email: string): User | undefined
+
+const u = findUser(e);
+u.name;              // ❌ 编译器拦住你
+
+u?.name ?? "匿名";    // ✅
+
+if (u) {
+  u.name;            // ✅ 收窄之后就安全了
+}
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Java</div>
+    <div class="code" data-lang="java">
+<pre>
+Optional&lt;User&gt; findByEmail(String email)
+
+var u = users.findByEmail(e);
+u.getName();         // ❌ 但错在「Optional 没这方法」
+
+u.map(User::getName).orElse("匿名");     // ✅
+
+if (u.isPresent()) {
+    u.get().getName();                   // ✅ 但没有类型收窄
+}
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; Java 的空安全是<strong>约定</strong>，不是类型系统</div>
+  <p>
+    这是 TS 程序员最容易踩的地方。TS 的 <code>strictNullChecks</code> 把
+    <code>null | undefined</code> 做进了类型系统，<strong>编译器真的拦得住</strong>。
+  </p>
+  <p>
+    Java 没有。<code>String name</code> 这个类型<strong>随时可能是 null</strong>，
+    编译器一个字都不会说。<code>Optional&lt;T&gt;</code> 只是一个普通的类，
+    而且它自己也可能是 null（<code>Optional&lt;User&gt; u = null;</code> 完全合法）。
+  </p>
+  <p>Java 这边的现实做法是靠约定：</p>
+  <ul>
+    <li><strong>返回值</strong>可能没有 → 用 <code>Optional&lt;T&gt;</code>
+        （本教程的仓储层都是这样，见第 5 章）</li>
+    <li><strong>参数和字段</strong> → 不要用 <code>Optional</code>，
+        用 <code>@Nullable</code> 注解表达意图，再靠 IDE 和 SpotBugs 检查</li>
+    <li>靠 Java 14+ 的<strong>有用的 NPE 消息</strong>兜底：
+        <code>Cannot invoke "User.getName()" because "user" is null</code>
+        —— 至少它会告诉你是哪个变量</li>
+  </ul>
+  <p>
+    另外注意：Java <strong>没有类型收窄</strong>。
+    <code>if (u != null)</code> 之后 <code>u</code> 的类型还是原来那个，
+    编译器不会因此放宽任何检查 —— 因为它本来就没检查。
+  </p>
+</div>
+
+<h2 id="generics">同题三：泛型</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">TypeScript</div>
+    <div class="code" data-lang="ts">
+<pre>
+interface Page&lt;T&gt; {
+  items: T[];
+  total: number;
+}
+
+// 类型在运行时不存在，但也没人需要它
+function isStringArray(x: unknown): x is string[] {
+  return Array.isArray(x)
+      &amp;&amp; x.every(i =&gt; typeof i === "string");
+}
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Java</div>
+    <div class="code" data-lang="java">
+<pre>
+public record Page&lt;T&gt;(
+    List&lt;T&gt; items,
+    long total
+) {}
+
+// 泛型参数在运行时被<strong>擦除</strong>了
+List&lt;String&gt; a = new ArrayList&lt;&gt;();
+List&lt;Integer&gt; b = new ArrayList&lt;&gt;();
+a.getClass() == b.getClass();   // true !
+
+if (x instanceof List&lt;String&gt;) {}   // ❌ 编译不过
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 两边都擦除，但 Java 的擦除更让人难受</div>
+  <p>
+    TS 擦除得彻底，所以大家从一开始就不指望运行时有类型，习惯了用
+    <code>zod</code> 这类库在边界上做校验。
+  </p>
+  <p>
+    Java 擦除得<strong>不彻底</strong> —— 类是具化的（<code>instanceof User</code> 没问题），
+    只有泛型参数被擦掉了。这个不一致会在几个地方咬你：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+new T()                       // ❌ 不能这么干
+new List&lt;String&gt;[10]          // ❌ 不能创建泛型数组
+catch (MyException&lt;T&gt; e)      // ❌ 不能捕获泛型异常
+
+// 所以 API 里经常要多传一个 Class&lt;T&gt; —— 看着冗余，是擦除逼的
+ctx.bodyAsClass(PostDto.class)
+ctx.queryParamAsClass("page", Integer.class)
+em.createQuery(jpql, Post.class)
+</pre>
+</div>
+  <p>
+    <strong>每次你在 Java API 里看到一个 <code>Xxx.class</code> 参数，
+    基本都是在给擦除打补丁。</strong>
+  </p>
+</div>
+
+<h2 id="async">同题四：等一个慢操作</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">TypeScript / Node</div>
+    <div class="code" data-lang="ts">
+<pre>
+async function handler(req, res) {
+  const user  = await db.findUser(id);
+  const posts = await db.findPosts(user.id);
+  res.json({ user, posts });
+}
+
+// 并行
+const [user, posts] = await Promise.all([
+  db.findUser(id),
+  db.findPosts(id),
+]);
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Java（虚拟线程）</div>
+    <div class="code" data-lang="java">
+<pre>
+void handler(Context ctx) {
+    var user  = users.findById(id).orElseThrow();
+    var posts = postRepo.findByAuthor(user);
+    ctx.json(Map.of("user", user, "posts", posts));
+}
+// 没有 async，没有 await —— 就是普通的阻塞代码
+
+// 并行
+try (var scope = new StructuredTaskScope
+                     .ShutdownOnFailure()) {
+    var u = scope.fork(() -&gt; users.findById(id));
+    var p = scope.fork(() -&gt; postRepo.findByAuthor(id));
+    scope.join().throwIfFailed();
+    // u.get() / p.get()
+}
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 虚拟线程消灭了「函数颜色」问题</div>
+  <p>
+    TS/Node 里一个函数是不是 <code>async</code> 会<strong>传染</strong>：
+    调用 async 函数的函数也得是 async，一路往上。
+    这就是著名的 "What Color is Your Function"。
+  </p>
+  <p>
+    Java 21 的虚拟线程把调度做在了 JVM 层：<strong>阻塞的是虚拟线程，
+    不是操作系统线程</strong>。所以你写最朴素的阻塞代码，
+    JDBC、<code>InputStream</code>、<code>Thread.sleep()</code> 一行不改，
+    就拿到了和 async 一样的吞吐。没有颜色，也没有生态分裂。
+  </p>
+  <p>
+    <strong>代价在第 19 章</strong>：Node 是单线程事件循环，
+    你几乎不用想数据竞争；Java 是真并发，
+    共享可变状态必须自己同步。两边各自放弃了一样东西。
+  </p>
+</div>
+
+<h2 id="collections">同题五：处理一个列表</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">TypeScript</div>
+    <div class="code" data-lang="ts">
+<pre>
+const names = users
+  .filter(u =&gt; u.confirmed)
+  .map(u =&gt; u.name)
+  .sort();
+
+const byId = new Map(users.map(u =&gt; [u.id, u]));
+
+const total = posts.reduce((s, p) =&gt; s + p.views, 0);
+
+const grouped = Object.groupBy(posts, p =&gt; p.authorId);
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Java</div>
+    <div class="code" data-lang="java">
+<pre>
+var names = users.stream()
+    .filter(User::isConfirmed)
+    .map(User::getName)
+    .sorted()
+    .toList();
+
+var byId = users.stream()
+    .collect(Collectors.toMap(User::getId, u -&gt; u));
+
+long total = posts.stream().mapToLong(Post::getViews).sum();
+
+var grouped = posts.stream()
+    .collect(Collectors.groupingBy(Post::getAuthorId));
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="tw">
+<table>
+<tr><th>TypeScript</th><th>Java Stream</th><th>注意</th></tr>
+<tr><td><code>.filter()</code></td><td><code>.filter()</code></td><td>一样</td></tr>
+<tr><td><code>.map()</code></td><td><code>.map()</code></td><td>一样</td></tr>
+<tr><td><code>.find()</code></td><td><code>.filter(...).findFirst()</code></td><td>返回 <code>Optional</code></td></tr>
+<tr><td><code>.some()</code> / <code>.every()</code></td><td><code>.anyMatch()</code> / <code>.allMatch()</code></td><td>—</td></tr>
+<tr><td><code>.reduce()</code></td><td><code>.reduce()</code> 或 <code>.collect()</code></td><td>数值用 <code>mapToLong().sum()</code> 更快</td></tr>
+<tr><td><code>.flatMap()</code></td><td><code>.flatMap()</code></td><td>Java 要返回 Stream 不是数组</td></tr>
+<tr><td><code>.sort()</code></td><td><code>.sorted(Comparator.comparing(...))</code></td><td><strong>TS 的 sort 原地改，Java 不改原集合</strong></td></tr>
+<tr><td><code>[...a, ...b]</code></td><td><code>Stream.concat(a.stream(), b.stream())</code></td><td>Java 没有展开语法</td></tr>
+<tr><td><code>arr.length</code></td><td><code>list.size()</code> / <code>arr.length</code></td><td>数组是字段，集合是方法</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 三个会绊一下的差别</div>
+  <ol>
+    <li>
+      <strong>Stream 只能用一次。</strong>
+      <code>var s = list.stream();</code> 之后用两次会抛
+      <code>IllegalStateException: stream has already been operated upon or closed</code>。
+      它不是集合，是一次性的管道。
+    </li>
+    <li>
+      <strong>必须有终结操作。</strong><code>.filter()</code> 本身什么都不做，
+      要 <code>.toList()</code> / <code>.forEach()</code> / <code>.collect()</code> 才真正执行。
+      少写一个，整条链路静悄悄地不跑。
+    </li>
+    <li>
+      <strong><code>List.of()</code> 造出来的是不可变的。</strong>
+      往里 <code>add</code> 会抛 <code>UnsupportedOperationException</code>。
+      要可变的用 <code>new ArrayList&lt;&gt;(List.of(...))</code>。
+    </li>
+  </ol>
+</div>
+
+<h2 id="error">同题六：错误处理</h2>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">TypeScript</div>
+    <div class="code" data-lang="ts">
+<pre>
+try {
+  await save(post);
+} catch (e) {
+  // e 的类型是 unknown，要自己收窄
+  if (e instanceof ValidationError) { ... }
+}
+
+// 函数签名里看不出会抛什么
+function save(p: Post): Promise&lt;void&gt;
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Java</div>
+    <div class="code" data-lang="java">
+<pre>
+try {
+    save(post);
+} catch (ValidationException e) {   // 类型直接写在这
+    ...
+} catch (IOException | SQLException e) {   // 可以合并
+    ...
+}
+
+// 受检异常<strong>必须</strong>写进签名
+void save(Post p) throws IOException
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 受检异常：Java 独有，而且争议很大</div>
+  <p>
+    Java 把异常分成两类：<strong>受检</strong>（<code>IOException</code> 这种，
+    必须 catch 或者在签名里声明）和<strong>非受检</strong>
+    （<code>RuntimeException</code> 的子类，随便抛）。
+  </p>
+  <p>
+    设计初衷是「强迫你处理可恢复的错误」，实践中<strong>招来的抱怨多过好处</strong> ——
+    最常见的结果是满屏的
+    <code>catch (Exception e) { throw new RuntimeException(e); }</code>。
+    后来的语言（C#、Kotlin、TypeScript）都没有抄这个设计。
+  </p>
+  <p>
+    本教程的做法和主流一致：<strong>业务异常一律用非受检的</strong>
+    （<code>NotFoundResponse</code>、<code>ForbiddenResponse</code> 都是
+    <code>RuntimeException</code> 的子类），
+    让它们一路冒泡到 Javalin 的异常处理器。
+  </p>
+</div>
+
+<h2 id="tooling">同题七：工程化</h2>
+
+<div class="tw">
+<table>
+<tr><th></th><th>TypeScript / Node</th><th>Java / Maven</th></tr>
+
+<tr><td>依赖清单</td><td><code>package.json</code></td><td><code>pom.xml</code></td></tr>
+<tr><td>锁文件</td><td><code>package-lock.json</code></td>
+    <td><strong>没有</strong> —— Maven 靠「最近者优先」仲裁，
+        想钉死用 <code>dependencyManagement</code> 或 BOM</td></tr>
+<tr><td>依赖存放</td><td>每个项目一份 <code>node_modules</code></td>
+    <td>全机器共用 <code>~/.m2/repository</code></td></tr>
+<tr><td>依赖树</td><td><code>npm ls</code></td><td><code>mvn dependency:tree</code></td></tr>
+<tr><td>同名不同版本</td><td><strong>可以共存</strong>（嵌套 node_modules）</td>
+    <td><strong>不行</strong> —— 一个 classpath 上一个版本，
+        所以才有「依赖地狱」和 <code>NoSuchMethodError</code></td></tr>
+<tr><td>跑测试</td><td><code>npm test</code></td><td><code>mvn test</code></td></tr>
+<tr><td>构建产物</td><td>打包后的 JS + <code>node_modules</code></td>
+    <td>一个自带服务器的 JAR</td></tr>
+<tr><td>格式化</td><td>Prettier（事实标准）</td>
+    <td>google-java-format / Spotless（没有统一标准）</td></tr>
+<tr><td>静态检查</td><td>ESLint</td><td>SpotBugs、Error Prone、PMD</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 没有锁文件这件事值得单独警惕</div>
+  <p>
+    <code>package-lock.json</code> 保证「今天装的和上个月装的一模一样」。
+    Maven 没有这个概念：只要你的依赖声明了一个版本范围，
+    或者某个传递依赖更新了，<strong>两次构建的 classpath 就可能不同</strong>。
+  </p>
+  <p>
+    Java 这边的替代方案：
+  </p>
+  <ul>
+    <li><strong>永远写死版本号</strong>，不要用 <code>[1.0,2.0)</code> 这种范围</li>
+    <li><strong>用 BOM</strong> 统一管理一组相关依赖的版本（第 8 章的 jackson-bom）</li>
+    <li><code>mvn dependency:tree</code> 定期看一眼仲裁结果</li>
+    <li>严格要求可复现的话，用 <code>maven-enforcer-plugin</code> 的
+        <code>dependencyConvergence</code> 规则，
+        让「同一个库出现两个版本」直接构建失败</li>
+  </ul>
+</div>
+
+<h2 id="summary">一张总结表</h2>
+
+<div class="tw">
+<table>
+<tr><th>维度</th><th>TypeScript</th><th>Java</th></tr>
+<tr><td>类型系统</td><td>结构类型，形状对上就行</td><td>名义类型，名字必须对</td></tr>
+<tr><td>空安全</td><td>类型系统级别，编译器真拦得住</td><td><strong>只有约定</strong>，靠 <code>Optional</code> 和注解</td></tr>
+<tr><td>类型收窄</td><td>有，而且很强</td><td>只有 <code>instanceof</code> 模式匹配那一点</td></tr>
+<tr><td>运行时类型</td><td>完全没有</td><td>类有，泛型参数没有</td></tr>
+<tr><td>并发</td><td>单线程事件循环 + async/await</td><td>真多线程 + 虚拟线程，没有函数颜色</td></tr>
+<tr><td>数据竞争</td><td>基本不用想</td><td><strong>必须自己管</strong>（第 19 章）</td></tr>
+<tr><td>异常</td><td>全是非受检</td><td>分受检 / 非受检</td></tr>
+<tr><td>不可变</td><td><code>readonly</code>（只在编译期）</td><td><code>final</code>、record、<code>List.of()</code>（运行时真的不可变）</td></tr>
+<tr><td>依赖版本冲突</td><td>可以共存</td><td>必须选一个 → 冲突要人工治</td></tr>
+<tr><td>可复现构建</td><td>锁文件</td><td>写死版本 + BOM + enforcer</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 从 TS 过来，真正要调整的是三件事</div>
+  <ol>
+    <li>
+      <strong>不要指望编译器帮你管 null。</strong>
+      这是最大的落差，而且是单向的 ——
+      你会怀念 <code>strictNullChecks</code>。
+      把「返回值用 Optional、参数不用」变成肌肉记忆。
+    </li>
+    <li>
+      <strong>开始想并发。</strong>
+      Node 替你挡掉了数据竞争，Java 不会。
+      任何一个 <code>static</code> 字段、任何一个传进构造器的对象，
+      都可能被多个线程同时读写。第 19 章整章在讲这个。
+    </li>
+    <li>
+      <strong>依赖冲突是一种新病。</strong>
+      <code>NoSuchMethodError</code> 在 npm 世界里几乎不存在
+      （因为同名库可以共存），在 Java 里是家常便饭。
+      见到它先想版本，别怀疑自己的代码。
+    </li>
+  </ol>
+  <p>
+    反过来，你会立刻喜欢上的：<strong>一个 JAR 就能部署</strong>
+    （不用 <code>node_modules</code>、不用管 Node 版本）、
+    <strong>IDE 的重构是真的可靠</strong>（名义类型 + 具化的类），
+    以及<strong>模板在编译期就查错</strong>（第 3 章的 JTE）。
+  </p>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

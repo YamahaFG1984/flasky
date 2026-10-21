@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>附录 B · 速查表 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-appendix="b">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">附录 B</span>
+<h1>速查表</h1>
+<p class="lede">
+  写代码时忘了具体写法，来这里翻。全部对应
+  <strong>Javalin 7.2.3 / JTE 3.2.4 / Hibernate 7.4.2 / Java 21</strong>，
+  每一条都来自跑通的配套代码。
+  <code>Context</code> 和 <code>Validator</code> 的方法名是从
+  <code>javalin-7.2.3.jar</code> 里导出来核对过的，不是凭记忆写的。
+</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="routes">路由注册</h2>
+
+<div class="code" data-lang="java">
+<pre>
+Javalin.create(config -&gt; {
+
+    // ---- 直接注册 ----
+    config.routes.get   ("/",            ctx -&gt; {});
+    config.routes.post  ("/post",        ctx -&gt; {});
+    config.routes.put   ("/post/{id}",   ctx -&gt; {});
+    config.routes.patch ("/post/{id}",   ctx -&gt; {});
+    config.routes.delete("/post/{id}",   ctx -&gt; {});
+
+    // ---- 分组（import static io.javalin.apibuilder.ApiBuilder.*）----
+    config.routes.apiBuilder(() -&gt; {
+        path("/auth", () -&gt; {                      // 块内自动带 /auth 前缀
+            get ("/login", this::loginForm);
+            post("/login", this::login);
+        });
+
+        // path 上挂角色 → 块内所有路由继承
+        path("/moderate", List.of(Permission.MODERATE), () -&gt; {
+            get("", this::moderate);
+        });
+
+        ws ("/live",  wsConfig -&gt; {});             // WebSocket
+        sse("/events", client   -&gt; {});            // Server-Sent Events
+    });
+
+    // ---- 过滤器（按注册顺序执行，after 也是正序）----
+    config.routes.before       (ctx -&gt; {});        // 每个请求，含静态文件
+    config.routes.beforeMatched(ctx -&gt; {});        // 只在匹配到路由时
+    config.routes.after        (ctx -&gt; {});
+    config.routes.afterMatched (ctx -&gt; {});
+
+    // ---- 错误与异常 ----
+    config.routes.error(404, "html", ctx -&gt; {});   // 按 Accept 分流
+    config.routes.error(404, "json", ctx -&gt; {});
+    config.routes.exception(MyException.class, (e, ctx) -&gt; {});
+});
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 路径参数：花括号和尖括号不一样</div>
+  <p>
+    <code>{name}</code> <strong>不跨</strong> <code>/</code>，<code>&lt;name&gt;</code>
+    <strong>跨</strong> <code>/</code>。
+    <code>/files/{path}</code> 匹配不到 <code>/files/a/b.txt</code>，
+    要写 <code>/files/&lt;path&gt;</code>。
+  </p>
+</div>
+
+<h2 id="context">Context：读请求</h2>
+
+<div class="code" data-lang="java">
+<pre>
+// ---- 参数 ----
+ctx.pathParam("username")                                  // String，必然存在
+ctx.pathParamAsClass("id", Long.class).get()               // 转换失败 → 400
+
+ctx.queryParam("q")                                        // String 或 null
+ctx.queryParams("tag")                                     // List&lt;String&gt;，重复出现的
+ctx.queryParamAsClass("page", Integer.class).getOrDefault(1)
+ctx.queryParamAsClass("page", Integer.class).getOrNull()   // 不是 allowNullable()
+
+ctx.formParam("email")                                     // String 或 null
+ctx.formParamMap()                                         // Map&lt;String, List&lt;String&gt;&gt;
+
+// ---- 请求体 ----
+ctx.body()                                                 // String
+ctx.bodyAsClass(PostDto.class)                             // JSON → 对象
+ctx.bodyValidator(PostDto.class)
+   .check(d -&gt; d.body() != null, "body 必填")
+   .get()
+
+// ---- 头、Cookie、会话 ----
+ctx.header("X-Request-Id")
+ctx.cookie("theme")
+ctx.sessionAttribute("userId")                             // 读
+ctx.sessionAttribute("userId", 42L)                        // 写
+ctx.consumeSessionAttribute("flash")                       // 读完即删 —— Flash 消息靠它
+
+// ---- 请求本身 ----
+ctx.method()   ctx.path()   ctx.fullUrl()   ctx.ip()   ctx.userAgent()
+ctx.contentType()   ctx.isMultipart()   ctx.isJson()
+
+// ---- 文件上传 ----
+ctx.uploadedFile("avatar")                                 // UploadedFile 或 null
+ctx.uploadedFiles("photos")                                // List&lt;UploadedFile&gt;
+
+// ---- 请求作用域的临时数据（过滤器往下传东西用它）----
+ctx.attribute("currentUser", user)
+User u = ctx.attribute("currentUser");
+</pre>
+</div>
+
+<h2 id="response">Context：写响应</h2>
+
+<div class="code" data-lang="java">
+<pre>
+ctx.html("&lt;h1&gt;Hi&lt;/h1&gt;")
+ctx.result("纯文本")
+ctx.json(obj)                       // 自动设 application/json
+ctx.render("index.jte", Map.of("page", pageModel))
+
+ctx.status(201)                     // 设置
+ctx.statusCode()                    // 读取
+ctx.header("Location", url)         // 设置响应头
+ctx.redirect("/", HttpStatus.FOUND) // 默认就是 302
+
+ctx.cookie("theme", "dark", 60 * 60 * 24 * 365)   // 第三个参数是 maxAge 秒
+ctx.cookie("theme", "", 0)                        // maxAge=0 = 删除
+
+ctx.skipRemainingHandlers()         // 别再跑后面的处理器了
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 抛异常比手写状态码更省事</div>
+<div class="code" data-lang="java">
+<pre>
+throw new BadRequestResponse("参数不对");       // 400
+throw new UnauthorizedResponse();              // 401
+throw new ForbiddenResponse("没有权限");        // 403
+throw new NotFoundResponse("文章不存在");        // 404
+throw new ConflictResponse();                  // 409
+</pre>
+</div>
+  <p>
+    它们都是 <code>HttpResponseException</code> 的子类，会被 Javalin 接住并
+    按 <code>Accept</code> 头渲染成 HTML 错误页或 JSON 错误体。
+    在一长串 <code>orElseThrow</code> 里尤其好用。
+  </p>
+</div>
+
+<h2 id="jte">JTE 模板</h2>
+
+<div class="code" data-lang="jte">
+<pre>
+@import com.example.javalinky.web.*          &lt;%-- 导入，和 Java 一样 --%&gt;
+
+@param Layout layout                         &lt;%-- 参数 = 这个模板的签名 --%&gt;
+@param String title = "默认值"                &lt;%-- 有默认值的参数可以不传 --%&gt;
+
+${name}                                      &lt;%-- 输出，自动按上下文转义 --%&gt;
+$unsafe{html}                                &lt;%-- 不转义，确定安全时才用 --%&gt;
+
+@if(user != null)
+  已登录
+@elseif(guest)
+  访客
+@else
+  未登录
+@endif
+
+@for(var post : posts)
+  ${post.title()}
+@endfor
+@for(int i = 0; i &lt; 10; i++)                 &lt;%-- C 风格也行 --%&gt;
+@endfor
+
+&lt;%-- 智能属性：值是 null / false 时整个属性消失 --%&gt;
+&lt;input required="${required}" autocomplete="${autocomplete}"&gt;
+
+&lt;%-- 调用别的模板（tag/field.jte）--%&gt;
+@template.tag.field(form = form, name = "email", label = "邮箱", required = true)
+
+&lt;%-- 布局：被调用方声明 @param gg.jte.Content content --%&gt;
+@template.layout.base(layout = layout, content = @`
+  &lt;h1&gt;正文写在这里&lt;/h1&gt;
+`)
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 三个最容易写错的地方</div>
+  <ol>
+    <li>注释是 <code>&lt;%-- --%&gt;</code>，<strong>不是</strong> <code>@* *@</code>（第 11 章）</li>
+    <li>属性名的位置<strong>不能</strong>写 <code>@if</code>，要用智能属性（第 4 章）</li>
+    <li>布局内容块用的是<strong>反引号</strong> <code>@`…`</code>，不是引号</li>
+  </ol>
+</div>
+
+<h2 id="jpa">JPA / JPQL</h2>
+
+<div class="code" data-lang="java">
+<pre>
+// ---- 实体 ----
+@Entity @Table(name = "users")
+public class User {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, length = 64, unique = true)
+    private String email;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "role_id")
+    private Role role;
+
+    @OneToMany(mappedBy = "author", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List&lt;Post&gt; posts = new ArrayList&lt;&gt;();
+
+    @PrePersist  void onCreate() {}      // 插入前
+    @PreUpdate   void onUpdate() {}      // 更新前
+}
+
+// ---- 增删改查 ----
+em.persist(user);                        // 新增（INSERT 可能延迟到提交）
+em.find(User.class, 1L);                 // 按主键，走一级缓存
+em.getReference(User.class, 1L);         // 只要代理，不查库（赋外键时用它）
+em.remove(user);
+em.flush();                              // 强制把挂起的 SQL 发出去
+em.clear();                              // 清空一级缓存（批量插入时配合 flush）
+
+// 改字段就够了 —— 托管实体会被脏检查，不需要 save()
+user.setName("新名字");
+
+// ---- 查询 ----
+em.createQuery("select u from User u where u.email = :e", User.class)
+  .setParameter("e", email)
+  .getResultStream().findFirst();        // 比 getSingleResult() 好：没有不抛异常
+
+em.createQuery("""
+        select p from Post p
+          join fetch p.author             -- ← 避免 N+1 的关键
+         where p.author in :authors
+         order by p.timestamp desc
+        """, Post.class)
+  .setParameter("authors", authors)
+  .setFirstResult((page - 1) * size)      // 分页：跳过
+  .setMaxResults(size)                    // 分页：取几条
+  .getResultList();
+
+// 聚合
+em.createQuery("select count(p) from Post p", Long.class).getSingleResult();
+
+// 批量取「每篇文章几条评论」—— 返回 Object[]
+em.createQuery("""
+        select c.post.id, count(c) from Comment c
+         where c.post.id in :ids group by c.post.id
+        """, Object[].class)
+  .setParameter("ids", ids)
+  .getResultStream()
+  .collect(Collectors.toMap(r -&gt; (Long) r[0], r -&gt; (Long) r[1]));
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; JPQL 查的是<strong>实体</strong>，不是表</div>
+  <p>
+    <code>select u from User u</code> 里的 <code>User</code> 是类名，
+    <code>u.email</code> 是字段名 —— 不是 <code>users</code> 和 <code>email</code> 列。
+    大小写敏感，跟着 Java 走。想写真 SQL 用
+    <code>em.createNativeQuery(...)</code>。
+  </p>
+</div>
+
+<h2 id="validation">校验</h2>
+
+<div class="code" data-lang="java">
+<pre>
+// ---- Javalin 的 Validator：适合单个参数 ----
+ctx.queryParamAsClass("page", Integer.class)
+   .check(p -&gt; p &gt; 0, "页码必须为正")
+   .getOrDefault(1)        // 缺失时给默认值
+   // .getOrNull()         // 缺失时给 null
+   // .get()               // 缺失或失败 → 抛 400
+
+// ---- Bean Validation：适合整个表单 ----
+public record RegisterForm(
+    @NotBlank(message = "请填写邮箱")
+    @Email(message = "邮箱格式不正确")
+    @Size(max = 64)
+    String email,
+
+    @NotBlank @Size(min = 8, message = "密码至少 8 位")
+    String password
+) {}
+
+Map&lt;String, List&lt;String&gt;&gt; errors = Forms.validate(form);
+if (!errors.isEmpty()) { /* 带着错误重新渲染表单 */ }
+</pre>
+</div>
+
+<p>常用注解：</p>
+
+<div class="tw">
+<table>
+<tr><th>注解</th><th>管什么</th><th>注意</th></tr>
+<tr><td><code>@NotNull</code></td><td>不能是 null</td><td>空字符串能过</td></tr>
+<tr><td><code>@NotBlank</code></td><td>不能是 null / 空 / 全空白</td><td><strong>表单字段基本都该用这个</strong></td></tr>
+<tr><td><code>@NotEmpty</code></td><td>不能是 null / 空</td><td>全是空格能过</td></tr>
+<tr><td><code>@Size(min=, max=)</code></td><td>字符串长度、集合大小</td><td>null 直接算通过</td></tr>
+<tr><td><code>@Email</code></td><td>邮箱格式</td><td>规则很宽松，别指望它挡住假邮箱</td></tr>
+<tr><td><code>@Pattern(regexp=)</code></td><td>正则</td><td>记得 <code>^</code> 和 <code>$</code></td></tr>
+<tr><td><code>@Min</code> / <code>@Max</code></td><td>数值范围</td><td>—</td></tr>
+<tr><td><code>@Positive</code> / <code>@PositiveOrZero</code></td><td>正数</td><td>比 <code>@Min(1)</code> 意图清楚</td></tr>
+</table>
+</div>
+
+<h2 id="maven">Maven 命令</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn -q compile exec:exec                 # 编译 + 启动（别用 exec:java，第 3 章）
+mvn -q compile exec:exec@cli -Dcli.args="deploy"
+mvn -q compile exec:exec@cli -Dcli.args="fake 100 400"
+
+mvn test                                 # 跑测试（APP_PROFILE 已配在 surefire 里）
+mvn test -Dtest=RateLimiterTest          # 只跑一个类
+mvn test -Dtest='RateLimiterTest#超出容量就拒绝'
+mvn verify                               # 测试 + JaCoCo 覆盖率门槛
+mvn -Pe2e test                           # 带上 Playwright 端到端
+
+mvn clean package                        # 打成可执行 JAR
+mvn -o ...                               # 离线，不联网找更新
+
+# ---- 排查依赖 ----
+mvn dependency:tree                               # 整棵树
+mvn dependency:tree -Dincludes=com.fasterxml.jackson   # 只看某个 groupId
+mvn dependency:analyze                            # 声明了没用的 / 用了没声明的
+mvn versions:display-dependency-updates           # 有哪些能升级
+mvn help:effective-pom                            # 继承和 BOM 展开后的最终 pom
+</pre>
+</div>
+
+<h2 id="test">测试</h2>
+
+<div class="code" data-lang="java">
+<pre>
+// ---- 起一个真的服务器，测完自动关 ----
+JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -&gt; {
+    var res = client.get("/");
+    assertThat(res.code()).isEqualTo(200);
+    assertThat(res.body().string()).contains("Javalinky");
+
+    // 响应头：没有 header(name)，要走 headers()
+    assertThat(res.headers().get("Location").get(0)).contains("/auth/login");
+
+    // 加请求头
+    client.get("/edit-profile", req -&gt; req.header("Accept", "text/html"));
+
+    // 发表单 —— client.post(path, Map) 发的是 JSON！
+    var body = new FormBody.Builder().add("email", "a@b.c").build();
+    client.request("/auth/login", req -&gt; req.post(body));
+});
+
+// ---- 常用断言（AssertJ）----
+assertThat(x).isEqualTo(y).isNotNull();
+assertThat(list).hasSize(3).contains(a).containsExactly(a, b, c);
+assertThat(s).startsWith("a").contains("b").doesNotContain("c");
+assertThat(opt).isPresent().get().isEqualTo(v);
+assertThatThrownBy(() -&gt; f()).isInstanceOf(X.class).hasMessageContaining("...");
+assertThat(n).as("失败时打印这句，带参数 %d", n).isEqualTo(5);   // ← 很值得养成习惯
+</pre>
+</div>
+
+<h2 id="config">配置与环境</h2>
+
+<div class="code" data-lang="java">
+<pre>
+Javalin.create(config -&gt; {
+    config.fileRenderer(new JavalinJte(JavalinJte.Companion.directoryTemplateEngine()));
+    config.staticFiles.add(f -&gt; {
+        f.directory  = "/public";
+        f.location   = Location.CLASSPATH;   // 或 Location.EXTERNAL
+        f.hostedPath = "/";
+    });
+    config.jetty.modifyServletContextHandler(h -&gt; h.setSessionHandler(...));
+    config.concurrency.useVirtualThreads = true;
+    config.events.serverStopping(() -&gt; { /* 优雅关闭 */ });
+
+    config.bundledPlugins.enableDevLogging();            // ⚠ 只在开发环境
+    config.bundledPlugins.enableRouteOverview("/routes"); // ⚠ 只在开发环境
+    config.bundledPlugins.enableSslRedirects();
+});
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+# 本教程用到的环境变量
+APP_PROFILE=dev|test|prod       # 档位，决定走哪套配置
+PORT=7070
+SITE_BASE_URL=http://localhost:7070
+DATABASE_URL / DATABASE_USER / DATABASE_PASSWORD
+SECRET_KEY                      # 生产必须显式给，没有默认值
+ADMIN_EMAIL
+MAIL_HOST / MAIL_PORT / MAIL_USERNAME / MAIL_PASSWORD
+LOGIN_ATTEMPTS / LOGIN_WINDOW_SECONDS    # 第 19 章的限流
+HTTPS_ONLY / BEHIND_PROXY
+LOG_DIR / LOG_LEVEL
+
+# 生产启动：记得指定 logback-prod.xml，否则文件和邮件 appender 不生效
+java -Dlogback.configurationFile=logback-prod.xml -jar target/javalinky.jar
+</pre>
+</div>
+
+<h2 id="java">Java 语法：Python 程序员常查的几条</h2>
+
+<div class="code" data-lang="java">
+<pre>
+// ---- 文本块（三引号），和 Python 的 """ 像但会去掉公共缩进 ----
+String sql = """
+        select u from User u
+         where u.email = :e
+        """;
+
+// ---- record：不可变数据类，自动有构造器 / getter / equals / toString ----
+public record Point(int x, int y) {}
+var p = new Point(1, 2);
+p.x();                       // 注意没有 get 前缀
+
+// ---- var：只能用在局部变量，类型由右边推出来 ----
+var list = new ArrayList&lt;String&gt;();
+
+// ---- switch 表达式：有返回值，而且会检查穷尽 ----
+String s = switch (profile) {
+    case DEV  -&gt; "开发";
+    case TEST -&gt; "测试";
+    case PROD -&gt; "生产";
+};
+
+// ---- Optional：代替到处判 null ----
+users.findByEmail(e)
+     .map(User::getUsername)
+     .orElse("匿名");
+users.findById(id).orElseThrow(() -&gt; new NotFoundResponse("没找到"));
+
+// ---- Stream：相当于列表推导 ----
+var names = users.stream()
+    .filter(User::isConfirmed)              // [u for u in users if u.confirmed]
+    .map(User::getUsername)                 // [u.username for u in ...]
+    .sorted()
+    .toList();
+
+var byId = users.stream()
+    .collect(Collectors.toMap(User::getId, u -&gt; u));   // {u.id: u for u in users}
+
+// ---- 不可变集合字面量 ----
+List.of("a", "b")            Map.of("k", 1, "k2", 2)          Set.of(1, 2)
+
+// ---- 字符串 ----
+"a,b".split(",")             String.join(",", list)
+"x".repeat(3)                "  x ".strip()           // 不是 trim()，strip 认 Unicode 空白
+"%s 有 %d 条".formatted(name, n)
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 一个容易忘的坑：字符串比较</div>
+<div class="code" data-lang="java">
+<pre>
+a == b              // ❌ 比的是「是不是同一个对象」
+a.equals(b)         // ✅ 比内容；a 是 null 会 NPE
+"常量".equals(a)     // ✅ 把常量放前面，a 是 null 也安全
+Objects.equals(a, b)// ✅ 两边都可能是 null 时
+a.equalsIgnoreCase(b)
+</pre>
+</div>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

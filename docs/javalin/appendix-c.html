@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>附录 C · 报错速查 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-appendix="c">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">附录 C</span>
+<h1>报错速查</h1>
+<p class="lede">
+  拿着报错信息来这里搜（<kbd>Ctrl</kbd>+<kbd>F</kbd>）。
+  按「什么时候炸的」分组：编译期最好查，运行期最难查，
+  <strong>而最坑的那一类是「不报错但行为不对」</strong> —— 单独列在最后一节。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 关于这些报错文本的来源</div>
+  <p>
+    标 <strong>&#10003;</strong> 的，是写这本书的配套代码时<strong>真的撞上并记录下来的原文</strong>
+    （完整清单在 <code>javalinky/TUTORIAL-DIFFS.md</code>）。
+    没标的是 Java / Maven / Hibernate 生态里的常见报错，
+    具体文字可能因版本略有出入，但关键词和原因是对的。
+  </p>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="compile">编译期：<code>mvn compile</code> 过不去</h2>
+
+<div class="tw">
+<table>
+<tr><th>报错里的关键词</th><th>原因</th><th>怎么办</th></tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>cannot find symbol: method<br>directoryTemplateEngine()</code></td>
+  <td>Javalin 是 Kotlin 写的，这是 <code>companion object</code> 里的方法</td>
+  <td>Java 侧要写 <code>JavalinJte.Companion.directoryTemplateEngine()</code>（第 3 章）</td>
+</tr>
+
+<tr>
+  <td><code>cannot find symbol: method allowNullable()</code></td>
+  <td>Javalin 6 删掉了这个方法</td>
+  <td>改用 <code>getOrNull()</code>（第 4 章）</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>method post in class MainRoutes<br>cannot be applied to given types</code><br>
+      <span class="sm">required: Context / found: String, Handler</span></td>
+  <td>你定义的实例方法 <code>post(Context)</code> <strong>遮蔽</strong>了静态导入的
+      <code>ApiBuilder.post</code>。报错指向的是注册路由那一行，真正的原因在几十行外</td>
+  <td>处理器改名 <code>showPost</code>。<code>get</code>/<code>put</code>/<code>delete</code>/<code>path</code>
+      同理（第 11 章）</td>
+</tr>
+
+<tr>
+  <td><code>incompatible types: Object cannot be<br>converted to X</code></td>
+  <td><code>ctx.attribute("k")</code> 这类泛型方法推不出类型</td>
+  <td>显式声明：<code>User u = ctx.attribute("k");</code></td>
+</tr>
+
+<tr>
+  <td><code>variable x might not have been initialized</code><br>
+      <code>local variables referenced from a lambda<br>must be final or effectively final</code></td>
+  <td>lambda 不能改外部局部变量</td>
+  <td>用单元素数组或 <code>AtomicReference</code>。<strong>但要先确认那个回调
+      只会执行一次</strong> —— 第 19 章讲了 <code>compute</code> 可以、
+      <code>updateAndGet</code> 不可以</td>
+</tr>
+
+<tr>
+  <td><code>release version 21 not supported</code><br>
+      <code>invalid target release: 21</code></td>
+  <td>JDK 版本比 <code>maven.compiler.release</code> 低</td>
+  <td><code>mvn -version</code> 看 Maven 实际用的是哪个 JDK；用
+      <code>JAVA_HOME</code> 指到 21+</td>
+</tr>
+
+<tr>
+  <td><code>in comment after two dashes (--)<br>is not allowed</code></td>
+  <td><code>pom.xml</code> 的 XML 注释里出现了连续的 <code>--</code>
+      （比如拿它画分隔线）</td>
+  <td>XML 注释里不能有 <code>--</code>，换成别的符号</td>
+</tr>
+</table>
+</div>
+
+<h3>JTE 模板的编译错误</h3>
+
+<p>
+  模板也是编译的（这是 JTE 的卖点），所以它的错误也出现在 <code>mvn compile</code> 阶段，
+  而且会<strong>指出 <code>.jte</code> 文件的行号</strong>。
+</p>
+
+<div class="tw">
+<table>
+<tr><th>报错</th><th>原因</th><th>怎么办</th></tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>Illegal HTML attribute name<br>@if(required)required@endif!<br>
+      Expressions in HTML attribute names are not<br>allowed. Smart attributes will do just that</code></td>
+  <td><code>@if</code> 放在了<strong>属性名的位置</strong></td>
+  <td>用智能属性：<code>required="${required}"</code>。值为 null/false 时整个属性不输出（第 4 章）</td>
+</tr>
+
+<tr>
+  <td><code>Failed to compile template ...<br>cannot find symbol</code></td>
+  <td>模板里调了实体上不存在的方法，或者 <code>@import</code> 漏了</td>
+  <td>按行号去看。<strong>这正是 JTE 的价值</strong> —— Jinja2 要等到访问那个页面才发现</td>
+</tr>
+
+<tr>
+  <td><code>Unexpected @endif</code> / <code>Unexpected end of<br>template</code></td>
+  <td><code>@if</code> / <code>@for</code> 没配对</td>
+  <td>检查嵌套。注意 <code>@elseif</code> 不是 <code>@else if</code></td>
+</tr>
+</table>
+</div>
+
+<h2 id="startup">启动期：编译过了，一跑就挂</h2>
+
+<div class="tw">
+<table>
+<tr><th>报错里的关键词</th><th>原因</th><th>怎么办</th></tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>NoClassDefFoundError: gg/jte/Content</code></td>
+  <td>用了 <code>mvn exec:java</code>。它在 Maven 自己的 JVM 里跑，
+      而 JTE 运行时编译模板用的类加载器父级是<strong>系统类加载器</strong>，
+      那里没有你的依赖</td>
+  <td>改用 <code>mvn exec:exec</code>（fork 一个真正的 JVM）。
+      第 3 章有完整解释和 pom 配置</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>Database may be already in use:<br>".../data/javalinky-dev.mv.db".<br>
+      Possible solutions: close all other<br>connection(s) [90020-232]</code></td>
+  <td>H2 的文件库<strong>同一时刻只能被一个进程打开</strong>。
+      你多半是：已经有一个应用在跑、或者 JShell 还连着、
+      或者上一次没退干净</td>
+  <td>关掉另一个进程。要同时连多个，用 H2 的 server 模式
+      （<code>jdbc:h2:tcp://localhost/~/db</code>）</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>SecurityException: Invalid signature<br>file digest for Manifest main attributes</code></td>
+  <td>fat jar 里混进了依赖自带的签名文件（本项目是 bcrypt 的
+      <code>META-INF/PFOPENSO.SF</code>），shade 重新打包后摘要对不上</td>
+  <td>maven-shade-plugin 加 <code>&lt;filters&gt;</code> 排除
+      <code>META-INF/*.SF</code>、<code>*.DSA</code>、<code>*.RSA</code>（第 7 章）</td>
+</tr>
+
+<tr>
+  <td><code>BindException: Address already in use</code></td>
+  <td>端口被占了</td>
+  <td><code>lsof -i :7070</code> 找出来；或者换个端口 <code>PORT=7071</code></td>
+</tr>
+
+<tr>
+  <td><code>Schema-validation: missing table [posts]</code><br>
+      <code>Schema-validation: missing column [about_me]</code></td>
+  <td><code>hbm2ddl.auto=validate</code> 发现实体和表对不上 ——
+      <strong>你改了实体但没写迁移</strong></td>
+  <td>写一个新的 <code>V8__xxx.sql</code>。
+      <strong>这个报错是在帮你</strong>，别去改成 <code>update</code>（第 5 章）</td>
+</tr>
+
+<tr>
+  <td><code>Validate failed: Migration checksum<br>mismatch for migration version 3</code></td>
+  <td>改了一个<strong>已经执行过</strong>的迁移文件</td>
+  <td>迁移是只增不改的。开发库可以删库重来，
+      生产环境只能写一个新迁移去修正</td>
+</tr>
+
+<tr>
+  <td><code>UnsupportedClassVersionError:<br>... has been compiled by a more recent version</code></td>
+  <td>编译用的 JDK 比运行用的新</td>
+  <td>对齐两边版本。常见于本地 21 编译、服务器 17 运行</td>
+</tr>
+
+<tr>
+  <td>启动后终端被几百行 <code>DEBUG</code> 刷屏</td>
+  <td>没有 <code>logback.xml</code>，Logback 退回默认的 DEBUG 级别</td>
+  <td>加一个最小的 <code>src/main/resources/logback.xml</code>（第 2 章）</td>
+</tr>
+</table>
+</div>
+
+<h2 id="runtime">运行期：某个页面或操作炸了</h2>
+
+<div class="tw">
+<table>
+<tr><th>报错里的关键词</th><th>原因</th><th>怎么办</th></tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>No parameter with name baseUrl is<br>defined in tag/pagination.jte</code></td>
+  <td>模板里用了 Razor 风格的注释 <code>@* … *@</code>，JTE 不认，
+      于是整行被当成了参数名的一部分。<strong>参数明明就写在那里</strong></td>
+  <td>JTE 的注释是 <code>&lt;%-- --%&gt;</code>（第 11 章）</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>NoSuchMethodError: 'void com.fasterxml<br>.jackson.core.util.BufferRecycler<br>.releaseToPool()'</code></td>
+  <td><strong>依赖版本冲突</strong>：<code>jackson-databind</code> 是新的，
+      传递进来的 <code>jackson-core</code> 是旧的</td>
+  <td><code>mvn dependency:tree -Dincludes=com.fasterxml.jackson</code> 确认，
+      然后 import <code>jackson-bom</code>（第 8 章）</td>
+</tr>
+
+<tr>
+  <td><code>NoSuchMethodError</code> / <code>NoSuchFieldError</code><br>（任何一个）</td>
+  <td>几乎总是同一个病：<strong>类找到了，但版本不对</strong>。
+      注意它和 <code>ClassNotFoundException</code> 的区别 ——
+      后者是压根没有</td>
+  <td>同上。<strong>这条值得单独记住，它是 Java 依赖地狱的标准症状</strong></td>
+</tr>
+
+<tr>
+  <td><code>LazyInitializationException: could not<br>initialize proxy - no Session</code></td>
+  <td>事务已经结束（<code>UnitOfWork</code> 的 after 跑完了），
+      才去访问懒加载的关联。常见于在模板里点出一个没取过的关联</td>
+  <td>查询时 <code>join fetch</code> 把它取出来，
+      或者在事务内把要用的数据装进页面模型 record（第 11 章的做法）</td>
+</tr>
+
+<tr>
+  <td><code>IllegalStateException: 没有默认角色</code></td>
+  <td>测试或新库里没灌角色，<code>defaultRole()</code> 查不到。
+      表现是<strong>注册返回 500</strong>，而错误信息完全看不出和角色有关</td>
+  <td>先跑 <code>exec:exec@cli -Dcli.args="seed-roles"</code>；
+      测试里用 <code>TestFixtures.seedRoles(em)</code>（第 9 章）</td>
+</tr>
+
+<tr>
+  <td><code>Cannot invoke "X.y()" because "&lt;local1&gt;"<br>is null</code></td>
+  <td>NPE。Java 14+ 的报错会<strong>明确指出是哪个表达式</strong>，
+      比老版本的「NullPointerException」一行好查太多</td>
+  <td>认真读那个变量名。常见来源：<code>ctx.formParam()</code> 对不存在的字段返回 null</td>
+</tr>
+
+<tr>
+  <td>所有请求突然一起卡住，CPU 却不高</td>
+  <td>虚拟线程被 <strong>pinning</strong> 钉住了载体线程
+      （JDK 21 下在 <code>synchronized</code> 块里做阻塞 I/O）；
+      或者连接池耗尽</td>
+  <td><code>-Djdk.tracePinnedThreads=full</code> 启动看栈；
+      <code>synchronized</code> 换 <code>ReentrantLock</code>（第 19 章）</td>
+</tr>
+
+<tr>
+  <td><code>OutOfMemoryError: Java heap space</code><br>（批量导入时）</td>
+  <td><code>EntityManager</code> 的一级缓存持有它管过的所有实体，
+      而且每次 flush 都要遍历全部对象做脏检查</td>
+  <td>每 N 条 <code>em.flush()</code> + <code>em.clear()</code>。
+      注意 clear 之后之前拿到的实体变成游离态，要重新取（第 11 章）</td>
+</tr>
+</table>
+</div>
+
+<h2 id="test">测试阶段</h2>
+
+<div class="tw">
+<table>
+<tr><th>症状</th><th>原因</th><th>怎么办</th></tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>Table "USERS" not found<br>(this database is empty)</code></td>
+  <td>H2 内存库在<strong>最后一个连接关闭时整个消失</strong>。
+      Flyway 建完表把连接还回池里，库就没了。
+      <strong>"this database is empty" 这半句是关键线索</strong> ——
+      不是迁移没跑，是跑完又被丢了</td>
+  <td>JDBC URL 加 <code>;DB_CLOSE_DELAY=-1</code>（第 7、15 章）</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> 表单 POST 的字段<strong>全是 null</strong>，
+      处理器一直回「请填写 xxx」，但请求确实发出去了</td>
+  <td><code>client.post(path, Map)</code> 发的是 <strong>JSON</strong>，
+      而 <code>ctx.formParam()</code> 只认
+      <code>application/x-www-form-urlencoded</code></td>
+  <td>用 <code>FormBody.Builder</code> +
+      <code>client.request(path, req -&gt; req.post(body))</code>（第 8、15 章）</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>AssertionError: 页面里应该有 _csrf 隐藏域</code>
+      （在一个测试里换账号时）</td>
+  <td><code>GET /auth/login</code> 在<strong>已登录</strong>时会重定向到首页，
+      于是取令牌的那次请求拿到的是 302 的空响应体</td>
+  <td>换账号要先登出：<code>switchUser()</code> = logout + login（第 15 章）</td>
+</tr>
+
+<tr>
+  <td><code>cannot find symbol: method header(String)</code>
+      （在 <code>Response</code> 上）</td>
+  <td><code>javalin-testtools</code> 7.x 底层换成了
+      <code>java.net.http</code>，不再是 OkHttp</td>
+  <td><code>response.headers().get("Location").get(0)</code>（第 15 章）</td>
+</tr>
+
+<tr>
+  <td>测试<strong>改了你的开发数据</strong>，而且时好时坏</td>
+  <td>忘了 <code>APP_PROFILE=test</code>，测试跑在 DEV 档位，
+      连的是真实的开发库</td>
+  <td>把它配进 surefire 的 <code>&lt;environmentVariables&gt;</code>，
+      别依赖人记得（第 15 章）</td>
+</tr>
+
+<tr>
+  <td>并发测试<strong>一次都没红过</strong>，
+      但你知道那段代码有竞态</td>
+  <td>很可能用了虚拟线程。它们挤在 CPU 核数个载体线程上，
+      纳秒级的临界区根本碰不到一起</td>
+  <td>测竞态要用<strong>平台线程</strong>，数量远超核数，再跑几轮。
+      第 19 章有实测数据：2 核机器上 200 虚拟线程发现率 0%，
+      500 平台线程 84%</td>
+</tr>
+</table>
+</div>
+
+<h2 id="build">构建与部署</h2>
+
+<div class="tw">
+<table>
+<tr><th>报错</th><th>原因</th><th>怎么办</th></tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>Unable to parse configuration of mojo<br>
+      org.codehaus.mojo:exec-maven-plugin...<br>parameter arguments</code></td>
+  <td>插件级 <code>&lt;configuration&gt;</code> 里写了
+      <code>&lt;arguments&gt;&lt;classpath/&gt;</code>，
+      那是 <code>exec:exec</code> 专用的，<code>exec:java</code> 解析不了</td>
+  <td>改用 <code>&lt;commandlineArgs&gt;-classpath %classpath ...&lt;/commandlineArgs&gt;</code>（第 3 章）</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>Unknown key name<br>'StartLimitIntervalSec' in section<br>'Service', ignoring</code></td>
+  <td>systemd v229 之后 <code>StartLimit*</code> 属于 <code>[Unit]</code> 段。
+      <strong>放错位置会被静默忽略</strong> —— 限制重启频率根本没生效</td>
+  <td>移到 <code>[Unit]</code>。
+      <code>systemd-analyze verify xxx.service</code> 可以提前发现（第 17 章）</td>
+</tr>
+
+<tr>
+  <td>生产环境发邮件报「找不到 mail/confirm.txt.jte」，
+      开发环境一切正常</td>
+  <td>只配了一个 <code>jte-maven-plugin</code> 执行。
+      纯文本模板需要单独的源目录 + <code>contentType=Plain</code>
+      + <strong>不同的 packageName</strong></td>
+  <td>配两个 execution（第 17 章）</td>
+</tr>
+
+<tr>
+  <td><code>Could not resolve dependencies ...<br>Could not transfer artifact</code></td>
+  <td>网络问题，或者仓库里真没这个版本</td>
+  <td>先确认版本号拼对了；临时断网可以加 <code>-o</code> 用本地缓存</td>
+</tr>
+</table>
+</div>
+
+<h2 id="silent">最危险的一类：不报错，但行为不对</h2>
+
+<p>
+  上面所有报错至少还会<strong>告诉你出事了</strong>。
+  下面这些不会 —— 它们安静地做错事，你只能靠主动检查发现。
+</p>
+
+<div class="tw">
+<table>
+<tr><th>症状</th><th>真正的原因</th><th>章</th></tr>
+
+<tr>
+  <td><strong>&#10003;</strong> 慢请求日志里 requestId 是空的：<code>WARN [] 慢请求 GET /</code></td>
+  <td><code>RequestId</code> 装在了 <code>Timing</code> 前面。
+      <strong>Javalin 的 <code>after</code> 过滤器按注册顺序执行，不是倒序</strong>，
+      所以清理 MDC 的那个先跑了</td>
+  <td>17</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>Server-Timing</code> 里的 <code>db;dur</code> 恒等于 0</td>
+  <td>只注册了 <code>statement_inspector</code>。它只在 SQL 发出<strong>之前</strong>
+      被调用一次，没法知道执行了多久 —— 耗时要靠
+      <code>SessionEventListener</code></td>
+  <td>16</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> 生产环境的滚动日志文件和错误邮件<strong>从来没生效过</strong></td>
+  <td>Logback 默认只找 <code>logback.xml</code>。
+      做了一份 <code>logback-prod.xml</code> 但启动命令没加
+      <code>-Dlogback.configurationFile=</code></td>
+  <td>17</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>fake 30 60</code> 只造出 3 个用户</td>
+  <td>中文 locale 的 Faker 给出 <code>峻熙.梁丘</code> 这样的用户名和
+      <code>.@hotmail.com</code> 这样的邮箱，几条之后全部撞车</td>
+  <td>11</td>
+</tr>
+
+<tr>
+  <td>慢查询日志一条都没有，但页面确实很慢</td>
+  <td>写的是 <code>hibernate.session.events.log.LOG_QUERIES_SLOWER_THAN_MS</code>。
+      <strong>Hibernate 7 已经没有这个属性了</strong>，留着不报错，只是不生效</td>
+  <td>16</td>
+</tr>
+
+<tr>
+  <td>限流把所有用户一起挡了，第 6 个人就进不来</td>
+  <td>跑在反向代理后面，<code>ctx.ip()</code> 拿到的是代理的地址，
+      所有人共用一个桶</td>
+  <td>19</td>
+</tr>
+
+<tr>
+  <td>限流配额莫名其妙翻倍了</td>
+  <td>部署了两个实例。<strong>JVM 内的锁和原子操作只在一个进程内有效</strong></td>
+  <td>19</td>
+</tr>
+
+<tr>
+  <td>首页越来越慢，但每条 SQL 都很快</td>
+  <td>N+1。单条都快，架不住发了 21 条</td>
+  <td>11、16</td>
+</tr>
+
+<tr>
+  <td>复选框永远是选中的</td>
+  <td>写成了 <code>checked="false"</code>。
+      <strong>HTML 的布尔属性只看在不在，不看值</strong> ——
+      <code>checked="false"</code> 等于选中</td>
+  <td>4</td>
+</tr>
+
+<tr>
+  <td>用户列表里「关注时间」一片空白</td>
+  <td>页面模型里那个字段填成了 <code>null</code>。
+      渲染不报错，只是什么都不显示</td>
+  <td>12</td>
+</tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 从这张表里能总结出三条经验</div>
+  <ol>
+    <li>
+      <strong>「配了但不生效」比「配错了报错」危险得多。</strong>
+      上面有三条属于这一类（Hibernate 属性改名、logback 没指定、systemd 键放错段）。
+      凡是加了配置，都该<strong>验证它真的起作用了</strong> ——
+      看日志里有没有、用 <code>systemd-analyze verify</code>、
+      或者故意触发一次看看。
+    </li>
+    <li>
+      <strong>读报错要读完整句。</strong><code>Table "USERS" not found</code>
+      会让你去查迁移，而真正的线索在后半句
+      <code>(this database is empty)</code>。
+      <code>Illegal HTML attribute name</code> 的最后一句
+      <code>Smart attributes will do just that</code> 直接就是答案。
+    </li>
+    <li>
+      <strong><code>NoSuchMethodError</code> 永远先想依赖冲突。</strong>
+      它和 <code>ClassNotFoundException</code> 的区别是整个 Java 依赖体系里
+      最值得记住的一条：前者是版本不对，后者是压根没有。
+    </li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
