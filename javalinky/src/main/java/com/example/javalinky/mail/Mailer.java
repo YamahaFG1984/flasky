@@ -50,6 +50,10 @@ public class Mailer {
 
     /** 同步发送：会阻塞到 SMTP 服务器返回（几百毫秒到几秒） */
     public void sendNow(String to, String subject, String textBody, String htmlBody) {
+        if (!config.enabled()) {           // 测试环境：不真的连 SMTP
+            log.info("邮件已禁用，跳过：to={} subject={}", to, subject);
+            return;
+        }
         try {
             var message = new MimeMessage(session);
             message.setFrom(new InternetAddress(config.from()));

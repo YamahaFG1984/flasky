@@ -18,10 +18,25 @@
     <javalin.version>7.2.3</javalin.version>
     <logback.version>1.5.20</logback.version>
     <jte.version>3.2.4</jte.version>
+    <junit.version>5.14.0</junit.version>
+    <assertj.version>3.27.6</assertj.version>
     <hibernate-validator.version>9.0.1.Final</hibernate-validator.version>
     <hibernate.version>7.4.2.Final</hibernate.version>
     <flyway.version>11.14.0</flyway.version>
   </properties>
+
+  <!-- 用 BOM 统一管理 JUnit 各模块的版本 -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.junit</groupId>
+        <artifactId>junit-bom</artifactId>
+        <version>${junit.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
 
   <!-- 3. 依赖 -->
   <dependencies>
@@ -111,6 +126,26 @@
       <artifactId>postgresql</artifactId>
       <version>42.7.8</version>
     </dependency>
+
+    <!-- 测试依赖 -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <version>${assertj.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- Javalin 的测试工具：JavalinTest -->
+    <dependency>
+      <groupId>io.javalin</groupId>
+      <artifactId>javalin-testtools</artifactId>
+      <version>${javalin.version}</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <!-- 4. 插件：告诉 Maven 用什么工具干活 -->
@@ -135,6 +170,43 @@
           <!-- exec:java 用得到（第 1、2 章还没引入 JTE，两个都能跑） -->
           <mainClass>com.example.javalinky.App</mainClass>
         </configuration>
+      </plugin>
+
+      <!-- 测试一律跑在 TEST 档位：内存库、不发邮件、随机端口 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+        <configuration>
+          <environmentVariables>
+            <APP_PROFILE>test</APP_PROFILE>
+          </environmentVariables>
+        </configuration>
+      </plugin>
+
+      <!-- 打一个自带全部依赖的可执行 jar：target/javalinky.jar -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <finalName>javalinky</finalName>
+              <transformers>
+                <!-- 写入 Main-Class，这样 java -jar 才知道从哪开始 -->
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>com.example.javalinky.App</mainClass>
+                </transformer>
+                <!-- 合并多个 jar 里同名的 service 描述文件，少了它 Hibernate 会启动失败 -->
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>

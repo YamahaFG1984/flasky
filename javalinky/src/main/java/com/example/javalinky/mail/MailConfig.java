@@ -9,6 +9,16 @@ public record MailConfig(
     String from,           // 如 "Javalinky <no-reply@javalinky.example>"
     String subjectPrefix   // 如 "[Javalinky] "
 ) {
+    /** 测试用：host 留空，Mailer 会直接跳过发送（第 7 章） */
+    public static MailConfig disabled() {
+        return new MailConfig("", 0, false, null, null,
+            "Javalinky <no-reply@javalinky.example>", "[Javalinky] ");
+    }
+
+    public boolean enabled() {
+        return host != null && !host.isBlank();
+    }
+
     /** 开发默认值：对准本地 Mailpit */
     public static MailConfig fromEnv() {
         var env = System.getenv();
