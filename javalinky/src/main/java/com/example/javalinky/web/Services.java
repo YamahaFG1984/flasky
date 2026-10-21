@@ -20,11 +20,15 @@ import io.javalin.http.Context;
 public record Services(
     AppConfig config,
     MailService mail,
-    AuthService auth
+    AuthService auth,
+    RateLimiter loginLimiter      // 第 19 章：应用级单例，所有请求线程共用
 ) {
 
     public static Services wire(AppConfig cfg, MailService mail) {
-        return new Services(cfg, mail, new AuthService(cfg, mail));
+        var loginLimiter = new RateLimiter(
+            cfg.loginAttempts(),
+            (double) cfg.loginAttempts() / cfg.loginWindowSeconds());
+        return new Services(cfg, mail, new AuthService(cfg, mail), loginLimiter);
     }
 
     // ---- 请求级别的仓储（每次调用都用当前请求的 EntityManager）----

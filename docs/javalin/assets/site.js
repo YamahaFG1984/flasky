@@ -22,7 +22,9 @@
     { n: 15, t: '测试',              d: 'JUnit 5、JavalinTest、JaCoCo 与 Playwright', part: '第三部分 · 最后一公里' },
     { n: 16, t: '性能',              d: '慢查询日志、Server-Timing 与 JFR 剖析' },
     { n: 17, t: '部署',              d: '可执行 JAR、PaaS、Docker 与传统服务器' },
-    { n: 18, t: '更多资源',          d: 'IDE、生态、社区与继续深入的路线' }
+    { n: 18, t: '更多资源',          d: 'IDE、生态、社区与继续深入的路线' },
+
+    { n: 19, t: '并发与线程安全',     d: '竞态、可见性、原子操作、限流与虚拟线程', part: '第四部分 · 进阶专题' }
   ];
 
   var cur = parseInt(document.body.dataset.chapter || '0', 10);

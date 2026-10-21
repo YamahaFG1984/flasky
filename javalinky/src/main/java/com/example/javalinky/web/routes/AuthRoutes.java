@@ -78,6 +78,17 @@ public class AuthRoutes implements RouteModule {
             return;
         }
 
+        // 第 19 章：按来源 IP 限流，挡住在线撞库。
+        // 放在校验之后、查库之前 —— 格式都不对的请求不值得占一个令牌，
+        // 但也绝不能等查完库才限流，那样每次尝试都付出一次 bcrypt 的代价。
+        String limitKey = ctx.ip();
+        if (!services.loginLimiter().tryAcquire(limitKey)) {
+            ctx.status(429);
+            Flash.danger(ctx, "登录尝试过于频繁，请稍后再试。");
+            renderLoginWithErrors(ctx, form, Map.of());
+            return;
+        }
+
         var users = services.users(ctx);
         User user = users.findByEmail(form.email().toLowerCase()).orElse(null);
 
@@ -87,6 +98,9 @@ public class AuthRoutes implements RouteModule {
             renderLoginWithErrors(ctx, form, Map.of());
             return;
         }
+
+        // 登录成功，把这个 IP 的失败记录清掉
+        services.loginLimiter().reset(limitKey);
 
         CurrentUser.login(ctx, user);
         Flash.success(ctx, "欢迎回来，" + user.getUsername() + "！");

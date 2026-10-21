@@ -27,6 +27,7 @@ public final class TestFixtures {
             "admin@example.com",
             20, 50, 30,
             Long.MAX_VALUE,
+            1000, 60,                           // 限流：测试里放得很宽
             false, false, true);
     }
 

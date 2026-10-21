@@ -29,6 +29,10 @@ public record AppConfig(
     // 性能（第 16 章）
     long slowQueryMillis,
 
+    // 限流（第 19 章）：每个 IP 在 loginWindowSeconds 内最多尝试登录多少次
+    int loginAttempts,
+    int loginWindowSeconds,
+
     // 开发辅助
     boolean devLogging,
     boolean routeOverview,
@@ -60,6 +64,7 @@ public record AppConfig(
             env.get("ADMIN_EMAIL", "admin@example.com"),
             20, 50, 30,
             500,
+            env.getInt("LOGIN_ATTEMPTS", 10), env.getInt("LOGIN_WINDOW_SECONDS", 300),
             true, true, true
         );
     }
@@ -82,6 +87,7 @@ public record AppConfig(
             "admin@example.com",
             20, 50, 30,
             Long.MAX_VALUE,          // 测试里不报慢查询
+            1000, 60,                // 限流在测试里形同虚设，免得干扰别的用例
             false, false, true
         );
     }
@@ -104,6 +110,7 @@ public record AppConfig(
             env.getInt("FOLLOWERS_PER_PAGE", 50),
             env.getInt("COMMENTS_PER_PAGE", 30),
             env.getInt("SLOW_QUERY_MILLIS", 500),
+            env.getInt("LOGIN_ATTEMPTS", 5), env.getInt("LOGIN_WINDOW_SECONDS", 300),
             false, false, false                // 生产环境关掉所有开发辅助
         );
     }

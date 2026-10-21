@@ -1,0 +1,1036 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 19 章 · 并发与线程安全 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="19">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 19 章</span>
+<h1>并发与线程安全</h1>
+<p class="lede">
+  这一章讲 Python 程序员转 Java 时最容易摔跤、而且摔得最疼的地方。
+  前十八章你其实一直在写并发代码 —— Javalin 从第 2 章起就在用线程池同时处理多个请求 ——
+  只是因为我们的代码碰巧没有共享可变状态，所以一直相安无事。
+  这一章把那层窗户纸捅破：<strong>什么时候会出事、出事长什么样、怎么写才对、
+  以及怎么写一个真的能抓住它的测试</strong>。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 Flask 和 Javalin 在并发模型上的根本差别，以及这个差别意味着什么</li>
+    <li>说得出「线程安全」到底在说什么：竞态、可见性、原子性是三件不同的事</li>
+    <li>知道这个应用里哪些对象是共享的、哪些是每请求一份的，以及为什么</li>
+    <li>会用 <code>ConcurrentHashMap</code> 的原子方法写出正确的「检查并更新」</li>
+    <li>写一个真的能抓住竞态的测试 —— 并且知道为什么大部分并发测试抓不住</li>
+    <li>理解虚拟线程改变了什么、没改变什么，以及 pinning 是怎么回事</li>
+  </ul>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128230; 本章代码</div>
+  <p>
+    这一章结束时的完整项目在仓库的 <code>javalinky/</code> 目录里，对应标签 <code>jv-ch19</code>：
+  </p>
+<div class="code" data-lang="bash">
+<pre>
+git checkout jv-ch19
+cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7070
+</pre>
+</div>
+  <p>
+    本章给应用加了一个<strong>登录限流器</strong>：一个被所有请求线程共用的对象。
+    它不是为了讲并发硬造的例子 —— 没有它，任何人都能对你的登录接口不限次数地撞库。
+  </p>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="model">先说清楚：你一直在写并发代码</h2>
+
+<p>
+  回忆一下第 2 章启动应用时的那行日志：<code>Javalin started in 213ms</code>。
+  那一刻 Jetty 起了一个线程池。两个用户同时访问，
+  <strong>你的处理器方法会在两个线程里同时执行</strong>。
+  这不是「高并发场景」才有的事，是从第一行代码起就成立的事实。
+</p>
+
+<p>
+  Flask 下你很少需要想这件事，原因有三层，值得一条条拆开：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="Flask 与 Javalin 的并发模型对比">
+  <text class="ttl" x="20" y="20">Flask（典型部署：Gunicorn 多进程）</text>
+  <rect class="bx-d" x="20" y="30" width="340" height="130" rx="9"/>
+
+  <rect class="bx" x="38" y="44" width="150" height="46" rx="6"/>
+  <text class="sm" x="113" y="64" text-anchor="middle">进程 1</text>
+  <text class="mono sm" x="113" y="81" text-anchor="middle">独立内存空间</text>
+
+  <rect class="bx" x="196" y="44" width="150" height="46" rx="6"/>
+  <text class="sm" x="271" y="64" text-anchor="middle">进程 2</text>
+  <text class="mono sm" x="271" y="81" text-anchor="middle">独立内存空间</text>
+
+  <rect class="bx-g" x="38" y="100" width="308" height="46" rx="6"/>
+  <text class="sm on-g" x="192" y="120" text-anchor="middle">全局变量不共享 · GIL 挡住大部分数据竞争</text>
+  <text class="sm on-g" x="192" y="137" text-anchor="middle">共享状态只能靠 Redis / 数据库，于是你被迫想清楚</text>
+
+  <text class="ttl" x="400" y="20">Javalin（一个进程，多个线程）</text>
+  <rect class="bx-d" x="400" y="30" width="340" height="130" rx="9"/>
+
+  <rect class="bx" x="418" y="44" width="96" height="46" rx="6"/>
+  <text class="sm" x="466" y="70" text-anchor="middle">线程 1</text>
+  <rect class="bx" x="522" y="44" width="96" height="46" rx="6"/>
+  <text class="sm" x="570" y="70" text-anchor="middle">线程 2</text>
+  <rect class="bx" x="626" y="44" width="96" height="46" rx="6"/>
+  <text class="sm" x="674" y="70" text-anchor="middle">线程 3</text>
+
+  <rect class="bx-r" x="418" y="100" width="304" height="46" rx="6"/>
+  <text class="sm on-r" x="570" y="120" text-anchor="middle">同一个堆 · 任何 static 字段、任何单例</text>
+  <text class="sm on-r" x="570" y="137" text-anchor="middle">都在被这些线程<tspan class="on-r">同时</tspan>读写</text>
+
+  <rect class="bx-a" x="20" y="180" width="720" height="134" rx="10"/>
+  <text class="ttl on-a" x="40" y="202">所以真正变了的是「默认值」</text>
+  <text class="lbl" x="40" y="226">Flask：共享状态要<tspan class="on-a">特意去建</tspan>（连 Redis、写数据库），建的时候你自然会想并发。</text>
+  <text class="lbl" x="40" y="248">Javalin：共享状态<tspan class="on-a">随手就有</tspan>（一个 static 字段、一个传进构造器的对象），</text>
+  <text class="lbl" x="40" y="266">　　　　　而且<tspan class="on-a">编译器一个字都不会提醒你</tspan>。</text>
+  <text class="sm" x="40" y="292">换句话说：Java 把一件原本需要刻意为之的危险事，变成了顺手就能做到的事。</text>
+  <text class="sm on-a" x="40" y="308">好消息是性能，坏消息是你得自己记着哪些东西是共享的。</text>
+</svg>
+<figcaption>图 19-1　并发模型的差别，以及它为什么是个「默认值」问题</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 关于 GIL 的一句澄清</div>
+  <p>
+    “Python 有 GIL 所以线程安全”是一句<strong>似是而非</strong>的话。
+    GIL 保证的是<strong>单条字节码指令</strong>不被打断，
+    而 <code>counter += 1</code> 是三条指令（读、加、写），
+    所以多线程的 Flask（<code>gunicorn --threads 4</code>）照样会丢更新。
+  </p>
+  <p>
+    Python 程序员较少遇到这类 bug，真正的原因是<strong>默认部署是多进程的</strong>：
+    进程之间没有共享内存，想共享只能走 Redis 或数据库，
+    而那一步会强迫你正面思考并发。Java 把这一步省了。
+  </p>
+</div>
+
+<h2 id="three">三个不同的问题，别混成一个</h2>
+
+<p>
+  “线程安全”这个词底下至少压着三件事。它们的症状和解法都不一样，
+  混在一起谈是大多数困惑的来源：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>问题</th><th>一句话</th><th>典型症状</th><th>解法</th></tr>
+<tr>
+  <td><strong>竞态条件</strong><br><span class="sm">race condition</span></td>
+  <td>「检查」和「行动」之间插进了别人</td>
+  <td>限流放行了 58 次而不是 50 次；两个人注册了同一个用户名</td>
+  <td>把检查和行动合成一个原子操作</td>
+</tr>
+<tr>
+  <td><strong>可见性</strong><br><span class="sm">visibility</span></td>
+  <td>A 线程写了，B 线程<strong>永远</strong>看不到</td>
+  <td>改了配置开关，某些线程就是不生效；循环退不出来</td>
+  <td><code>volatile</code>、<code>final</code>、或任何同步手段</td>
+</tr>
+<tr>
+  <td><strong>原子性</strong><br><span class="sm">atomicity</span></td>
+  <td>一个「看起来是一步」的操作其实是好几步</td>
+  <td><code>count++</code> 丢更新；对象被看到「改了一半」的中间状态</td>
+  <td><code>Atomic*</code> 类、不可变对象、锁</td>
+</tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 可见性是最反直觉的那个</div>
+  <p>
+    竞态和原子性好歹符合直觉 —— 「两个人同时改，当然会乱」。
+    可见性不是：它说的是<strong>就算只有一个人写，另一个人也可能永远读不到</strong>。
+  </p>
+<div class="code" data-lang="java">
+<pre>
+class Worker {
+    private boolean running = true;         // 注意：没有 volatile
+
+    void stop()  { running = false; }       // 由别的线程调用
+
+    void loop() {
+        while (running) { /* 干活 */ }      // 这个循环可能<strong>永远不退出</strong>
+    }
+}
+</pre>
+</div>
+  <p>
+    原因不是「还没来得及同步」，而是 JIT 编译器看到 <code>loop()</code> 里
+    没人改 <code>running</code>，<strong>合法地</strong>把它提到循环外面只读一次，
+    变成了 <code>if (running) while (true) {...}</code>。
+    这是 Java 内存模型允许的优化 —— 没有同步手段，就没有任何跨线程可见性的承诺。
+  </p>
+  <p>
+    加一个 <code>volatile</code> 就对了。它的含义不是「原子」（<code>volatile int i; i++</code>
+    照样丢更新），而是<strong>「每次都去主内存读写，别缓存，别重排」</strong>。
+  </p>
+</div>
+
+<h2 id="audit">给自己的应用做一次盘点</h2>
+
+<p>
+  理论说完，看实际的。把 <code>JavalinkyApp.create()</code> 里造出来的东西列一遍，
+  <strong>每一个都问一句：它是所有请求共用的，还是每个请求一份的？</strong>
+</p>
+
+<div class="tw">
+<table>
+<tr><th>对象</th><th>生命周期</th><th>为什么安全</th></tr>
+<tr><td><code>AppConfig</code></td><td>应用级，共享</td>
+    <td><strong>不可变</strong>（record，字段全是 final）。启动后没人改，天然安全</td></tr>
+<tr><td><code>TemplateEngine</code></td><td>应用级，共享</td>
+    <td>JTE 明确保证线程安全；内部的模板类缓存自己做了同步</td></tr>
+<tr><td><code>EntityManagerFactory</code></td><td>应用级，共享</td>
+    <td>JPA 规范要求它线程安全（<strong>它造出来的 <code>EntityManager</code> 则完全不是</strong>）</td></tr>
+<tr><td><code>Mailer</code> 的线程池</td><td>应用级，共享</td>
+    <td><code>ExecutorService</code> 的实现本身是线程安全的</td></tr>
+<tr><td><code>Services</code></td><td>应用级，共享</td>
+    <td>record，只持有上面这些；仓储是<strong>方法里现造</strong>的，不是字段</td></tr>
+<tr><td><code>EntityManager</code></td><td><strong>每请求一个</strong></td>
+    <td>放在 <code>ctx</code> 属性里（第 5 章的 <code>UnitOfWork</code>）</td></tr>
+<tr><td><code>QueryStats.Counter</code></td><td><strong>每线程一个</strong></td>
+    <td><code>ThreadLocal</code>（第 16 章）</td></tr>
+<tr><td><code>RateLimiter</code></td><td>应用级，共享<strong>且可变</strong></td>
+    <td>&#9888; 本章要讨论的就是它</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 第 7 章那个「不用 Spring」的决定，在这里兑现了</div>
+  <p>
+    回头看 <code>Services</code> 里这一行：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+public UserRepository users(Context ctx) { return new UserRepository(Db.em(ctx)); }
+</pre>
+</div>
+  <p>
+    当时的说法是「仓储依赖当前请求的 <code>EntityManager</code>，不能提前造好」。
+    现在可以说得更准确：<strong>如果把它写成字段，整个应用就共用一个
+    <code>EntityManager</code> 了 —— 而 <code>EntityManager</code> 不是线程安全的。</strong>
+  </p>
+  <p>
+    症状会非常难查：一级缓存被几个请求混着用，A 请求查出来的实体在 B 请求里被改了，
+    偶尔抛 <code>ConcurrentModificationException</code>，偶尔只是数据串了。
+    低流量下几乎不复现，一上线就开始。
+  </p>
+  <p>
+    用 Spring 的话这件事由 <code>@Scope("request")</code> 之类的东西替你处理，
+    代价是<strong>作用域变成了一个你看不见的配置</strong>。
+    手写装配的好处就是：对象的生命周期在代码里一目了然。
+  </p>
+</div>
+
+<h2 id="limiter">写一个真的会被并发打到的东西：登录限流</h2>
+
+<p>
+  到现在为止我们的共享状态都是只读的，所以一直没出事。
+  但有一个功能绕不开可变的共享状态：<strong>限流</strong>。
+</p>
+
+<p>
+  为什么需要它：第 8 章用 bcrypt 存密码，cost 12，验证一次大约 200 毫秒。
+  这挡得住离线爆破，但挡不住<strong>在线撞库</strong> ——
+  拿一份泄露的「邮箱+常用密码」清单，对着你的 <code>/auth/login</code> 一个个试。
+  更糟的是每次尝试都要烧掉你 200 毫秒 CPU，攻击者几乎零成本，
+  <strong>这同时还是一个放大型的 DoS</strong>。
+</p>
+
+<h3>算法：令牌桶</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="令牌桶算法示意">
+  <text class="ttl" x="20" y="20">令牌桶：容量 5，每 60 秒补 1 个</text>
+
+  <rect class="bx-d" x="20" y="32" width="720" height="92" rx="9"/>
+  <text class="sm" x="40" y="56">桶里有令牌 → 放行并拿走一个；桶空了 → 拒绝（HTTP 429）</text>
+
+  <rect class="bx-g" x="40" y="68" width="30" height="30" rx="4"/>
+  <rect class="bx-g" x="76" y="68" width="30" height="30" rx="4"/>
+  <rect class="bx-g" x="112" y="68" width="30" height="30" rx="4"/>
+  <rect class="bx" x="148" y="68" width="30" height="30" rx="4"/>
+  <rect class="bx" x="184" y="68" width="30" height="30" rx="4"/>
+  <text class="sm" x="230" y="88">还剩 3 个 —— 正常用户输错两次密码完全不受影响</text>
+
+  <rect class="bx-a" x="20" y="136" width="350" height="88" rx="9"/>
+  <text class="ttl on-a" x="40" y="158">为什么不用「每分钟计数」</text>
+  <text class="sm" x="40" y="180">固定窗口在边界上会放两倍：59 秒打满一轮，</text>
+  <text class="sm" x="40" y="197">61 秒再打满一轮 —— 2 秒内通过了 2 倍配额。</text>
+  <text class="sm on-a" x="40" y="215">令牌桶没有「边界」，所以没有这个问题。</text>
+
+  <rect class="bx-g" x="390" y="136" width="350" height="88" rx="9"/>
+  <text class="ttl on-g" x="410" y="158">容量 = 允许的突发量</text>
+  <text class="sm" x="410" y="180">容量 5 意味着：一个忘了密码的人可以连试 5 次，</text>
+  <text class="sm" x="410" y="197">之后每 60 秒才能再试一次。</text>
+  <text class="sm on-g" x="410" y="215">对真人几乎无感，对脚本是致命的。</text>
+</svg>
+<figcaption>图 19-2　令牌桶：用「补充速度 + 容量」同时表达长期速率和瞬时突发</figcaption>
+</figure>
+
+<h3>先看错误的写法</h3>
+
+<p>
+  下面这段，九成的人第一次都会这么写 —— 而且它<strong>看起来已经很小心了</strong>：
+  用的是 <code>ConcurrentHashMap</code>，不是普通的 <code>HashMap</code>。
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+// ❌ 有竞态
+private final ConcurrentHashMap&lt;String, Double&gt; buckets = new ConcurrentHashMap&lt;&gt;();
+
+public boolean tryAcquire(String key) {
+    double tokens = buckets.getOrDefault(key, (double) capacity);   // ① 读
+    if (tokens &gt;= 1.0) {                                            // ② 判断
+        buckets.put(key, tokens - 1.0);                             // ③ 写
+        return true;
+    }
+    return false;
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>ConcurrentHashMap</code> 保证的是单个操作，不是你的那一串</div>
+  <p>
+    <code>get</code> 是原子的，<code>put</code> 也是原子的，
+    但 <strong>①②③ 合起来不是</strong>。两个线程完全可能都在 ① 读到
+    <code>tokens = 1.0</code>，都通过 ②，然后都在 ③ 写回 <code>0.0</code> ——
+    一个令牌被用了两次。
+  </p>
+  <p>
+    这类 bug 有个通称叫 <strong>check-then-act</strong>（检查后行动）。
+    它的家族很大，长得都不一样但本质是同一个：
+  </p>
+  <div class="tw">
+  <table>
+  <tr><th>你写的</th><th>隐含的竞态</th></tr>
+  <tr><td><code>if (!map.containsKey(k)) map.put(k, v);</code></td><td>两个线程都没查到，都插入</td></tr>
+  <tr><td><code>if (!users.emailExists(e)) users.save(...)</code></td><td>第 8 章就提过 —— 靠数据库唯一索引兜底</td></tr>
+  <tr><td><code>if (file.exists()) file.delete();</code></td><td>中间文件被别人删了</td></tr>
+  <tr><td><code>if (x == null) x = create();</code></td><td>造了两个对象（经典的双重检查锁问题）</td></tr>
+  </table>
+  </div>
+  <p>
+    <strong>识别方法：代码里出现「先问一句，再根据答案行动」，而问和行动之间
+    状态可能被别人改掉，那就是一个竞态。</strong>
+  </p>
+</div>
+
+<h3>正确的写法：让「检查并更新」成为一个操作</h3>
+
+<p>
+  <code>ConcurrentHashMap</code> 早就想到了这件事，给了一组
+  <strong>原子的复合操作</strong>：<code>compute</code>、<code>computeIfAbsent</code>、
+  <code>merge</code>、<code>putIfAbsent</code>、<code>replace</code>。
+  它们会在这个 key 所在的桶上持锁，把你的「读—判断—写」整个包进去。
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/RateLimiter.java">
+<pre>
+package com.example.javalinky.web;
+
+import java.util.Iterator;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
+
+public final class RateLimiter {
+
+    /** 桶的状态。做成不可变记录，这样 compute() 里只能整体替换，不会改了一半 */
+    private record Bucket(double tokens, long updatedAt) {}
+
+    private final int capacity;           // 桶最多装多少个令牌 = 允许的突发量
+    private final double tokensPerNano;   // 补充速度
+    private final long idleNanos;         // 多久没动过的桶可以回收
+    private final LongSupplier clock;     // 默认 System.nanoTime，测试里换成假时钟
+
+    private final ConcurrentHashMap&lt;String, Bucket&gt; buckets = new ConcurrentHashMap&lt;&gt;();
+    private final AtomicLong callsSincePrune = new AtomicLong();
+
+    private static final long PRUNE_EVERY = 1000;
+
+    public RateLimiter(int capacity, double perSecond) {
+        this(capacity, perSecond, System::nanoTime);
+    }
+
+    /** 时钟可注入：测试里换成假时钟，就不用 sleep 了 */
+    public RateLimiter(int capacity, double perSecond, LongSupplier clock) {
+        if (capacity &lt; 1) throw new IllegalArgumentException("capacity 至少是 1");
+        if (perSecond &lt;= 0) throw new IllegalArgumentException("perSecond 必须大于 0");
+        this.capacity = capacity;
+        this.tokensPerNano = perSecond / 1_000_000_000.0;
+        this.idleNanos = (long) (capacity / tokensPerNano) * 2;
+        this.clock = clock;
+    }
+
+    public boolean tryAcquire(String key) {
+        long now = clock.getAsLong();
+
+        boolean[] granted = new boolean[1];
+        buckets.compute(key, (k, bucket) -&gt; {
+            double tokens = bucket == null
+                ? capacity
+                : refill(bucket.tokens(), now - bucket.updatedAt());
+
+            if (tokens &gt;= 1.0) {
+                granted[0] = true;
+                return new Bucket(tokens - 1.0, now);
+            }
+            return new Bucket(tokens, now);
+        });
+
+        if (callsSincePrune.incrementAndGet() % PRUNE_EVERY == 0) prune(now);
+        return granted[0];
+    }
+
+    /** 登录成功之后把这个 key 的记录清掉，别让之前的失败次数拖累正常用户 */
+    public void reset(String key) {
+        buckets.remove(key);
+    }
+
+    private double refill(double tokens, long elapsedNanos) {
+        if (elapsedNanos &lt;= 0) return tokens;
+        return Math.min(capacity, tokens + elapsedNanos * tokensPerNano);
+    }
+
+    /** 清掉长时间没动过的桶 —— 不清的话这个 map 本身就是一个 DoS 入口 */
+    private void prune(long now) {
+        for (Iterator&lt;Map.Entry&lt;String, Bucket&gt;&gt; it = buckets.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry&lt;String, Bucket&gt; e = it.next();
+            if (now - e.getValue().updatedAt() &gt; idleNanos) it.remove();
+        }
+    }
+}
+</pre>
+</div>
+
+<p>这段代码里有四个决定值得单独说。</p>
+
+<div class="box key">
+  <div class="t">&#9728; ① 为什么 <code>boolean[] granted</code> 这个数组能用</div>
+  <p>
+    在 lambda 里写一个单元素数组，看着像个 hack —— Java 不允许 lambda 改外部局部变量，
+    所以用数组绕过去。但这里<strong>不只是能用，而且是安全的</strong>，
+    原因藏在 <code>compute</code> 的契约里：
+  </p>
+  <p>
+    <strong><code>ConcurrentHashMap.compute</code> 的映射函数「最多执行一次」。</strong>
+    它在桶上持锁，不存在重试。所以在里面写副作用是对的。
+  </p>
+  <p>
+    对照一下，换成看起来等价的 <code>AtomicReference</code> 就<strong>错了</strong>：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+// ❌ updateAndGet 在 CAS 失败时会<strong>重跑</strong>这个函数，granted 会被多加
+ref.updateAndGet(b -&gt; { granted[0] = true; return ... ; });
+</pre>
+</div>
+  <p>
+    <code>Atomic*</code> 的 <code>updateAndGet</code> / <code>accumulateAndGet</code>
+    文档明确要求函数<strong>无副作用</strong>，因为竞争时会重算。
+    这是两个 API 一个很容易踩错的区别。
+  </p>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; ② 为什么 <code>Bucket</code> 是个 record</div>
+  <p>
+    如果 <code>Bucket</code> 是个有 setter 的普通类，<code>compute</code> 里就会变成
+    「拿到对象，改它两个字段」。问题是 <code>remaining()</code> 这种<strong>不走
+    <code>compute</code> 的读取方</strong>可能正好看到「tokens 改了但 updatedAt 还没改」
+    的半截状态。
+  </p>
+  <p>
+    做成不可变记录之后，状态变更只能是「整体换一个新的」。
+    读到的要么是旧的完整状态，要么是新的完整状态，<strong>不存在中间态</strong>。
+    这是并发编程里最省力的一招：<strong>能用不可变对象就别用锁</strong>。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; ③ 那个 <code>prune()</code> 不是洁癖，是在堵一个洞</div>
+  <p>
+    map 的 key 是 <strong>IP 地址</strong> —— 也就是<strong>攻击者可以控制的东西</strong>。
+    不清理的话，每来一个新 IP 就多一条记录，永不释放。
+    IPv6 下伪造来源地址几乎不要成本，几百万条记录就能把你的堆撑爆。
+  </p>
+  <p>
+    <strong>「用外部输入当 key 的缓存」必须有上界或过期策略</strong>，
+    否则限流器本身就成了最好用的那个攻击面。这一条适用于一切
+    <code>Map</code> 形态的缓存，不限于限流。
+  </p>
+  <p>
+    这里用的是最省事的办法：每 1000 次调用顺手扫一遍。
+    生产环境更推荐 <strong>Caffeine</strong> 的 <code>expireAfterAccess</code> +
+    <code>maximumSize</code>，它用的是 W-TinyLFU，不需要你自己管。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; ④ 时钟为什么要能注入</div>
+  <p>
+    <code>LongSupplier clock</code> 这个参数只有测试会用到。
+    没有它的话，「过 60 秒令牌补回来了吗」这种测试只能靠
+    <code>Thread.sleep(60_000)</code> —— 一个测试跑一分钟，而且在 CI 上还不稳。
+  </p>
+  <p>
+    <strong>凡是依赖「现在几点」的逻辑，都把时钟做成参数。</strong>
+    标准库里的 <code>java.time.Clock</code> 就是为这个存在的
+    （<code>Clock.fixed()</code>、<code>Clock.offset()</code>）；
+    这里因为只需要一个单调纳秒数，用 <code>LongSupplier</code> 更轻。
+  </p>
+</div>
+
+<h3>接到登录流程上</h3>
+
+<div class="code" data-lang="java" data-file="web/Services.java">
+<pre>
+public record Services(
+    AppConfig config,
+    MailService mail,
+    AuthService auth,
+    RateLimiter loginLimiter      // 应用级单例，所有请求线程共用
+) {
+    public static Services wire(AppConfig cfg, MailService mail) {
+        var loginLimiter = new RateLimiter(
+            cfg.loginAttempts(),
+            (double) cfg.loginAttempts() / cfg.loginWindowSeconds());
+        return new Services(cfg, mail, new AuthService(cfg, mail), loginLimiter);
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java">
+<pre>
+private void login(Context ctx) {
+    var form = new LoginForm(/* ... */);
+
+    var errors = Forms.validate(form);
+    if (!errors.isEmpty()) {
+        renderLoginWithErrors(ctx, form, errors);
+        return;
+    }
+
+    // 按来源 IP 限流，挡住在线撞库。
+    // 放在校验之后、查库之前 —— 格式都不对的请求不值得占一个令牌，
+    // 但也绝不能等查完库才限流，那样每次尝试都付出一次 bcrypt 的代价。
+    String limitKey = ctx.ip();
+    if (!services.loginLimiter().tryAcquire(limitKey)) {
+        ctx.status(429);
+        Flash.danger(ctx, "登录尝试过于频繁，请稍后再试。");
+        renderLoginWithErrors(ctx, form, Map.of());
+        return;
+    }
+
+    var users = services.users(ctx);
+    User user = users.findByEmail(form.email().toLowerCase()).orElse(null);
+
+    if (user == null || !user.checkPassword(form.password())) {
+        Flash.danger(ctx, "邮箱或密码错误。");
+        renderLoginWithErrors(ctx, form, Map.of());
+        return;
+    }
+
+    // 登录成功，把这个 IP 的失败记录清掉
+    services.loginLimiter().reset(limitKey);
+
+    CurrentUser.login(ctx, user);
+    /* ... */
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 用 <code>ctx.ip()</code> 当 key 有两个坑</div>
+  <p>
+    <strong>一、在反向代理后面，<code>ctx.ip()</code> 是代理的地址。</strong>
+    那样所有用户共用一个桶，第 6 个人就被挡在门外了。
+    第 17 章加的 <code>cfg.behindProxy()</code> 开关就是为这个：
+    开启时要让 Jetty 信任 <code>X-Forwarded-For</code>。
+    <strong>而且这个开关必须是显式配置</strong> —— 如果在没有代理时也信任这个头，
+    攻击者自己伪造一个就能绕过限流。
+  </p>
+  <p>
+    <strong>二、IP 不等于人。</strong>一栋楼、一个学校出口 NAT 共用一个 IP；
+    反过来一个攻击者可以有很多 IP。所以 IP 限流是<strong>提高成本</strong>，不是
+    <strong>杜绝</strong>。更完整的方案是多个维度叠加：IP 一个桶、
+    被攻击的账号一个桶，再加上「失败 N 次后要求验证码」。
+  </p>
+</div>
+
+<h2 id="test">怎么写一个真的能抓住竞态的测试</h2>
+
+<p>
+  这是本章最值得带走的一节。并发 bug 的可怕之处不在于难修，
+  <strong>而在于你的测试大概率根本没在测并发</strong>。
+</p>
+
+<h3>第一步：让线程真的「同时」开始</h3>
+
+<p>
+  循环里 <code>start()</code> 500 个线程是不够的 ——
+  第一个线程可能在第 500 个还没创建出来时就跑完了。
+  要用 <code>CountDownLatch</code> 把它们卡在同一条起跑线上：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+var ready = new CountDownLatch(threads);   // 所有线程都起来了吗
+var start = new CountDownLatch(1);         // 发令枪
+var done  = new CountDownLatch(threads);   // 都跑完了吗
+
+for (int i = 0; i &lt; threads; i++) {
+    new Thread(() -&gt; {
+        ready.countDown();                 // 报到
+        try {
+            start.await();                 // ← 所有线程堵在这一行
+            if (limiter.tryAcquire("同一个IP")) granted.incrementAndGet();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            done.countDown();
+        }
+    }).start();
+}
+
+ready.await(30, TimeUnit.SECONDS);         // 等所有线程就位
+start.countDown();                         // 砰 —— 一起放出去
+done.await(30, TimeUnit.SECONDS);
+</pre>
+</div>
+
+<h3>第二步：确认这个测试真的有检测力</h3>
+
+<p>
+  写完之后别急着满意。<strong>把正确的实现换成错误的那版，跑一遍，
+  看测试会不会红</strong>。不会红的话，这个测试就是个摆设。
+</p>
+
+<p>
+  本章就实测了一次，结果出乎意料 —— 所以这段值得原样记下来。
+  测试机是一台 <strong>2 核</strong>的 Linux 机器，用上面那个错误实现，
+  每种配置跑 20~50 轮，统计「放行次数 ≠ 容量」的比例：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>线程类型</th><th>线程数</th><th>抓到竞态的轮次</th><th>最高放行（容量 50）</th></tr>
+<tr><td>虚拟线程</td><td>200</td><td><strong>0 / 20　(0%)</strong></td><td>—</td></tr>
+<tr><td>平台线程</td><td>200</td><td>9 / 50　(18%)</td><td>52</td></tr>
+<tr><td>平台线程</td><td>500</td><td><strong>42 / 50　(84%)</strong></td><td>58</td></tr>
+<tr><td colspan="4" class="sm">正确实现在以上所有配置下都是 0 次超发（50 轮 × 4 组，无一例外）</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 用虚拟线程写的并发测试，可能一个 bug 都抓不到</div>
+  <p>
+    这个结果第一眼很反直觉 —— 虚拟线程不是更轻、更容易起几千个吗？
+    问题恰恰在这里：<strong>虚拟线程要挂在载体线程上才能跑，
+    而载体线程池默认只有 CPU 核数那么大。</strong>
+  </p>
+  <p>
+    在 2 核机器上，再多的虚拟线程也只有 2 个在真正并行。
+    而我们那段临界区是纯内存操作，几十纳秒就结束了 ——
+    两个线程要正好在这几十纳秒里交错，概率低到 20 轮都碰不上一次。
+  </p>
+  <p>
+    平台线程就不一样：它们由操作系统调度，会被<strong>随时抢占</strong>，
+    包括在 ① 和 ③ 中间。所以 500 个平台线程能把发现率推到 84%。
+  </p>
+  <p>
+    <strong>结论：测竞态要用平台线程，并且线程数要显著超过核数。</strong>
+    这和「生产环境用虚拟线程」不矛盾 —— 生产要的是吞吐，测试要的是搅动。
+  </p>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 更让人不安的推论</div>
+  <p>
+    84% 已经是把参数调到最好的结果。<strong>也就是说，就算你认真写了并发测试，
+    单跑一轮仍有 16% 的概率漏掉一个真实存在的 bug。</strong>
+  </p>
+  <p>
+    所以最终的测试里套了一层 <code>for (int round = 1; round &lt;= 3; round++)</code>：
+    3 轮全部漏掉的概率是 0.16³ ≈ 0.4%。整个测试仍然只要 0.6 秒。
+  </p>
+  <p>
+    这也解释了为什么并发 bug 能活着上线 ——
+    <strong>它在开发机上「测过了」，只是那次没抓到。</strong>
+    真正可靠的办法是从一开始就用对的工具（原子操作、不可变对象），
+    把测试当成第二道防线而不是第一道。
+  </p>
+</div>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/RateLimiterTest.java">
+<pre>
+/**
+ * 两个参数是量出来的，不是拍的：
+ *   - 平台线程，不是虚拟线程。虚拟线程挤在少数几个载体线程上，
+ *     纳秒级的临界区根本碰不到一起 —— 2 核机器上跑 20 轮，一次都没抓住。
+ *   - 500 个，不是 200 个。同一台机器上 200 个的发现率是 18%，500 个是 84%。
+ *     再叠加 3 轮，漏网概率降到约 0.4%。
+ */
+@Test
+void 五百个线程同时抢五十个令牌只能放行五十次() throws Exception {
+    for (int round = 1; round &lt;= 3; round++) {
+        int threads = 500;
+        int capacity = 50;
+        var clock = new FakeClock();                   // 时间不走，排除补充的干扰
+        var limiter = new RateLimiter(capacity, 1.0, clock::now);
+
+        var ready = new CountDownLatch(threads);
+        var start = new CountDownLatch(1);
+        var done = new CountDownLatch(threads);
+        var granted = new AtomicInteger();
+
+        for (int i = 0; i &lt; threads; i++) {
+            new Thread(() -&gt; {
+                ready.countDown();
+                try {
+                    start.await();
+                    if (limiter.tryAcquire("同一个IP")) granted.incrementAndGet();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    done.countDown();
+                }
+            }).start();
+        }
+
+        assertThat(ready.await(30, TimeUnit.SECONDS)).as("线程没起齐").isTrue();
+        start.countDown();
+        assertThat(done.await(30, TimeUnit.SECONDS)).as("不该有线程卡住").isTrue();
+
+        assertThat(granted.get())
+            .as("第 %d 轮：多放行一次，就是多漏一次撞库尝试", round)
+            .isEqualTo(capacity);
+    }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 专业工具：jcstress</div>
+  <p>
+    如果你要写的是真正的并发基础设施（一个无锁队列、一个自定义锁），
+    手写 latch 测试是不够的 —— 你需要 OpenJDK 的
+    <strong>jcstress</strong>（Java Concurrency Stress Tests）。
+  </p>
+  <p>
+    它会穷举线程交错、插入内存屏障扰动、跑上百万次，
+    然后告诉你「这个结果组合出现了 37 次」——包括那些只在特定 CPU 架构上
+    才可能出现的重排。写应用代码用不上它，但知道它存在很重要。
+  </p>
+</div>
+
+<h2 id="vthreads">虚拟线程：改变了什么，没改变什么</h2>
+
+<p>
+  第 7 章有这么一行，当时一笔带过：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+javalin.concurrency.useVirtualThreads = true;
+</pre>
+</div>
+
+<p>现在把它说清楚。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="平台线程与虚拟线程的区别">
+  <text class="ttl" x="20" y="20">平台线程：一个请求占住一个操作系统线程</text>
+  <rect class="bx-d" x="20" y="30" width="720" height="98" rx="9"/>
+
+  <rect class="bx" x="40" y="44" width="200" height="32" rx="5"/>
+  <text class="mono sm" x="52" y="65">查数据库（等 180ms）</text>
+  <rect class="bx-r" x="244" y="44" width="300" height="32" rx="5"/>
+  <text class="sm on-r" x="256" y="65">这 180ms 里操作系统线程被占着，什么也没干</text>
+
+  <text class="sm" x="40" y="98">一个 OS 线程 ≈ 1MB 栈 + 内核调度开销 → 几千个就到头了</text>
+  <text class="sm on-r" x="40" y="116">于是「线程池大小」成了一个要反复调的魔法数字</text>
+
+  <text class="ttl on-g" x="20" y="156">虚拟线程：等待时把载体线程还回去</text>
+  <rect class="bx-g" x="20" y="166" width="720" height="98" rx="9"/>
+
+  <rect class="bx" x="40" y="180" width="200" height="32" rx="5"/>
+  <text class="mono sm" x="52" y="201">查数据库（等 180ms）</text>
+  <rect class="bx-g" x="244" y="180" width="300" height="32" rx="5"/>
+  <text class="sm on-g" x="256" y="201">卸载 → 载体线程去跑别的请求 → 结果回来再挂上</text>
+
+  <text class="sm" x="40" y="234">虚拟线程 ≈ 几百字节，由 JVM 调度 → 几百万个没问题</text>
+  <text class="sm on-g" x="40" y="252">写的还是最朴素的阻塞式代码，不需要 async/await 那一套</text>
+
+  <rect class="bx-a" x="20" y="276" width="720" height="18" rx="5"/>
+  <text class="sm on-a" x="380" y="289" text-anchor="middle">关键：它解决的是「线程不够用」，<tspan class="on-a">完全没有解决「共享状态要同步」</tspan></text>
+</svg>
+<figcaption>图 19-3　虚拟线程把「等待 I/O」从占用操作系统线程变成了几乎零成本</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 对 Python 程序员：这大致就是 async/await，但不用改代码</div>
+  <p>
+    Python 为了解决同一个问题引入了 <code>async def</code> / <code>await</code>，
+    代价是<strong>生态分裂</strong>：同步的库不能在异步代码里用，
+    于是有了 <code>requests</code> 和 <code>httpx</code>、
+    <code>psycopg2</code> 和 <code>asyncpg</code>、Flask 和 FastAPI。
+    这就是所谓的「函数颜色」问题。
+  </p>
+  <p>
+    虚拟线程把这件事做在了 JVM 层：<strong>阻塞的是虚拟线程，不是载体线程</strong>。
+    所以 JDBC、<code>InputStream</code>、<code>Thread.sleep()</code> 这些老代码
+    一行不改就享受到了收益 —— 没有颜色问题，也没有生态分裂。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 它<strong>没有</strong>解决的事情</div>
+  <ol>
+    <li>
+      <strong>共享可变状态仍然要同步。</strong>本章前面所有内容在虚拟线程下
+      一字不改地成立。虚拟线程让你更容易起几万个线程 ——
+      <strong>也就是让竞态更容易发生</strong>。
+    </li>
+    <li>
+      <strong>CPU 密集的活一点没变快。</strong>虚拟线程的收益全部来自「等待时让出载体」。
+      bcrypt 验证那 200 毫秒是实打实在算，让不出去。
+    </li>
+    <li>
+      <strong><code>ThreadLocal</code> 的代价变了。</strong>几万个虚拟线程 =
+      几万份 <code>ThreadLocal</code> 副本。我们的 <code>QueryStats</code> 只存一个小
+      <code>Counter</code>，没问题；但如果你往 <code>ThreadLocal</code> 里塞大对象
+      （比如一个连接、一个缓冲区），在虚拟线程下就是内存灾难。
+      JDK 20+ 的 <code>ScopedValue</code> 是为此准备的替代品。
+    </li>
+    <li>
+      <strong>连接池仍然是瓶颈。</strong>一万个虚拟线程同时要数据库连接，
+      而 HikariCP 只有 10 个 —— 它们就在那里排队。
+      虚拟线程把瓶颈<strong>从线程池挪到了连接池</strong>，并没有变没。
+    </li>
+  </ol>
+</div>
+
+<h3>pinning：唯一需要你操心的新问题</h3>
+
+<p>
+  虚拟线程在阻塞时「卸载」载体线程。但有两种情况它<strong>卸载不了</strong>，
+  只能死死占住载体 —— 这叫 <strong>pinning</strong>（钉住）：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+// ⚠️ JDK 21 下：在 synchronized 块里阻塞，会把载体线程钉住
+synchronized (lock) {
+    var result = jdbcTemplate.query(...);    // 阻塞 I/O，但让不出去
+}
+
+// ✅ 改用 ReentrantLock，它是虚拟线程友好的
+private final ReentrantLock lock = new ReentrantLock();
+
+lock.lock();
+try {
+    var result = jdbcTemplate.query(...);    // 阻塞时正常卸载
+} finally {
+    lock.unlock();
+}
+</pre>
+</div>
+
+<p>
+  另一种是本地方法（JNI）里的阻塞，那个没办法绕。
+  钉住的后果是：载体线程池（默认 = CPU 核数）被占光之后，
+  <strong>所有虚拟线程一起卡住</strong>，表现为应用突然整体没响应。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 怎么查 pinning，以及一个好消息</div>
+<div class="code" data-lang="bash">
+<pre>
+# 启动时加上，被钉住就打栈
+java -Djdk.tracePinnedThreads=full -jar target/javalinky.jar
+
+# 或者用第 16 章的 JFR：jdk.VirtualThreadPinned 事件
+jfr print --events jdk.VirtualThreadPinned recording.jfr
+</pre>
+</div>
+  <p>
+    好消息是 <strong>JDK 24 的 JEP 491 基本消灭了 <code>synchronized</code> 引起的
+    pinning</strong>。本教程用的是 JDK 21，所以这一条仍然要注意；
+    如果你跑在 24 及以上，只剩 JNI 那一种了。
+  </p>
+  <p>
+    不管哪个版本，<strong>新代码一律优先用 <code>ReentrantLock</code></strong>
+    总是没错的。
+  </p>
+</div>
+
+<h2 id="toolbox">工具箱：什么场景用什么</h2>
+
+<p>
+  最后给一张对照表。遇到共享状态时，<strong>从上往下找第一个够用的</strong> ——
+  越靠上的越省心。
+</p>
+
+<div class="tw">
+<table>
+<tr><th>优先级</th><th>手段</th><th>适用</th><th>我们在哪用了</th></tr>
+<tr>
+  <td>1</td>
+  <td><strong>不共享</strong><br><span class="sm">每请求一份</span></td>
+  <td>能不共享就不共享 —— 这是最彻底的解法</td>
+  <td><code>EntityManager</code>（<code>UnitOfWork</code>）</td>
+</tr>
+<tr>
+  <td>2</td>
+  <td><strong>不可变</strong><br><span class="sm">record / final</span></td>
+  <td>共享但从不修改。天然安全，不需要任何同步</td>
+  <td><code>AppConfig</code>、<code>Bucket</code>、各种 DTO</td>
+</tr>
+<tr>
+  <td>3</td>
+  <td><code>ThreadLocal</code></td>
+  <td>每线程一份的上下文。注意虚拟线程下别放大对象</td>
+  <td><code>QueryStats</code>、SLF4J 的 <code>MDC</code></td>
+</tr>
+<tr>
+  <td>4</td>
+  <td><strong>并发容器</strong><br><span class="sm">ConcurrentHashMap 等</span></td>
+  <td>共享的集合。<strong>复合操作一定要用它的原子方法</strong></td>
+  <td><code>RateLimiter</code></td>
+</tr>
+<tr>
+  <td>5</td>
+  <td><code>Atomic*</code></td>
+  <td>单个计数器 / 引用。<strong>函数式更新方法里不能有副作用</strong></td>
+  <td><code>RateLimiter.callsSincePrune</code></td>
+</tr>
+<tr>
+  <td>6</td>
+  <td><code>volatile</code></td>
+  <td>只要可见性、不要原子性的单个标志位</td>
+  <td>—</td>
+</tr>
+<tr>
+  <td>7</td>
+  <td><code>ReentrantLock</code></td>
+  <td>上面都不够用时。虚拟线程下优于 <code>synchronized</code></td>
+  <td>—</td>
+</tr>
+<tr>
+  <td>8</td>
+  <td><strong>数据库</strong><br><span class="sm">唯一索引 / 悲观锁</span></td>
+  <td><strong>跨进程</strong>的竞态 —— 多实例部署时 JVM 内的锁全部失效</td>
+  <td><code>ix_users_email</code>（第 8 章）</td>
+</tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 最后一行最容易被忘掉：多开一个实例，你的锁就没了</div>
+  <p>
+    本章讲的所有手段 —— 原子操作、<code>volatile</code>、<code>ReentrantLock</code> ——
+    <strong>作用范围都只到一个 JVM 为止</strong>。
+    第 17 章部署时只要你起了两个实例（或者一个容器扩到两副本），
+    这个 <code>RateLimiter</code> 就变成了<strong>两个独立的限流器，配额直接翻倍</strong>。
+  </p>
+  <p>
+    这不一定是问题（限流本来就是概率性的），但你必须<strong>知道</strong>它。
+    要跨实例一致，只能把状态放到进程之外：Redis 的
+    <code>INCR</code> + <code>EXPIRE</code>，或者数据库的行锁。
+  </p>
+  <p>
+    对「同一个邮箱只能注册一次」这种<strong>绝不能错</strong>的约束，
+    唯一可靠的答案从来都是<strong>数据库的唯一索引</strong> ——
+    第 8 章说的「数据库约束是最后防线」，现在应该更有体会了。
+  </p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书没有对应章节 —— 这是 Java 相比 Python 多出来的一课。</div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>
+      <strong>亲手制造一次竞态。</strong>把 <code>RateLimiter.tryAcquire</code>
+      换成本章「错误的写法」那一版，跑 <code>RateLimiterTest</code>。
+      没红的话多跑几次 —— 感受一下 84% 是什么体验。
+      然后把线程数从 500 改成 50，看发现率怎么掉下去。
+    </li>
+    <li>
+      <strong>验证虚拟线程抓不到。</strong>把那个测试里的
+      <code>new Thread(...)</code> 换成 <code>Thread.ofVirtual().start(...)</code>，
+      配合错误实现跑 20 次，数一数抓到几次。
+      再用 <code>Runtime.getRuntime().availableProcessors()</code> 看看你的核数，
+      对照正文那张表。
+    </li>
+    <li>
+      <strong>可见性的实验。</strong>照正文那个 <code>Worker</code> 写一个小程序：
+      一个线程空转 <code>while (running)</code>，主线程 1 秒后 <code>stop()</code>。
+      用 <code>java -XX:+UnlockDiagnosticVMOptions -XX:-TieredCompilation</code>
+      跑，看它会不会永远不退出。加上 <code>volatile</code> 再跑一次。
+    </li>
+    <li>
+      <code>RateLimiter</code> 现在只按 IP 限流。加一个<strong>按邮箱</strong>的桶：
+      同一个账号被从很多 IP 攻击时也要能挡住。想清楚两个桶的关系 ——
+      是「任一超限就拒绝」还是「都超限才拒绝」？
+    </li>
+    <li>
+      把 <code>prune()</code> 换成 <strong>Caffeine</strong>
+      （<code>Caffeine.newBuilder().expireAfterAccess(...).maximumSize(...)</code>）。
+      对比一下代码量，以及你因此少操心了什么。
+    </li>
+    <li>
+      给注册接口也加上限流。然后想一个问题：
+      <strong>限流应该在 CSRF 校验之前还是之后？</strong>
+      两种顺序各会放过什么、挡住什么？
+    </li>
+    <li>
+      （进阶）第 11 章的 <code>SeedService.fake</code> 是单线程插入的。
+      试着用 <code>ExecutorService</code> 改成 4 个线程并行插入 ——
+      你会立刻撞上 <code>EntityManager</code> 不是线程安全的这件事。
+      想清楚正确的做法是什么（提示：不是加锁）。
+    </li>
+    <li>
+      （进阶）读一遍 <code>ConcurrentHashMap.compute</code> 的 javadoc，
+      找出那句「the mapping function is applied at most once」。
+      再读 <code>AtomicReference.updateAndGet</code> 的，
+      找出那句「the function should be side-effect-free」。
+      这两句话的差别，就是本章 <code>boolean[] granted</code> 能用的全部依据。
+    </li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
