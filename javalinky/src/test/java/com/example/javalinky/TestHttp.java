@@ -104,10 +104,32 @@ final class TestHttp {
         });
     }
 
+    /** 没有角色的用户：什么权限都没有 */
+    static void createUserWithoutRole(String email, String username) {
+        inTransaction(em -> {
+            var user = new User(email.toLowerCase(), username);
+            user.setPassword("cat12345");
+            user.setConfirmed(true);
+            em.persist(user);
+        });
+    }
+
     static void login(HttpClient client, String email) {
         var r = postFormWithCsrf(client, "/auth/login", "/auth/login",
             form("email", email, "password", "cat12345"));
         assertThat(r.code()).as("登录应该 302").isEqualTo(302);
+    }
+
+    /** 登出。导航栏里的登出表单带着 _csrf，先从首页取 */
+    static void logout(HttpClient client) {
+        var r = postFormWithCsrf(client, "/", "/auth/logout", Map.of());
+        assertThat(r.code()).isEqualTo(302);
+    }
+
+    /** 换一个账号：先登出再登录（已登录时 GET /auth/login 会被重定向，取不到令牌） */
+    static void switchUser(HttpClient client, String email) {
+        logout(client);
+        login(client, email);
     }
 
     private TestHttp() {}

@@ -1,25 +1,50 @@
-@import com.example.javalinky.web.*
+@import com.example.javalinky.model.Permission
+@import com.example.javalinky.web.FormView
+@import com.example.javalinky.web.Layout
+@import com.example.javalinky.web.page.PostListPage
 
 @param Layout layout
 @param FormView form
-@param IndexPage page
+@param PostListPage posts
 
 @template.layout.base(layout = layout, content = @`
-  <div class="pb-3 mb-4 border-bottom">
-    <h1>Hello, ${page.name() == null ? "陌生人" : page.name()}!</h1>
-    @if(page.name() != null)
-      @if(page.known())
-        <p class="text-secondary">又见面了！</p>
+  <div class="p-4 mb-4 bg-body-tertiary rounded-3">
+    <h1 class="h3">
+      @if(layout.isAuthenticated())
+        你好，${layout.currentUser().getUsername()}！
       @else
-        <p class="text-secondary">很高兴认识你！</p>
+        欢迎来到 Javalinky
       @endif
-    @endif
+    </h1>
+    <p class="text-secondary mb-0">用 Javalin + Hibernate 写的社交博客。</p>
   </div>
 
-  <form method="post" action="/" novalidate class="col-md-6">
-    @template.tag.csrf(token = layout.csrfToken())
-    @template.tag.field(form = form, name = "name", label = "你叫什么名字？",
-                        required = true)
-    <button class="btn btn-primary" type="submit">提交</button>
-  </form>
+  <%-- 不用判断是否登录，can() 自己处理了 --%>
+  @if(layout.can(Permission.WRITE))
+    <form method="post" action="/post" novalidate class="mb-4">
+      @template.tag.csrf(token = layout.csrfToken())
+      @template.tag.markdown_editor(form = form, name = "body", label = "想说点什么？")
+      <button class="btn btn-primary" type="submit">发布</button>
+    </form>
+  @endif
+
+  @template.tag.posts(layout = layout, posts = posts)
+  @template.tag.pagination(page = posts.page(), baseUrl = "/")
+`, extraScripts = @`
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/easymde@2.18.0/dist/easymde.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/easymde@2.18.0/dist/easymde.min.js"></script>
+  <script>
+    document.querySelectorAll('[data-markdown-editor]').forEach(function (el) {
+      new EasyMDE({
+        element: el,
+        spellChecker: false,
+        status: false,
+        placeholder: el.placeholder,
+        toolbar: ['bold', 'italic', 'heading', '|',
+                  'quote', 'unordered-list', 'ordered-list', 'code', '|',
+                  'link', 'preview']
+      });
+    });
+  </script>
 `)

@@ -21,7 +21,12 @@ public class Cli {
                 System.out.println("数据库已升级到最新版本");
             }
             case "seed-roles" -> run(cfg, SeedService::insertRoles);
-            // fake / deploy 分别在第 11、17 章加入
+            case "fake" -> {
+                int users = args.length > 1 ? Integer.parseInt(args[1]) : 50;
+                int posts = args.length > 2 ? Integer.parseInt(args[2]) : 200;
+                run(cfg, () -> SeedService.fake(users, posts));
+            }
+            // deploy 在第 17 章加入
             default -> {
                 System.err.println("未知命令：" + args[0]);
                 usage();
@@ -54,6 +59,7 @@ public class Cli {
 
               migrate            跑数据库迁移
               seed-roles         创建/更新角色（可重复执行）
+              fake [用户数] [文章数]  生成假数据（开发用）
             """);
     }
 }

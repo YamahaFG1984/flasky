@@ -1,8 +1,10 @@
 @import com.example.javalinky.web.*
+@import com.example.javalinky.web.page.PostListPage
 @import com.example.javalinky.web.page.UserProfilePage
 
 @param Layout layout
 @param UserProfilePage page
+@param PostListPage posts
 
 @template.layout.base(layout = layout, content = @`
   <div class="d-flex gap-4 pb-4 mb-4 border-bottom flex-wrap">
@@ -58,5 +60,6 @@
   </div>
 
   <h2 class="h5">${page.username()} 的文章</h2>
-  <%-- 第 11 章在这里放文章列表 --%>
+  @template.tag.posts(layout = layout, posts = posts)
+  @template.tag.pagination(page = posts.page(), baseUrl = Routes.user(page.username()))
 `)

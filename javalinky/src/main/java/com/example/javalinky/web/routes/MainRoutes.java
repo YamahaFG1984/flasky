@@ -1,17 +1,21 @@
 package com.example.javalinky.web.routes;
 
 import com.example.javalinky.config.AppConfig;
+import com.example.javalinky.db.Page;
+import com.example.javalinky.model.Post;
 import com.example.javalinky.model.Permission;
 import com.example.javalinky.model.Role;
 import com.example.javalinky.model.User;
 import com.example.javalinky.web.*;
 import com.example.javalinky.web.form.AdminEditProfileForm;
 import com.example.javalinky.web.form.EditProfileForm;
-import com.example.javalinky.web.form.NameForm;
+import com.example.javalinky.web.form.PostForm;
+import com.example.javalinky.web.page.PostListPage;
 import com.example.javalinky.web.page.UserProfilePage;
 import io.javalin.config.JavalinConfig;
 import io.javalin.http.BadRequestResponse;
 import io.javalin.http.Context;
+import io.javalin.http.ForbiddenResponse;
 import io.javalin.http.NotFoundResponse;
 
 import java.util.*;
@@ -35,12 +39,17 @@ public class MainRoutes implements RouteModule {
 
             // 公开页面
             get("/", this::index);
-            post("/", this::submitName);
             get("/user/{username}", this::userProfile);
+            get("/post/{id}", this::showPost);
 
             // 必须登录
             get("/edit-profile",  this::editProfileForm, Access.AUTHENTICATED);
             post("/edit-profile", this::editProfile,     Access.AUTHENTICATED);
+
+            // 需要 WRITE 权限
+            post("/post",      this::createPost,   Permission.WRITE);
+            get("/edit/{id}",  this::editPostForm, Permission.WRITE);
+            post("/edit/{id}", this::editPost,     Permission.WRITE);
 
             // 管理员专属：整个前缀挂一个角色
             path("/admin", List.of(Permission.ADMIN), () -> {
@@ -53,33 +62,88 @@ public class MainRoutes implements RouteModule {
     // ---------- 首页 ----------
 
     private void index(Context ctx) {
-        String name = ctx.sessionAttribute("name");
-        Boolean known = ctx.sessionAttribute("known");
+        int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class).getOrNull());
+        var posts = services.postRepo(ctx).findAll(page, cfg.postsPerPage());
+
         View.render(ctx, "index.jte", "首页",
-            "form", FormView.empty(),
-            "page", new IndexPage(name, Boolean.TRUE.equals(known)));
+                    "form", FormView.empty(),
+                    "posts", PostListPage.of(posts, CurrentUser.get(ctx)));
     }
 
-    private void submitName(Context ctx) {
-        var form = new NameForm(ctx.formParam("name"));
+    // ---------- 文章 ----------
+
+    private void createPost(Context ctx) {
+        User author = CurrentUser.require(ctx);
+        var form = new PostForm(ctx.formParam("body"));
+
         var errors = Forms.validate(form);
         if (!errors.isEmpty()) {
-            View.render(ctx, "index.jte", "首页",
-                "form", new FormView(Map.of("name", orEmpty(form.name())), errors),
-                "page", new IndexPage(null, false));
+            Flash.danger(ctx, errors.values().iterator().next().get(0));
+            ctx.redirect(Routes.INDEX);
             return;
         }
 
-        var users = services.users(ctx);
-        boolean known = users.findByUsername(form.name()).isPresent();
-        if (!known) {
-            users.save(new User(form.name() + "@example.com", form.name()));
-            services.mail().notifyAdminNewUser(cfg.adminEmail(), form.name());
+        services.postRepo(ctx).save(new Post(form.body(), author));
+        Flash.success(ctx, "文章已发布。");
+        ctx.redirect(Routes.INDEX);     // Post/Redirect/Get
+    }
+
+    /**
+     * 单篇文章页。URL: /post/{id}
+     * 方法名不能叫 post —— 会盖住静态导入的 ApiBuilder.post(...)，
+     * 编译器会报 "method post ... cannot be applied to given types"。
+     */
+    private void showPost(Context ctx) {
+        long id = ctx.pathParamAsClass("id", Long.class).get();
+        Post post = services.postRepo(ctx).findById(id)
+            .orElseThrow(() -> new NotFoundResponse("文章不存在"));
+
+        // 第 13 章会在这里加上评论列表
+        View.render(ctx, "post.jte", "文章",
+                    "post", PostListPage.of(
+                        Page.of(List.of(post), 1, 1, 1), CurrentUser.get(ctx)));
+    }
+
+    private void editPostForm(Context ctx) {
+        Post post = loadEditablePost(ctx);
+        View.render(ctx, "edit_post.jte", "编辑文章",
+                    "form", new FormView(Map.of("body", post.getBody()), Map.of()),
+                    "postId", post.getId());
+    }
+
+    private void editPost(Context ctx) {
+        Post post = loadEditablePost(ctx);
+        var form = new PostForm(ctx.formParam("body"));
+
+        var errors = Forms.validate(form);
+        if (!errors.isEmpty()) {
+            View.render(ctx, "edit_post.jte", "编辑文章",
+                        "form", new FormView(Map.of("body", orEmpty(form.body())), errors),
+                        "postId", post.getId());
+            return;
         }
 
-        ctx.sessionAttribute("name", form.name());
-        ctx.sessionAttribute("known", known);
-        ctx.redirect(Routes.INDEX);     // Post/Redirect/Get
+        post.setBody(form.body());     // @PreUpdate 会自动重新渲染 bodyHtml
+        Flash.success(ctx, "文章已更新。");
+        ctx.redirect(Routes.post(post.getId()));
+    }
+
+    /**
+     * 取出文章并检查“当前用户能不能编辑它”。
+     * 注意：路由上的 Permission.WRITE 只保证“这个人有发文章的权限”，
+     * 不保证“这篇文章是他的” —— 后者必须在这里查。
+     */
+    private Post loadEditablePost(Context ctx) {
+        User user = CurrentUser.require(ctx);
+        long id = ctx.pathParamAsClass("id", Long.class).get();
+        Post post = services.postRepo(ctx).findById(id)
+            .orElseThrow(() -> new NotFoundResponse("文章不存在"));
+
+        boolean isAuthor = user.getId().equals(post.getAuthor().getId());
+        if (!isAuthor && !user.can(Permission.ADMIN)) {
+            throw new ForbiddenResponse("你不能编辑别人的文章");
+        }
+        return post;
     }
 
     // ---------- 用户主页 ----------
@@ -90,18 +154,24 @@ public class MainRoutes implements RouteModule {
             .orElseThrow(() -> new NotFoundResponse("没有这个用户"));
 
         User viewer = CurrentUser.get(ctx);
+        var postRepo = services.postRepo(ctx);
+
+        int pageNo = Page.clampPage(ctx.queryParamAsClass("page", Integer.class).getOrNull());
+        var posts = postRepo.findByAuthor(user, pageNo, cfg.postsPerPage());
 
         var page = UserProfilePage.of(
             user,
             viewer != null && viewer.isAdministrator(),
             viewer != null && viewer.getId().equals(user.getId()),
-            0, 0,                       // 文章数、评论数，第 11、13 章填上
+            postRepo.countByAuthor(user), 0,   // 评论数第 13 章填上
             0, 0,                       // 关注数，第 12 章填上
             viewer != null && viewer.can(Permission.FOLLOW)
                 && !viewer.getId().equals(user.getId()),
             false, false);              // 关注状态，第 12 章填上
 
-        View.render(ctx, "user.jte", user.getUsername(), "page", page);
+        View.render(ctx, "user.jte", user.getUsername(),
+                    "page", page,
+                    "posts", PostListPage.of(posts, viewer));
     }
 
     // ---------- 编辑自己的资料 ----------

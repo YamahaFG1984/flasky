@@ -125,6 +125,32 @@
       <version>2.3.232</version>
     </dependency>
 
+    <!-- Markdown 渲染 -->
+    <dependency>
+      <groupId>org.commonmark</groupId>
+      <artifactId>commonmark</artifactId>
+      <version>0.26.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.commonmark</groupId>
+      <artifactId>commonmark-ext-gfm-tables</artifactId>
+      <version>0.26.0</version>
+    </dependency>
+
+    <!-- HTML 清洗。相当于 Python 的 bleach -->
+    <dependency>
+      <groupId>com.googlecode.owasp-java-html-sanitizer</groupId>
+      <artifactId>owasp-java-html-sanitizer</artifactId>
+      <version>20240325.1</version>
+    </dependency>
+
+    <!-- 造假数据（只在开发环境用） -->
+    <dependency>
+      <groupId>net.datafaker</groupId>
+      <artifactId>datafaker</artifactId>
+      <version>2.5.1</version>
+    </dependency>
+
     <!-- 纯 Java 实现的 bcrypt，没有本地库依赖 -->
     <dependency>
       <groupId>at.favre.lib</groupId>
