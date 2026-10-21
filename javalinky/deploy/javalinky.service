@@ -2,6 +2,9 @@
 Description=Javalinky
 After=network.target postgresql.service
 Wants=postgresql.service
+# 限制重启频率（这两个键属于 [Unit]，写在 [Service] 里会被忽略）
+StartLimitBurst=5
+StartLimitIntervalSec=120
 
 [Service]
 Type=simple
@@ -10,13 +13,13 @@ Group=javalinky
 WorkingDirectory=/opt/javalinky
 EnvironmentFile=/etc/javalinky.env
 
-ExecStart=/usr/bin/java -XX:MaxRAMPercentage=70 -jar /opt/javalinky/javalinky.jar
+ExecStart=/usr/bin/java -XX:MaxRAMPercentage=70 \
+    -Dlogback.configurationFile=logback-prod.xml \
+    -jar /opt/javalinky/javalinky.jar
 
 # 挂了就自动重启，但限制频率避免疯狂重启刷日志
 Restart=always
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=120
 
 # 优雅关闭：发 SIGTERM 之后给 30 秒做完手里的请求
 KillSignal=SIGTERM

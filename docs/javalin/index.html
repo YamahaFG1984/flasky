@@ -255,13 +255,21 @@ mvn -q compile exec:exec                          # 启动，打开 http://local
 </p>
 
 <div class="box note">
-  <div class="t">&#128270; 代码和文字对不上的时候，信代码</div>
+  <div class="t">&#128270; 正文里那些“&#9888;”警告框是怎么来的</div>
   <p>
-    教程是先写的，代码是之后真正跑起来的。这个过程里发现了几十处需要修正的地方 ——
+    教程是先写的，代码是之后真正跑起来的。这个过程里暴露了 45 处问题 ——
     框架 API 的实际签名（比如 <code>Validator.allowNullable()</code> 在 Javalin 7 已经改成
-    <code>getOrNull()</code>）、JTE 不允许的写法、少写的依赖和文件、以及必须调整的顺序。
-    每一条都记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，也顺便是一份
-    “真实项目里会踩到什么坑”的清单，值得单独读一遍。
+    <code>getOrNull()</code>）、JTE 不允许的写法、依赖版本冲突、必须调整的过滤器顺序、
+    少写的文件和 import。
+  </p>
+  <p>
+    这些<strong>已经全部改回正文</strong>了，而且大多不是悄悄改掉，
+    而是留成一个警告框，把"错的写法长什么样、报什么错、为什么"一起写出来 ——
+    因为你在别处（旧博客、AI 生成的代码）还会再遇到它们，认得出报错比记住正确写法更有用。
+  </p>
+  <p>
+    完整清单在 <code>javalinky/TUTORIAL-DIFFS.md</code>，可以当一份排错索引：
+    照着报错信息去里面搜，比重读一章快得多。
   </p>
 </div>
 

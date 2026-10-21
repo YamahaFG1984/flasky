@@ -44,9 +44,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -134,6 +134,9 @@ config.routes.post("/login", ctx -&gt; {
 // 转换 + 默认值
 int page = ctx.queryParamAsClass("page", Integer.class).getOrDefault(1);
 
+// 参数可以不传：缺失或转换失败时返回 null，而不是抛异常
+Integer requested = ctx.queryParamAsClass("page", Integer.class).getOrNull();
+
 // 转换 + 自定义检查，失败自动返回 400
 int age = ctx.formParamAsClass("age", Integer.class)
              .check(v -&gt; v &gt;= 0 &amp;&amp; v &lt; 150, "年龄必须在 0 到 150 之间")
@@ -144,6 +147,19 @@ var v = ctx.formParamAsClass("email", String.class)
            .check(s -&gt; s.contains("@"), "邮箱格式不对");
 Map&lt;String, List&lt;ValidationError&lt;String&gt;&gt;&gt; errors = v.errors();
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 别找 <code>allowNullable()</code></div>
+  <p>
+    网上和 AI 给出的 Javalin 代码里经常出现 <code>.allowNullable().get()</code>，
+    那是 <strong>Javalin 5 及以前</strong>的写法，<strong>第 6 版已经删掉了这个方法</strong>。
+    现在一步到位的是 <code>getOrNull()</code>，语义完全一样：拿不到就给 <code>null</code>。
+  </p>
+  <p>
+    照旧写法抄会直接编译不过（<code>cannot find symbol: method allowNullable()</code>）。
+    这是本教程后面处理分页参数时反复要用的方法，先记住它。
+  </p>
 </div>
 
 <div class="box note">
@@ -200,8 +216,12 @@ class LoginForm(FlaskForm):
   </div>
   <div class="new">
     <div class="h">Java record + Bean Validation</div>
-    <div class="code" data-lang="java">
+    <div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/form/LoginForm.java">
 <pre>
+package com.example.javalinky.web.form;
+
+import jakarta.validation.constraints.*;
+
 public record LoginForm(
     @NotBlank(message = "请填写邮箱")
     @Size(max = 64, message = "邮箱最长 64 个字符")
@@ -395,8 +415,9 @@ public record FormView(Map&lt;String, String&gt; values, Map&lt;String, List&lt;
          name="${name}"
          type="${type}"
          value="${type.equals("password") ? "" : form.value(name)}"
-         @if(autocomplete != null)autocomplete="${autocomplete}"@endif
-         @if(required)required@endif&gt;
+         &lt;%-- JTE 的"智能属性"：值是 null 或 false 时，整个属性不会出现在输出里 --%&gt;
+         autocomplete="${autocomplete}"
+         required="${required}"&gt;
 
   @if(form.hasError(name))
     &lt;div class="invalid-feedback"&gt;${form.error(name)}&lt;/div&gt;
@@ -405,6 +426,51 @@ public record FormView(Map&lt;String, String&gt; values, Map&lt;String, List&lt;
   @endif
 &lt;/div&gt;
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 条件属性要用"智能属性"，不能用 <code>@if</code></div>
+  <p>
+    “这个属性只在某种情况下才输出”是模板里最常见的需求之一。
+    直觉写法是把 <code>@if</code> 包在属性外面：
+  </p>
+<div class="code" data-lang="jte">
+<pre>
+&lt;%-- ❌ JTE 直接拒绝编译 --%&gt;
+&lt;input @if(required)required@endif
+       @if(autocomplete != null)autocomplete="${autocomplete}"@endif&gt;
+</pre>
+</div>
+  <p>
+    报错信息相当直白：
+  </p>
+<div class="code" data-lang="text">
+<pre>
+Failed to compile template, error at tag/field.jte:22
+Illegal HTML attribute name @if(required)required@endif! Expressions in HTML
+attribute names are not allowed. Smart attributes will do just that for you.
+</pre>
+</div>
+  <p>
+    <strong>JTE 不允许在属性名的位置出现表达式</strong>，因为它的转义是按
+    HTML 上下文决定的 —— 得先知道自己在哪个属性里，才知道该用哪套转义规则。
+    报错最后那句"smart attributes will do just that"就是正确答案：
+  </p>
+<div class="code" data-lang="jte">
+<pre>
+&lt;%-- ✅ 直接写上去，值是 null / false 时 JTE 会把整个属性抹掉 --%&gt;
+&lt;input required="${required}" autocomplete="${autocomplete}"&gt;
+</pre>
+</div>
+  <p>
+    <code>required="${false}"</code> 输出的不是 <code>required="false"</code>
+    （那在 HTML 里反而<strong>等于启用</strong>，是个经典的坑），而是什么都不输出。
+    布尔属性为 <code>true</code> 时只输出属性名。这比 <code>@if</code> 更安全，也更短。
+  </p>
+  <p>
+    另外注意 JTE 的注释是 <code>&lt;%-- --%&gt;</code>。
+    第 11 章会在这上面再踩一次坑。
+  </p>
 </div>
 
 <div class="box warn">
@@ -429,7 +495,7 @@ public record FormView(Map&lt;String, String&gt; values, Map&lt;String, List&lt;
 &lt;div class="form-check mb-3"&gt;
   &lt;input class="form-check-input" type="checkbox" value="1"
          id="f-${name}" name="${name}"
-         @if("1".equals(form.value(name)))checked@endif&gt;
+         checked="${"1".equals(form.value(name))}"&gt;
   &lt;label class="form-check-label" for="f-${name}"&gt;${label}&lt;/label&gt;
 &lt;/div&gt;
 </pre>
@@ -1029,6 +1095,7 @@ Javalin.create(config -&gt; {
 package com.example.javalinky;
 
 import com.example.javalinky.web.*;
+import com.example.javalinky.web.form.LoginForm;   // 表单对象单独一个包
 import io.javalin.Javalin;
 import io.javalin.http.staticfiles.Location;
 import io.javalin.rendering.template.JavalinJte;
@@ -1042,7 +1109,7 @@ public class App {
 
         Javalin.create(config -&gt; {
 
-            config.fileRenderer(new JavalinJte(JavalinJte.directoryTemplateEngine()));
+            config.fileRenderer(new JavalinJte(JavalinJte.Companion.directoryTemplateEngine()));
 
             config.staticFiles.add(f -&gt; {
                 f.directory = "/public";

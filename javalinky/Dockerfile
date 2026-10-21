@@ -37,4 +37,6 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
 
 # exec 形式（不是 shell 形式）：这样 java 进程的 PID 是 1，
 # 能直接收到 docker stop 发的 SIGTERM，从而优雅关闭
-ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "app.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", \
+            "-Dlogback.configurationFile=logback-prod.xml", \
+            "-jar", "app.jar"]

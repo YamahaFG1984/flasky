@@ -43,9 +43,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -851,7 +851,7 @@ private static final String COOKIE_SHOW_FOLLOWED = "show_followed";
 
 private void index(Context ctx) {
     int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class)
-                                 .allowNullable().get());
+                                 .getOrNull());
     User me = CurrentUser.get(ctx);
 
     // 只有登录用户才可能选"只看关注"
@@ -863,9 +863,13 @@ private void index(Context ctx) {
         ? repo.findTimeline(me, page, cfg.postsPerPage())
         : repo.findAll(page, cfg.postsPerPage());
 
+    var ids = posts.items().stream().map(Post::getId).toList();
+
     View.render(ctx, "index.jte", "首页",
                 "form", FormView.empty(),
-                "posts", PostListPage.of(posts, me),
+                // 评论数用一条聚合查询批量取（第 11 章解释过为什么）
+                "posts", PostListPage.of(posts, me,
+                             services.commentRepo(ctx).countCommentsByPost(ids)),
                 "showFollowed", showFollowed);
 }
 
@@ -947,15 +951,19 @@ public record FollowListPage(
 ) {
     public record Item(String username, String name, String avatarHash, Instant since) {}
 
+    private static String orEmpty(String s) {
+        return s == null ? "" : s;
+    }
+
     /** showFollower=true 表示列"关注者"，false 表示列"被关注者" */
     public static FollowListPage of(String title, String ownerUsername, String baseUrl,
                                     Page&lt;Follow&gt; source, boolean showFollower) {
         List&lt;Item&gt; items = source.items().stream()
-            .map(f -&gt; showFollower ? f.getFollower() : f.getFollowed())
-            .map(u -&gt; new Item(u.getUsername(),
-                               u.getName() == null ? "" : u.getName(),
-                               u.avatarHash(),
-                               null))
+            .map(f -&gt; new Item(
+                (showFollower ? f.getFollower() : f.getFollowed()).getUsername(),
+                orEmpty((showFollower ? f.getFollower() : f.getFollowed()).getName()),
+                (showFollower ? f.getFollower() : f.getFollowed()).avatarHash(),
+                f.getTimestamp()))     // ← 关注时间要从 Follow 上取，不是 null
             .toList();
         return new FollowListPage(title, ownerUsername, baseUrl,
             Page.of(items, source.page(), source.size(), source.total()));
@@ -964,12 +972,27 @@ public record FollowListPage(
 </pre>
 </div>
 
+<div class="box note">
+  <div class="t">&#9432; <code>since</code> 一定要填 <code>f.getTimestamp()</code></div>
+  <p>
+    这个字段很容易顺手写成 <code>null</code> —— 毕竟它来自
+    <code>Follow</code> 而不是 <code>User</code>，和周围三个字段的来源不一样。
+    而 <code>null</code> 不会报错：列表照样渲染，只是"关注时间"那一栏
+    一片空白（<code>tag/timeago</code> 拿到 <code>null</code> 就什么都不输出）。
+  </p>
+  <p>
+    这正是<strong>把关注关系做成实体</strong>（而不是一张裸连接表）换来的东西：
+    <code>Follow.timestamp</code> 让"TA 什么时候关注我的"成为可以显示的信息。
+    填 <code>null</code> 等于白做了这个设计。
+  </p>
+</div>
+
 <div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
 <pre>
 private void followers(Context ctx) {
     User user = loadUserByUsername(ctx);
     int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class)
-                                 .allowNullable().get());
+                                 .getOrNull());
 
     var source = services.follows(ctx)
         .followersOf(user, page, cfg.followersPerPage());
@@ -985,7 +1008,7 @@ private void followers(Context ctx) {
 private void following(Context ctx) {
     User user = loadUserByUsername(ctx);
     int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class)
-                                 .allowNullable().get());
+                                 .getOrNull());
 
     var source = services.follows(ctx)
         .followingOf(user, page, cfg.followersPerPage());

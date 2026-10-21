@@ -44,9 +44,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -176,6 +176,7 @@ public enum Profile {
 package com.example.javalinky.config;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;   // readDotenv 里要用
 import java.nio.file.*;
 import java.util.HashMap;
 import java.util.Map;
@@ -284,6 +285,7 @@ public record AppConfig(
     // 安全
     String secretKey,          // 签发令牌用（第 8 章）
     boolean httpsOnly,         // 会话 Cookie 是否只在 HTTPS 下发送
+    boolean behindProxy,       // 是否跑在 nginx/负载均衡后面（信任 X-Forwarded-*，第 17 章）
 
     // 邮件
     MailConfig mail,
@@ -323,7 +325,7 @@ public record AppConfig(
             env.get("DATABASE_USER", "sa"),
             env.get("DATABASE_PASSWORD", ""),
             env.get("SECRET_KEY", "dev-only-insecure-key-change-in-prod"),
-            false,
+            false, false,
             MailConfig.fromEnv(),
             env.get("ADMIN_EMAIL", "admin@example.com"),
             20, 50, 30,
@@ -338,11 +340,12 @@ public record AppConfig(
             Profile.TEST,
             0,                       // 0 = 让系统随便分配一个空闲端口
             "http://localhost",
-            // 每次测试一个全新的内存库，互不干扰
-            "jdbc:h2:mem:test-" + java.util.UUID.randomUUID() + ";MODE=PostgreSQL",
+            // 每次测试一个全新的内存库，互不干扰。DB_CLOSE_DELAY=-1 不能省，见下面的警告
+            "jdbc:h2:mem:test-" + java.util.UUID.randomUUID()
+                + ";MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
             "sa", "",
             "test-secret-key",
-            false,
+            false, false,
             MailConfig.disabled(),   // 测试时不真的发邮件
             "admin@example.com",
             20, 50, 30,
@@ -362,6 +365,7 @@ public record AppConfig(
             env.require("DATABASE_PASSWORD"),
             env.require("SECRET_KEY"),         // &#8592; 绝不能用默认值
             env.getBoolean("HTTPS_ONLY", true),
+            env.getBoolean("BEHIND_PROXY", false),
             MailConfig.fromEnv(),
             env.require("ADMIN_EMAIL"),
             env.getInt("POSTS_PER_PAGE", 20),
@@ -373,6 +377,26 @@ public record AppConfig(
     }
 }
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 测试档位的 <code>DB_CLOSE_DELAY=-1</code> 省不掉</div>
+  <p>
+    H2 内存库的默认行为是：<strong>最后一个连接关闭时，整个库连同数据一起消失</strong>。
+    而连接池在空闲时会回收连接 —— 于是 Flyway 把表建好、把连接还回池里，
+    库就没了。接着测试跑起来，报一句看着莫名其妙的话：
+  </p>
+<div class="code" data-lang="text">
+<pre>
+Table "USERS" not found (this database is empty); SQL statement: ...
+</pre>
+</div>
+  <p>
+    “this database is empty” 这半句是关键线索：不是迁移没跑，是<strong>跑完又被丢掉了</strong>。
+    <code>DB_CLOSE_DELAY=-1</code> 让这个库活到 JVM 退出为止。
+    第 5 章列 H2 的 URL 形式时提过它，但那时还没有真正的测试，
+    等到第 15 章写测试才会踩到，所以现在就把它写进配置里。
+  </p>
 </div>
 
 <div class="box key">
@@ -479,12 +503,17 @@ public final class JavalinkyApp {
         // ---------- 1. 基础设施 ----------
         Db.init(cfg.jdbcUrl(), cfg.dbUser(), cfg.dbPassword());
 
-        Mailer mailer = new Mailer(cfg.mail());
-        MailService mail = new MailService(mailer, cfg.siteBaseUrl());
-
+        // 网页/HTML 邮件一个引擎，纯文本邮件一个引擎（第 6 章解释过为什么必须分开）
         TemplateEngine templates = cfg.templateHotReload()
             ? Templates.directory()      // 开发：从 src/main/jte 读，改了就生效
             : Templates.precompiled();   // 生产：读 jar 里预编译好的模板类
+        TemplateEngine textTemplates = cfg.templateHotReload()
+            ? Templates.textDirectory()
+            : Templates.textPrecompiled();
+
+        Mailer mailer = new Mailer(cfg.mail());
+        MailService mail = new MailService(
+            mailer, cfg.siteBaseUrl(), templates, textTemplates);
 
         // ---------- 2. 业务装配 ----------
         Services services = Services.wire(cfg, mail);
@@ -520,7 +549,7 @@ public final class JavalinkyApp {
             // 路由模块（相当于 Flask 的蓝本）
             new MainRoutes(cfg, services).register(javalin);
             new AuthRoutes(cfg, services).register(javalin);
-            new ApiRoutes(cfg, services).register(javalin);
+            new ApiRoutes(cfg, services).register(javalin);   // &#8592; 第 14 章才建这个类
 
             // 优雅关闭
             javalin.events.serverStopping(() -&gt; {
@@ -533,6 +562,32 @@ public final class JavalinkyApp {
     private JavalinkyApp() {}
 }
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 上面这个类是“最终形态”，照抄会编译不过</div>
+  <p>
+    这一章的目标是把结构讲清楚，所以 <code>JavalinkyApp</code>（还有下面的
+    <code>Services</code> 和 <code>Cli</code>）里<strong>提前引用了后面章节才会创建的类</strong>。
+    现在就把整段抄进去，编译器会报一串 <code>cannot find symbol</code>。
+  </p>
+  <p>
+    按需要删掉即可，到对应章节再加回来：
+  </p>
+  <table>
+    <thead><tr><th>这一行</th><th>依赖的类</th><th>哪一章出现</th></tr></thead>
+    <tbody>
+      <tr><td><code>new ApiRoutes(...)</code></td><td><code>ApiRoutes</code></td><td>第 14 章</td></tr>
+      <tr><td><code>services.auth(...)</code></td><td><code>AuthService</code></td><td>第 8 章</td></tr>
+      <tr><td><code>services.roles(...)</code></td><td><code>RoleRepository</code></td><td>第 9 章</td></tr>
+      <tr><td><code>services.posts(...)</code></td><td><code>PostService</code>、<code>PostRepository</code></td><td>第 11 章</td></tr>
+      <tr><td><code>Cli</code> 的 <code>seed-roles</code> / <code>fake</code></td><td><code>SeedService</code></td><td>第 9、11 章</td></tr>
+    </tbody>
+  </table>
+  <p>
+    配套代码里每个 <code>jv-chNN</code> 标签都只包含到那一章为止该有的东西，
+    对不上的时候可以直接 <code>git diff jv-ch07 jv-ch08</code> 看增量。
+  </p>
 </div>
 
 <div class="box warn">
@@ -641,6 +696,7 @@ package com.example.javalinky.web.routes;
 import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.web.*;
 import io.javalin.config.JavalinConfig;
+import io.javalin.http.Context;
 
 import static io.javalin.apibuilder.ApiBuilder.*;
 
@@ -946,6 +1002,7 @@ class BasicsTest {
 <div class="code" data-lang="bash">
 <pre>
 APP_PROFILE=test mvn test
+# 第 15 章会把 APP_PROFILE=test 配进 surefire，以后直接 mvn test 就行
 </pre>
 </div>
 
@@ -999,11 +1056,45 @@ APP_PROFILE=test mvn test
           &lt;transformer implementation=
             "org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/&gt;
         &lt;/transformers&gt;
+        &lt;!-- 必须过滤掉依赖自带的签名文件，否则 java -jar 启动就抛 SecurityException --&gt;
+        &lt;filters&gt;
+          &lt;filter&gt;
+            &lt;artifact&gt;*:*&lt;/artifact&gt;
+            &lt;excludes&gt;
+              &lt;exclude&gt;META-INF/*.SF&lt;/exclude&gt;
+              &lt;exclude&gt;META-INF/*.DSA&lt;/exclude&gt;
+              &lt;exclude&gt;META-INF/*.RSA&lt;/exclude&gt;
+              &lt;exclude&gt;module-info.class&lt;/exclude&gt;
+              &lt;exclude&gt;META-INF/versions/*/module-info.class&lt;/exclude&gt;
+            &lt;/excludes&gt;
+          &lt;/filter&gt;
+        &lt;/filters&gt;
       &lt;/configuration&gt;
     &lt;/execution&gt;
   &lt;/executions&gt;
 &lt;/plugin&gt;
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>&lt;filters&gt;</code> 那一段不是可选的</div>
+  <p>
+    有些依赖是<strong>签过名</strong>的 JAR，里面带着 <code>META-INF/*.SF</code> 这类摘要文件
+    （本项目里是第 8 章要引入的 <code>at.favre.lib:bcrypt</code>，它带了一个
+    <code>META-INF/PFOPENSO.SF</code>）。shade 把几十个 JAR 解开重新打成一个之后，
+    文件内容全变了，但那些摘要还在 —— JVM 一校验就对不上：
+  </p>
+<div class="code" data-lang="text">
+<pre>
+java.lang.SecurityException: Invalid signature file digest for Manifest main attributes
+</pre>
+</div>
+  <p>
+    现在这一章还没引入 bcrypt，所以不加 <code>&lt;filters&gt;</code> 也能跑；
+    <strong>到第 17 章真正部署时才会炸</strong>，而且报错信息跟你改的东西毫无关系，很难联想。
+    一次配好，省掉以后一小时。<code>module-info.class</code> 一起排掉，是因为多个
+    JAR 的模块描述文件会撞在 JAR 根目录上。
+  </p>
 </div>
 
 <div class="code" data-lang="bash">
@@ -1129,10 +1220,39 @@ public class Cli {
 </pre>
 </div>
 
+<p>
+  要在开发时方便地调它，给第 3 章那个 <code>exec-maven-plugin</code> 补一个<strong>命名执行</strong>：
+</p>
+
+<div class="code" data-lang="xml" data-file="pom.xml">
+<pre>
+&lt;plugin&gt;
+  &lt;groupId&gt;org.codehaus.mojo&lt;/groupId&gt;
+  &lt;artifactId&gt;exec-maven-plugin&lt;/artifactId&gt;
+  &lt;version&gt;3.5.0&lt;/version&gt;
+  &lt;configuration&gt;
+    &lt;executable&gt;java&lt;/executable&gt;
+    &lt;commandlineArgs&gt;-classpath %classpath com.example.javalinky.App&lt;/commandlineArgs&gt;
+  &lt;/configuration&gt;
+  &lt;executions&gt;
+    &lt;!-- mvn compile exec:exec@cli -Dcli.args="seed-roles" --&gt;
+    &lt;execution&gt;
+      &lt;id&gt;cli&lt;/id&gt;
+      &lt;configuration&gt;
+        &lt;executable&gt;java&lt;/executable&gt;
+        &lt;commandlineArgs&gt;-classpath %classpath com.example.javalinky.Cli ${cli.args}&lt;/commandlineArgs&gt;
+      &lt;/configuration&gt;
+    &lt;/execution&gt;
+  &lt;/executions&gt;
+&lt;/plugin&gt;
+</pre>
+</div>
+
 <div class="code" data-lang="bash">
 <pre>
-# 开发时
-mvn -q compile exec:java -Dexec.mainClass=com.example.javalinky.Cli -Dexec.args="seed-roles"
+# 开发时（@cli 就是上面那个 execution 的 id）
+mvn -q compile exec:exec@cli -Dcli.args="seed-roles"
+mvn -q compile exec:exec@cli -Dcli.args="fake 30 60"    # 带参数的命令一样传
 
 # 打包之后
 java -cp target/javalinky.jar com.example.javalinky.Cli deploy
@@ -1157,13 +1277,13 @@ java -cp target/javalinky.jar com.example.javalinky.Cli deploy
 <div class="code" data-lang="bash">
 <pre>
 # 1. 建库 + 跑迁移（Db.init 自动做，也可以手动）
-mvn -q compile exec:java -Dexec.mainClass=com.example.javalinky.Cli -Dexec.args="migrate"
+mvn -q compile exec:exec@cli -Dcli.args="migrate"
 
 # 2. 灌入角色（第 9 章才真正用到，但现在就可以跑）
-mvn -q compile exec:java -Dexec.mainClass=com.example.javalinky.Cli -Dexec.args="seed-roles"
+mvn -q compile exec:exec@cli -Dcli.args="seed-roles"
 
 # 3. 启动
-mvn -q compile exec:java
+mvn -q compile exec:exec
 </pre>
 </div>
 
@@ -1204,7 +1324,7 @@ mvn -q compile exec:java
   <ol>
     <li>按本章的结构把前六章的代码重新组织一遍。这个过程会很啰嗦，但<strong>必须亲手做</strong> ——
         后面所有章节都假设你的项目是这个结构。</li>
-    <li>故意不设 <code>SECRET_KEY</code>，用 <code>APP_PROFILE=prod mvn -q compile exec:java</code> 启动。
+    <li>故意不设 <code>SECRET_KEY</code>，用 <code>APP_PROFILE=prod mvn -q compile exec:exec</code> 启动。
         确认它<strong>启动失败</strong>并告诉你缺哪个变量。这就是 <code>require()</code> 的价值。</li>
     <li>给 <code>Profile</code> 加一个 <code>STAGING</code> 枚举值，然后 <code>mvn compile</code>。
         看 <code>AppConfig.load()</code> 里的 switch 怎么报错。补上分支让它通过。</li>

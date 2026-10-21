@@ -44,9 +44,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -393,9 +393,47 @@ public final class TestFixtures {
 </pre>
 </div>
 
+<p>
+  还有一件小事值得现在就做：把 <code>APP_PROFILE=test</code> 配进 surefire，
+  这样 <code>mvn test</code> 不用每次都记得带环境变量。
+</p>
+
+<div class="code" data-lang="xml" data-file="pom.xml">
+<pre>
+&lt;plugin&gt;
+  &lt;groupId&gt;org.apache.maven.plugins&lt;/groupId&gt;
+  &lt;artifactId&gt;maven-surefire-plugin&lt;/artifactId&gt;
+  &lt;version&gt;3.5.2&lt;/version&gt;
+  &lt;configuration&gt;
+    &lt;!-- 这样 mvn test 自动走 TEST 档位（内存库、不发邮件） --&gt;
+    &lt;environmentVariables&gt;
+      &lt;APP_PROFILE&gt;test&lt;/APP_PROFILE&gt;
+    &lt;/environmentVariables&gt;
+    &lt;!-- 端到端测试要下载 300 MB 浏览器，默认跳过：mvn -Pe2e test 才跑 --&gt;
+    &lt;excludes&gt;
+      &lt;exclude&gt;**/e2e/**&lt;/exclude&gt;
+    &lt;/excludes&gt;
+  &lt;/configuration&gt;
+&lt;/plugin&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么这不只是"省几个字"</div>
+  <p>
+    忘了带 <code>APP_PROFILE=test</code> 的后果不是报错，而是
+    <strong>测试跑在 DEV 档位上</strong> —— 连的是
+    <code>data/javalinky-dev</code> 那个真实的开发库。
+    于是测试一边改你的开发数据，一边因为库里已有数据而随机失败。
+  </p>
+  <p>
+    凡是"忘了某个开关会静默地做错事"的地方，都值得把默认值钉进构建文件。
+  </p>
+</div>
+
 <div class="code" data-lang="bash">
 <pre>
-APP_PROFILE=test mvn clean verify
+mvn clean verify          # APP_PROFILE 已经在 pom 里配好了
 
 # 报告在这里，用浏览器打开
 open target/site/jacoco/index.html
@@ -490,7 +528,9 @@ class MainRoutesTest {
             assertThat(response.code()).isEqualTo(200);
 
             String html = response.body().string();
-            assertThat(html).contains("陌生人");      // 未登录时的问候语
+            // 注意：第 11 章把首页从"Hello, 陌生人"换成了文章列表，
+            // 问候语现在在导航栏/欢迎区，所以断言要跟着改
+            assertThat(html).contains("欢迎来到 Javalinky");
             assertThat(html).doesNotContain("登出");  // 不该有登出按钮
         });
     }
@@ -500,10 +540,14 @@ class MainRoutesTest {
         var app = JavalinkyApp.create(TestFixtures.config());
 
         JavalinTest.test(app, (server, client) -&gt; {
-            var response = client.get("/edit-profile");
-            // OkHttp 默认不跟随重定向，所以能直接断言 302
+            // 浏览器才会带 Accept: text/html —— 影响未登录时是 302 还是 401
+            var response = client.get("/edit-profile",
+                req -&gt; req.header("Accept", "text/html"));
+
+            // 测试客户端默认不跟随重定向，所以能直接断言 302
             assertThat(response.code()).isEqualTo(302);
-            assertThat(response.header("Location")).contains("/auth/login");
+            assertThat(response.headers().get("Location").get(0))
+                .contains("/auth/login");
         });
     }
 
@@ -538,10 +582,71 @@ class MainRoutesTest {
 
 <p>
   登录之后的测试需要保持 Cookie。原书的做法是
-  <code>app.test_client(use_cookies=True)</code>。
-  <code>JavalinTest</code> 的客户端基于 OkHttp，默认<strong>不</strong>自动管理 Cookie，
-  所以我们自己记一下：
+  <code>app.test_client(use_cookies=True)</code>；
+  <code>JavalinTest</code> 这边<strong>不用做任何事</strong> ——
+  它的客户端自带 <code>CookieManager</code>，会话天然跨请求保持。
 </p>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>javalin-testtools</code> 的客户端 API，三个容易踩的点</div>
+  <p>
+    网上关于它的资料大多是 Javalin 5 时代的，那时底层是 OkHttp。
+    <strong>7.x 已经换成了 JDK 自带的 <code>java.net.http</code></strong>，
+    所以有几处对不上：
+  </p>
+  <div class="tw">
+  <table>
+  <tr><th>你可能会写</th><th>实际要写</th></tr>
+  <tr><td><code>response.header("Location")</code></td>
+      <td><code>response.headers().get("Location").get(0)</code></td></tr>
+  <tr><td><code>client.post(path, Map)</code> 发表单</td>
+      <td>那个重载发的是 <strong>JSON</strong>；表单要用
+          <code>FormBody.Builder</code> + <code>client.request(path, req -&gt; req.post(body))</code></td></tr>
+  <tr><td>手工转发 <code>Set-Cookie</code></td>
+      <td>不需要 —— 客户端自带 Cookie 管理</td></tr>
+  </table>
+  </div>
+  <p>
+    "默认不跟随重定向"这一条结论没变（所以能直接断言 302），
+    只是原因不再是 OkHttp 的默认配置。
+  </p>
+</div>
+
+<p>
+  既然这些细节要反复用，就把它们收进第 8 章开始的那个
+  <code>TestHttp</code> 工具类：
+</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/TestHttp.java">
+<pre>
+/** 带上 _csrf 的表单 POST：先 GET 一个页面拿令牌 */
+static Response postFormWithCsrf(HttpClient client, String tokenPage,
+                                 String path, Map&lt;String, String&gt; fields) {
+    var all = new LinkedHashMap&lt;String, String&gt;();
+    all.put("_csrf", csrfTokenFrom(client.get(tokenPage).body().string()));
+    all.putAll(fields);
+    return postForm(client, path, all);
+}
+
+static void login(HttpClient client, String email) {
+    var r = postFormWithCsrf(client, "/auth/login", "/auth/login",
+        form("email", email, "password", "cat12345"));
+    assertThat(r.code()).as("登录应该 302").isEqualTo(302);
+}
+
+/** 登出。导航栏里的登出表单带着 _csrf，先从首页取 */
+static void logout(HttpClient client) {
+    var r = postFormWithCsrf(client, "/", "/auth/logout", Map.of());
+    assertThat(r.code()).isEqualTo(302);
+}
+
+/** 换一个账号：必须先登出再登录，原因见下面 */
+static void switchUser(HttpClient client, String email) {
+    logout(client);
+    login(client, email);
+}
+</pre>
+</div>
 
 <div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/web/LoginFlowTest.java">
 <pre>
@@ -549,22 +654,13 @@ package com.example.javalinky.web;
 
 import com.example.javalinky.JavalinkyApp;
 import com.example.javalinky.TestFixtures;
-import com.example.javalinky.db.Db;
-import io.javalin.testtools.HttpClient;
 import io.javalin.testtools.JavalinTest;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
+import static com.example.javalinky.TestHttp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class LoginFlowTest {
-
-    /** 从 HTML 里抠出 CSRF 隐藏字段的值 */
-    private static final Pattern CSRF =
-        Pattern.compile("name=\"_csrf\"\\s+value=\"([^\"]+)\"");
 
     @Test
     void 登录成功后首页显示用户名() {
@@ -577,43 +673,39 @@ class LoginFlowTest {
                 TestFixtures.user(em, "john");
             });
 
-            // ① GET 登录页，拿到 CSRF 令牌和会话 Cookie
-            var loginPage = client.get("/auth/login");
-            String cookie = loginPage.header("Set-Cookie");
-            String token = extractCsrf(loginPage.body().string());
+            // 登录（CSRF 令牌、Cookie 都由 TestHttp 处理掉了）
+            login(client, "john@example.com");
 
-            // ② POST 登录
-            var login = client.post("/auth/login",
-                Map.of("email", "john@example.com",
-                       "password", "cat12345",
-                       "_csrf", token),
-                builder -&gt; builder.header("Cookie", sessionOf(cookie)));
-
-            assertThat(login.code()).isEqualTo(302);
-            assertThat(login.header("Location")).isEqualTo("/");
-
-            // ③ 带着会话访问首页
-            var home = client.get("/", builder -&gt;
-                builder.header("Cookie", sessionOf(cookie)));
-
-            assertThat(home.body().string())
+            // 带着会话访问首页 —— 客户端自己记着 Cookie
+            assertThat(client.get("/").body().string())
                 .contains("john")
                 .contains("登出");
         });
     }
-
-    private static String extractCsrf(String html) {
-        Matcher m = CSRF.matcher(html);
-        assertThat(m.find()).as("页面里应该有 CSRF 隐藏字段").isTrue();
-        return m.group(1);
-    }
-
-    /** 从 Set-Cookie 头里取出 name=value 部分，丢掉 Path/HttpOnly 等属性 */
-    private static String sessionOf(String setCookieHeader) {
-        return setCookieHeader.split(";", 2)[0];
-    }
 }
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 一个测试里换账号，必须先登出</div>
+  <p>
+    "用 A 发文章，再用 B 去评论"这种测试很常见。直觉是直接再
+    <code>login(client, "b@example.com")</code>，但<strong>这会失败</strong>，
+    而且报错信息指向一个完全无关的地方：
+  </p>
+<div class="code" data-lang="text">
+<pre>
+java.lang.AssertionError: 页面里应该有 _csrf 隐藏域
+</pre>
+</div>
+  <p>
+    原因是 <code>GET /auth/login</code> 在<strong>已登录</strong>时会直接重定向到首页
+    （这是对的产品行为），于是取令牌的那次请求拿到的是一个 302 的空响应体，
+    里面当然没有 <code>_csrf</code>。
+  </p>
+  <p>
+    所以换账号要走 <code>switchUser()</code>：先登出，再登录。
+  </p>
 </div>
 
 <div class="box tip">
@@ -696,7 +788,7 @@ class ApiTest {
                 b -&gt; b.header("Authorization", "Bearer " + token));
 
             assertThat(created.code()).isEqualTo(201);
-            String location = created.header("Location");
+            String location = created.headers().get("Location").get(0);
             assertThat(location).isNotNull().contains("/api/v1/posts/");
 
             // ③ 按 Location 读回来
@@ -755,9 +847,27 @@ class ApiTest {
 <div class="code" data-lang="bash">
 <pre>
 # 第一次要装浏览器（约 300 MB，只需一次）
-mvn exec:java -Dexec.mainClass=com.microsoft.playwright.CLI \
-              -Dexec.classpathScope=test -Dexec.args="install chromium"
+# 先把含测试依赖的 classpath 导出来，再用普通的 java 跑 Playwright 的 CLI
+mvn -q dependency:build-classpath \
+    -Dmdep.includeScope=test -Dmdep.outputFile=target/cp.txt
+
+java -cp "target/classes:$(cat target/cp.txt)" \
+     com.microsoft.playwright.CLI install chromium
 </pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么不用 <code>mvn exec:java</code></div>
+  <p>
+    第 3 章把 <code>exec-maven-plugin</code> 配成了 <code>exec:exec</code>
+    的形式（插件级 <code>&lt;configuration&gt;</code> 里写死了
+    <code>executable</code> 和 <code>commandlineArgs</code>），
+    那套配置里没有 <code>mainClass</code>，<code>exec:java</code> 跑不了。
+  </p>
+  <p>
+    与其为了装一次浏览器再加一个 execution，不如直接把 classpath 导出来用
+    <code>java</code> 跑 —— 反正这是个一次性的命令。
+  </p>
 </div>
 
 <div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/e2e/EndToEndTest.java">
@@ -815,7 +925,7 @@ class EndToEndTest {
 
             // ① 打开首页
             page.navigate(url("/"));
-            assertThat(page.locator("h1")).containsText("陌生人");
+            assertThat(page.locator("h1")).containsText("欢迎来到 Javalinky");
 
             // ② 点"登录"
             page.getByRole(com.microsoft.playwright.options.AriaRole.LINK,
@@ -979,7 +1089,7 @@ config.routes.post("/posts", ctx -&gt; {
 <div class="exercise">
   <h3>动手练习</h3>
   <ol>
-    <li>跑 <code>APP_PROFILE=test mvn clean verify</code>，打开
+    <li>跑 <code>mvn clean verify</code>，打开
         <code>target/site/jacoco/index.html</code>。
         按包排序，找出覆盖率最低的那个包。
         然后看 <strong>Branch</strong> 那一栏，找出"行覆盖高但分支覆盖低"的类。</li>

@@ -41,9 +41,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -589,6 +589,9 @@ target/
 .env
 *.log
 
+# H2 开发库（第 5 章会生成 data/javalinky-dev.mv.db）
+data/
+
 # IDE
 .idea/
 *.iml
@@ -599,6 +602,9 @@ target/
 
 # JTE 生成的类（第 3 章）
 jte-classes/
+
+# 运行时产生的日志目录（第 17 章）
+logs/
 </pre>
 </div>
 

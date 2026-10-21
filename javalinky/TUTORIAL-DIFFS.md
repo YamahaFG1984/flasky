@@ -1,10 +1,14 @@
-# 教程文字 ↔ 配套代码的差异清单
+# 排错清单：写这份代码时踩到的 45 个坑
 
 写这份代码的过程中，凡是“照教程抄下来编译不过 / 跑不起来 / 行为不对”的地方都记在这里。
 每一条都是真正踩到的，不是看文档猜的。前面几条是 API 层面的硬错误，后面几条是
 顺序、缺文件、以及需要补充说明的地方。
 
-> 代码以仓库为准；这份清单同时也是回写教程 HTML 的 TODO。
+> **这些修正已经全部回写进 `docs/javalin/*.html`**，所以教程正文和本仓库的代码现在是一致的。
+> 大多数不是悄悄改掉，而是在正文里留成一个 ⚠️ 警告框，把“错的写法长什么样、
+> 报什么错、为什么”一起写出来 —— 你在别处（旧博客、AI 生成的代码）还会再遇到它们。
+>
+> 这份文件保留下来当**索引**用：照着报错信息在这里搜，比重读一章快。
 
 1. ch03/ch04/ch05: `JavalinJte.directoryTemplateEngine()` 不存在（Kotlin 伴生对象，Java 侧要写
    `JavalinJte.Companion.directoryTemplateEngine()`）。顺带加一段「Javalin 是 Kotlin 写的，
@@ -113,8 +117,9 @@
     （本项目里是 at.favre.lib:bcrypt 带的 META-INF/PFOPENSO.SF）。
     要加 <filters> 排除 META-INF/*.SF、*.DSA、*.RSA 和重复的 module-info.class。
     这个坑第 7 章打包时还没触发（那时还没引入 bcrypt），到第 17 章部署才炸。
-40. ch17 的 Dockerfile 健康检查和 deploy.sh 都在请求 /healthz，但全书从没定义过这个路由。
-    仓库里补了 GET /healthz（顺便查一次数据库，避免“端口开着但后端全坏”）。
+40. ~~ch17 的 /healthz 路由没定义~~ —— **这一条记错了**：教程 ch17 一直给了
+    `get("/healthz", ...)`（而且已经带上 `select 1`）。Dockerfile 的健康检查和
+    deploy.sh 请求它是对的，仓库和文档本来就一致，无需改动。留在这里是为了不打乱编号。
 41. ch17 JavalinkyApp 用了 cfg.behindProxy()，但第 7 章的 AppConfig 没有这个字段。
 42. ch17 把带 SMTPAppender 的 logback.xml 直接替换掉开发用的那份，于是开发和测试也会
     挂上邮件 appender（没有 ADMIN_EMAIL 时 logback 还会报错）。仓库拆成两份：
@@ -128,3 +133,19 @@
 45. 预编译模板要两个 jte-maven-plugin 执行：HTML 一份，纯文本一份
     （sourceDirectory=src/main/jte-text + contentType=Plain + packageName=gg.jte.generated.text），
     对应 Templates.textPrecompiled()。只配一个的话生产模式发邮件会找不到纯文本模板。
+
+---
+
+## 回写文档时又发现的两条（已同时改掉代码和文档）
+
+46. **生产启动命令没有指定 `logback-prod.xml`。** 第 42 条把日志配置拆成了
+    `logback.xml`（开发/测试）和 `logback-prod.xml`（文件 + 邮件 appender），
+    但 Logback 默认只找 `logback.xml` —— 不加
+    `-Dlogback.configurationFile=logback-prod.xml`，生产环境永远用的是开发那份，
+    滚动文件和错误邮件全都不生效，而且一点报错都没有。
+    `Dockerfile`、`deploy/javalinky.service`、`Procfile` 三处都补上了。
+
+47. `deploy/javalinky.service` 把 `StartLimitBurst` / `StartLimitIntervalSec`
+    写在了 `[Service]` 段里。systemd v229 之后这两个键属于 `[Unit]`，
+    放错位置会被**静默忽略**（`systemd-analyze verify` 会提示
+    `Unknown key name ... ignoring`），于是“限制重启频率”根本没生效。已移到 `[Unit]`。

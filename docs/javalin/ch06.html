@@ -42,9 +42,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -183,6 +183,16 @@ public record MailConfig(
     String from,           // 如 "Javalinky &lt;no-reply@javalinky.example&gt;"
     String subjectPrefix   // 如 "[Javalinky] "
 ) {
+    /** 测试用：host 留空，Mailer 会直接跳过发送（第 7 章的 AppConfig.test() 要用） */
+    public static MailConfig disabled() {
+        return new MailConfig("", 0, false, null, null,
+            "Javalinky &lt;no-reply@javalinky.example&gt;", "[Javalinky] ");
+    }
+
+    public boolean enabled() {
+        return host != null &amp;&amp; !host.isBlank();
+    }
+
     /** 开发默认值：对准本地 Mailpit */
     public static MailConfig fromEnv() {
         var env = System.getenv();
@@ -343,8 +353,31 @@ public class Mailer {
 </p>
 
 <p>
-  JTE 的转义策略由 <code>ContentType</code> 决定，所以要建<strong>两个</strong> <code>TemplateEngine</code>：
+  JTE 的转义策略由 <code>ContentType</code> 决定，而<strong>一个 <code>TemplateEngine</code>
+  只能有一个 <code>ContentType</code></strong>。所以要建两个引擎 ——
+  而且关键的一步是：<strong>它们必须读两个不同的源目录</strong>。
 </p>
+
+<div class="box warn">
+  <div class="t">&#9888; 纯文本模板要单独放一个目录，不能和网页模板混在一起</div>
+  <p>
+    直觉上两个引擎指向同一个 <code>src/main/jte</code> 就行，开发模式下也确实能跑 ——
+    两个引擎各自把模板编译到自己的 <code>jte-classes/html</code> 和 <code>jte-classes/text</code>，互不干扰。
+  </p>
+  <p>
+    但<strong>到第 17 章预编译时会撞车</strong>：那时模板由 <code>jte-maven-plugin</code>
+    在构建期生成 Java 源码，同一个源目录下的同一个文件只会按<strong>一种</strong>
+    <code>ContentType</code> 生成一次，而两份产物的包名又是同一个
+    <code>gg.jte.generated.*</code>。结果是纯文本邮件要么被当成 HTML 转义，要么干脆找不到。
+  </p>
+  <p>
+    所以从一开始就分开放：
+  </p>
+  <ul>
+    <li><code>src/main/jte/</code> &mdash; 网页和 HTML 邮件，<code>ContentType.Html</code></li>
+    <li><code>src/main/jte-text/</code> &mdash; 纯文本邮件，<code>ContentType.Plain</code></li>
+  </ul>
+</div>
 
 <div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Templates.java">
 <pre>
@@ -358,21 +391,32 @@ import gg.jte.resolve.DirectoryCodeResolver;
 import java.nio.file.Path;
 import java.util.Map;
 
+/**
+ * 一个 TemplateEngine 只有一个 ContentType，所以网页/HTML 邮件和纯文本邮件
+ * 必须用两个引擎、两个源目录：
+ *   src/main/jte       → ContentType.Html  （会按上下文转义）
+ *   src/main/jte-text  → ContentType.Plain （不做任何转义）
+ */
 public final class Templates {
 
-    private static final Path JTE_ROOT = Path.of("src", "main", "jte");
+    private static final Path HTML_ROOT = Path.of("src", "main", "jte");
+    private static final Path TEXT_ROOT = Path.of("src", "main", "jte-text");
 
     /** 网页和 HTML 邮件用：会做按上下文的 HTML 转义 */
-    public static final TemplateEngine HTML = TemplateEngine.create(
-        new DirectoryCodeResolver(JTE_ROOT),
-        Path.of("jte-classes", "html"),
-        ContentType.Html);
+    public static TemplateEngine directory() {
+        return TemplateEngine.create(
+            new DirectoryCodeResolver(HTML_ROOT),
+            Path.of("jte-classes", "html"),
+            ContentType.Html);
+    }
 
     /** 纯文本邮件用：不做任何转义 */
-    public static final TemplateEngine TEXT = TemplateEngine.create(
-        new DirectoryCodeResolver(JTE_ROOT),
-        Path.of("jte-classes", "text"),
-        ContentType.Plain);
+    public static TemplateEngine textDirectory() {
+        return TemplateEngine.create(
+            new DirectoryCodeResolver(TEXT_ROOT),
+            Path.of("jte-classes", "text"),
+            ContentType.Plain);
+    }
 
     /** 渲染成字符串（而不是直接写进 HTTP 响应） */
     public static String render(TemplateEngine engine, String template, Map&lt;String, Object&gt; model) {
@@ -386,17 +430,29 @@ public final class Templates {
 </pre>
 </div>
 
-<p>然后让 Javalin 用同一个 HTML 引擎，而不是自己再建一个：</p>
+<div class="box note">
+  <div class="t">&#9432; 为什么是方法而不是 <code>static final</code> 常量</div>
+  <p>
+    第 17 章生产模式要换成<strong>预编译</strong>的引擎，第 7 章还要按环境档位选择用哪一个。
+    如果写成静态常量，类一加载就会去 <code>src/main/jte</code> 找源文件 ——
+    而生产环境的 JAR 里根本没有那个目录。做成工厂方法，调用方才能决定建哪一种。
+  </p>
+</div>
+
+<p>然后让 Javalin 用 HTML 那个引擎，而不是自己再建一个：</p>
 
 <div class="code" data-lang="java" data-file="App.java">
 <pre>
-config.fileRenderer(new JavalinJte(Templates.HTML));
+var htmlEngine = Templates.directory();
+var textEngine = Templates.textDirectory();
+
+config.fileRenderer(new JavalinJte(htmlEngine));
 </pre>
 </div>
 
 <h3>两个邮件模板</h3>
 
-<div class="code" data-lang="jte" data-file="src/main/jte/mail/confirm.txt.jte">
+<div class="code" data-lang="jte" data-file="src/main/jte-text/mail/confirm.txt.jte">
 <pre>
 @param String username
 @param String confirmUrl
@@ -464,17 +520,25 @@ ${confirmUrl}
 package com.example.javalinky.mail;
 
 import com.example.javalinky.web.Templates;
+import gg.jte.TemplateEngine;
+
 import java.util.Map;
 
 /** 业务语义的邮件发送入口。处理器只调这里的方法，不碰 Mailer。 */
 public class MailService {
 
     private final Mailer mailer;
-    private final String siteBaseUrl;   // 如 "http://localhost:7070"
+    private final String siteBaseUrl;       // 如 "http://localhost:7070"
+    private final TemplateEngine html;      // ContentType.Html
+    private final TemplateEngine text;      // ContentType.Plain
 
-    public MailService(Mailer mailer, String siteBaseUrl) {
+    // 两个引擎从外面传进来，这样第 7 章能按环境档位换成预编译的版本
+    public MailService(Mailer mailer, String siteBaseUrl,
+                       TemplateEngine html, TemplateEngine text) {
         this.mailer = mailer;
         this.siteBaseUrl = siteBaseUrl;
+        this.html = html;
+        this.text = text;
     }
 
     public void sendConfirmation(String to, String username, String token) {
@@ -482,9 +546,7 @@ public class MailService {
             "username", username,
             "confirmUrl", siteBaseUrl + "/auth/confirm/" + token
         );
-        mailer.send(to, "确认你的账号",
-            Templates.render(Templates.TEXT, "mail/confirm.txt.jte", model),
-            Templates.render(Templates.HTML, "mail/confirm.html.jte", model));
+        send(to, "确认你的账号", "mail/confirm", model);
     }
 
     public void sendPasswordReset(String to, String username, String token) {
@@ -492,17 +554,20 @@ public class MailService {
             "username", username,
             "resetUrl", siteBaseUrl + "/auth/reset/" + token
         );
-        mailer.send(to, "重置你的密码",
-            Templates.render(Templates.TEXT, "mail/reset.txt.jte", model),
-            Templates.render(Templates.HTML, "mail/reset.html.jte", model));
+        send(to, "重置你的密码", "mail/reset", model);
     }
 
     /** 第 17 章：有新用户注册时通知管理员 */
     public void notifyAdminNewUser(String adminEmail, String username) {
-        var model = Map.&lt;String, Object&gt;of("username", username);
-        mailer.send(adminEmail, "新用户注册",
-            Templates.render(Templates.TEXT, "mail/new_user.txt.jte", model),
-            Templates.render(Templates.HTML, "mail/new_user.html.jte", model));
+        send(adminEmail, "新用户注册", "mail/new_user",
+             Map.&lt;String, Object&gt;of("username", username));
+    }
+
+    /** 两个版本用同一个基名：src/main/jte-text/mail/x.txt.jte 和 src/main/jte/mail/x.html.jte */
+    private void send(String to, String subject, String baseName, Map&lt;String, Object&gt; model) {
+        mailer.send(to, subject,
+            Templates.render(text, baseName + ".txt.jte", model),
+            Templates.render(html, baseName + ".html.jte", model));
     }
 }
 </pre>
@@ -650,9 +715,13 @@ Executors.newVirtualThreadPerTaskExecutor();
 public static void main(String[] args) {
     Db.init(/* ... */);
 
+    var htmlEngine = Templates.directory();
+    var textEngine = Templates.textDirectory();
+
     var mailer = new Mailer(MailConfig.fromEnv());
     var mail = new MailService(mailer,
-        System.getenv().getOrDefault("SITE_BASE_URL", "http://localhost:7070"));
+        System.getenv().getOrDefault("SITE_BASE_URL", "http://localhost:7070"),
+        htmlEngine, textEngine);
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -&gt; {
         mailer.close();   // 等待排队中的邮件发完
@@ -660,7 +729,7 @@ public static void main(String[] args) {
     }));
 
     Javalin.create(config -&gt; {
-        config.fileRenderer(new JavalinJte(Templates.HTML));
+        config.fileRenderer(new JavalinJte(htmlEngine));
         // ...
 
         // 临时的试验路由，第 8 章会换成真正的注册流程
@@ -684,7 +753,7 @@ public static void main(String[] args) {
 docker run -d --name mailpit -p 1025:1025 -p 8025:8025 axllent/mailpit
 
 # 2. 起应用（默认配置就指向 localhost:1025）
-mvn -q compile exec:java
+mvn -q compile exec:exec
 
 # 3. 在页面上提交一个新名字，然后打开 http://localhost:8025
 </pre>
@@ -747,7 +816,7 @@ ADMIN_EMAIL=you@example.com
         （第 8 章会用到）。注意纯文本版里不要出现 HTML 标签。</li>
     <li>在纯文本模板里写一个包含 <code>&amp;</code> 和 <code>&lt;</code> 的用户名，
         确认它<strong>没有</strong>被转义成 <code>&amp;amp;</code>。
-        然后故意用 <code>Templates.HTML</code> 去渲染那个 <code>.txt.jte</code>，
+        然后故意用 HTML 引擎（<code>Templates.directory()</code>）去渲染那个 <code>.txt.jte</code>，
         对比结果 —— 这就是为什么要两个引擎。</li>
     <li>给 <code>MailService</code> 加一个开关：当环境变量 <code>MAIL_ENABLED=false</code> 时，
         只把邮件内容打到日志而不真发。这在跑自动化测试时很有用（第 15 章）。</li>

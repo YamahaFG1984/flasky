@@ -43,9 +43,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -101,6 +101,8 @@ public class Post {
     @JoinColumn(name = "author_id", nullable = false)
     private User author;
 
+    // ↓ Comment 实体是第 13 章才建的，这几行要等到那时候再加。
+    //   现在写上去会报 cannot find symbol: class Comment。
     @OneToMany(mappedBy = "post", fetch = FetchType.LAZY,
                cascade = CascadeType.ALL, orphanRemoval = true)
     private java.util.List&lt;Comment&gt; comments = new java.util.ArrayList&lt;&gt;();
@@ -348,13 +350,35 @@ public record Page&lt;T&gt;(List&lt;T&gt; items, int page, int size, long total)
 
 <h3>分页控件模板</h3>
 
+<div class="box warn">
+  <div class="t">&#9888; JTE 的注释是 <code>&lt;%-- --%&gt;</code>，不是 <code>@* *@</code></div>
+  <p>
+    JTE 的语法里有很多 <code>@</code> 开头的东西（<code>@param</code>、<code>@if</code>、
+    <code>@for</code>、<code>@template</code>），很容易顺手把 ASP.NET Razor 的
+    注释语法 <code>@* … *@</code> 也写上去 —— <strong>JTE 不支持它</strong>。
+  </p>
+  <p>
+    最坏的是它<strong>不报语法错误</strong>。写在 <code>@param</code> 后面时，
+    那一整串会被当成参数名的一部分，于是渲染时报一句看着毫无关联的话：
+  </p>
+<div class="code" data-lang="text">
+<pre>
+No parameter with name baseUrl is defined in tag/pagination.jte
+</pre>
+</div>
+  <p>
+    参数明明就写在那里 —— 这个错误能让人找上半小时。
+    正确的注释是 <code>&lt;%-- --%&gt;</code>（和 JSP 一样），它不会出现在输出里。
+  </p>
+</div>
+
 <div class="code" data-lang="jte" data-file="src/main/jte/tag/pagination.jte">
 <pre>
 @import com.example.javalinky.db.Page
 
 @param Page&lt;?&gt; page
-@param String baseUrl          @* 如 "/" 或 "/user/john" *@
-@param String fragment = ""    @* 如 "#comments" *@
+@param String baseUrl          &lt;%-- 如 "/" 或 "/user/john" --%&gt;
+@param String fragment = ""    &lt;%-- 如 "#comments" --%&gt;
 
 @if(page.totalPages() &gt; 1)
   &lt;nav aria-label="分页"&gt;
@@ -471,12 +495,12 @@ select * from posts
 <pre>
 private void index(Context ctx) {
     int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class)
-                                 .allowNullable().get());
+                                 .getOrNull());
     var posts = services.postRepo(ctx).findAll(page, cfg.postsPerPage());
 
     View.render(ctx, "index.jte", "首页",
                 "form", FormView.empty(),
-                "posts", PostListPage.of(posts, CurrentUser.get(ctx)));
+                "posts", PostListPage.of(posts, CurrentUser.get(ctx), Map.of()));
 }
 
 private void createPost(Context ctx) {
@@ -522,7 +546,13 @@ public record PostListPage(Page&lt;Item&gt; page) {
         boolean canEdit        // 当前访客能不能编辑这一篇
     ) {}
 
-    public static PostListPage of(Page&lt;Post&gt; source, User viewer) {
+    /**
+     * commentCounts 由调用方用一条聚合查询批量取好再传进来 ——
+     * 千万不要在这个循环里调 post.getComments().size()，见下面的说明。
+     * 第 13 章之前还没有 Comment 实体，传一个空 Map 即可。
+     */
+    public static PostListPage of(Page&lt;Post&gt; source, User viewer,
+                                  Map&lt;Long, Long&gt; commentCounts) {
         List&lt;Item&gt; items = source.items().stream()
             .map(post -&gt; new Item(
                 post.getId(),
@@ -530,7 +560,7 @@ public record PostListPage(Page&lt;Item&gt; page) {
                 post.getTimestamp(),
                 post.getAuthor().getUsername(),
                 post.getAuthor().avatarHash(),
-                post.getComments().size(),      // 注意：这会触发懒加载，见下面的说明
+                commentCounts.getOrDefault(post.getId(), 0L),
                 canEdit(viewer, post)))
             .toList();
 
@@ -548,15 +578,20 @@ public record PostListPage(Page&lt;Item&gt; page) {
 </div>
 
 <div class="box warn">
-  <div class="t">&#9888; <code>post.getComments().size()</code> 是一个 N+1 陷阱</div>
+  <div class="t">&#9888; 为什么不写 <code>post.getComments().size()</code></div>
   <p>
-    列 20 篇文章，这行代码会发 20 条 <code>select … from comments where post_id = ?</code>。
-    更糟的是它把每条评论的全部字段都查出来了，只为了数个数。
+    那是最自然的写法，也是本章最该避开的一行代码。
+    列 20 篇文章，它会发 20 条 <code>select … from comments where post_id = ?</code>，
+    而且把每条评论的<strong>全部字段</strong>都查出来，只为了数个数。
   </p>
-  <p>正确做法是用一条聚合查询把评论数一次查完：</p>
-  <div class="code" data-lang="java">
+  <p>
+    这不是"以后再优化"的事：第 16 章会写一个测试，断言首页的查询条数
+    <strong>不随文章数增长</strong>。用懒加载计数的话那个测试必然失败。
+    所以从一开始就用一条聚合查询把评论数批量取好：
+  </p>
+  <div class="code" data-lang="java" data-file="db/CommentRepository.java（第 13 章建这个类）">
 <pre>
-/** 批量查"每篇文章有多少条评论" */
+/** 批量查"每篇文章有多少条评论"。第 13 章的最终版还会加一句 and c.disabled = false */
 public Map&lt;Long, Long&gt; countCommentsByPost(List&lt;Long&gt; postIds) {
     if (postIds.isEmpty()) return Map.of();
     return em.createQuery("""
@@ -573,6 +608,24 @@ public Map&lt;Long, Long&gt; countCommentsByPost(List&lt;Long&gt; postIds) {
 }
 </pre>
   </div>
+  <p>
+    调用方先把这一页的文章 id 收齐，查一次，再把结果交给 <code>PostListPage.of</code>：
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+var posts = services.postRepo(ctx).findAll(page, cfg.postsPerPage());
+var ids = posts.items().stream().map(Post::getId).toList();
+var counts = services.commentRepo(ctx).countCommentsByPost(ids);   // 第 13 章起才有
+
+View.render(ctx, "index.jte", "首页",
+            "form", FormView.empty(),
+            "posts", PostListPage.of(posts, CurrentUser.get(ctx), counts));
+</pre>
+  </div>
+  <p>
+    <strong>第 13 章之前</strong>还没有 <code>Comment</code> 实体，
+    这里传 <code>Map.of()</code> 就行，评论数一律显示 0。
+  </p>
   <p>
     或者更简单：在 <code>posts</code> 表上加一个 <code>comment_count</code> 列，
     发评论时 +1（这叫<strong>反范式化计数器</strong>，第 13 章会讨论）。
@@ -663,17 +716,23 @@ import java.util.Random;
 
 /** 造假数据。只在开发环境用。 */
 public static void fake(int userCount, int postCount) {
-    var faker = new Faker(Locale.SIMPLIFIED_CHINESE);
+    // 两个 Faker：展示字段用中文，标识字段必须是 ASCII（原因见下面的说明）
+    var zh = new Faker(Locale.SIMPLIFIED_CHINESE);
+    var en = new Faker(Locale.ENGLISH);
+    var faker = zh;
     var random = new Random();
     var defaultRole = new RoleRepository(em).defaultRole();
 
     // --- 用户 ---
     int created = 0;
-    while (created &lt; userCount) {
-        String email = faker.internet().emailAddress();
-        String username = faker.internet().username();
+    int attempts = 0;
+    while (created &lt; userCount &amp;&amp; attempts &lt; userCount * 20) {
+        attempts++;
+        // 用序号兜底保证唯一，省得靠运气
+        String username = asciiUsername(en.internet().username()) + (created + 1);
+        String email = username + "@example.com";
 
-        // 假数据会撞车，撞了就跳过
+        // 重复跑 fake 时还是可能撞车，撞了就跳过
         if (exists(email, username)) continue;
 
         var user = new User(email, username);
@@ -709,6 +768,15 @@ public static void fake(int userCount, int postCount) {
     System.out.printf("已生成 %d 个用户、%d 篇文章%n", created, postCount);
 }
 
+/** Datafaker 给的用户名可能含中文或奇怪字符，清成合法的标识符 */
+private static String asciiUsername(String raw) {
+    String cleaned = raw.replaceAll("[^A-Za-z0-9_.]", "");
+    if (cleaned.isEmpty() || !Character.isLetter(cleaned.charAt(0))) {
+        cleaned = "u" + cleaned;
+    }
+    return cleaned.length() &gt; 40 ? cleaned.substring(0, 40) : cleaned;
+}
+
 /** 带点 Markdown 语法的假正文，方便验证渲染 */
 private static String fakeMarkdown(Faker faker) {
     return """
@@ -731,9 +799,39 @@ private static String fakeMarkdown(Faker faker) {
 
 <div class="code" data-lang="bash">
 <pre>
-mvn -q compile exec:java -Dexec.mainClass=com.example.javalinky.Cli \
-    -Dexec.args="fake 100 400"
+mvn -q compile exec:exec@cli -Dcli.args="fake 100 400"
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 只用中文 Faker 会造不出用户 —— 一个很具体的坑</div>
+  <p>
+    最自然的写法是 <code>new Faker(Locale.SIMPLIFIED_CHINESE)</code> 一个搞定，
+    毕竟我们想要中文的姓名和城市。但<strong>标识字段会出问题</strong>：
+  </p>
+  <div class="tw">
+  <table>
+  <tr><th>调用</th><th>中文 locale 的产出</th><th>后果</th></tr>
+  <tr><td><code>internet().username()</code></td><td><code>峻熙.梁丘</code></td>
+      <td>不符合注册时的 <code>^[A-Za-z][A-Za-z0-9_.]*$</code></td></tr>
+  <tr><td><code>internet().emailAddress()</code></td><td><code>.@hotmail.com</code></td>
+      <td>本地部分被清空了，几乎每次都一样 &rarr; 唯一索引冲突</td></tr>
+  </table>
+  </div>
+  <p>
+    于是 <code>exists()</code> 一路 <code>continue</code>，
+    <code>fake 30 60</code> 实际只造出 <strong>3 个用户</strong> ——
+    而且因为 <code>while</code> 没有退出条件，运气不好就是死循环。
+  </p>
+  <p>
+    解法有三层，都很朴素：<strong>两个 Faker</strong>（中文做展示字段、英文做标识字段）、
+    <strong>清洗 + 序号兜底</strong>保证唯一（<code>asciiUsername(...) + (created + 1)</code>）、
+    以及给循环加一个 <code>attempts</code> 上限。
+  </p>
+  <p>
+    更一般的教训：<strong>假数据生成器的 locale 只该影响"给人看"的字段</strong>。
+    用户名、邮箱、slug、文件名这些受格式约束的东西，永远用 ASCII 生成再自己校验。
+  </p>
 </div>
 
 <div class="box tip">
@@ -1037,10 +1135,34 @@ em.createQuery("select p from Post p", Post.class)
 
 <h2 id="permalink">永久链接与文章编辑器</h2>
 
+<div class="box warn">
+  <div class="t">&#9888; 这个处理器不能叫 <code>post</code></div>
+  <p>
+    路由模块顶上有一行 <code>import static io.javalin.apibuilder.ApiBuilder.*;</code>，
+    我们就是靠它才能直接写 <code>get(...)</code>、<code>post(...)</code>。
+    如果再给类加一个 <code>private void post(Context ctx)</code>，
+    <strong>实例方法会遮蔽同名的静态导入</strong>（Java 的作用域规则：
+    类自己的成员优先），于是注册路由那一行就变成了在调你自己的处理器：
+  </p>
+<div class="code" data-lang="text">
+<pre>
+error: method post in class MainRoutes cannot be applied to given types;
+  required: io.javalin.http.Context
+  found:    java.lang.String, io.javalin.http.Handler
+</pre>
+</div>
+  <p>
+    报错指向的是 <code>post("/post", this::createPost)</code> 这种完全正常的行，
+    而真正的原因在几十行之外。叫 <code>showPost</code> 就没事了 ——
+    顺带一提，<code>get</code>、<code>put</code>、<code>delete</code>、<code>path</code>
+    这几个名字也都要避开。
+  </p>
+</div>
+
 <div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
 <pre>
-/** 单篇文章页。URL: /post/{id} */
-private void post(Context ctx) {
+/** 单篇文章页。URL: /post/{id}。注意方法名不能叫 post，见下面的说明 */
+private void showPost(Context ctx) {
     long id = ctx.pathParamAsClass("id", Long.class).get();
     Post post = services.postRepo(ctx).findById(id)
         .orElseThrow(() -&gt; new NotFoundResponse("文章不存在"));
@@ -1048,7 +1170,7 @@ private void post(Context ctx) {
     // 第 13 章会在这里加上评论列表
     View.render(ctx, "post.jte", "文章",
                 "post", PostListPage.of(
-                    Page.of(List.of(post), 1, 1, 1), CurrentUser.get(ctx)));
+                    Page.of(List.of(post), 1, 1, 1), CurrentUser.get(ctx), Map.of()));
 }
 
 private void editPostForm(Context ctx) {

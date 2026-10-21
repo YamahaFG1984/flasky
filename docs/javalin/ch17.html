@@ -44,9 +44,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -136,7 +136,33 @@ java -cp target/javalinky.jar com.example.javalinky.Cli deploy
 <figcaption>图 17-1　日志的三个去向</figcaption>
 </figure>
 
-<div class="code" data-lang="xml" data-file="src/main/resources/logback.xml">
+<div class="box warn">
+  <div class="t">&#9888; 这份配置要放进<strong>新文件</strong> <code>logback-prod.xml</code>，不要覆盖 <code>logback.xml</code></div>
+  <p>
+    直觉上应该直接改第 3 章那份 <code>logback.xml</code>，但那样会把下面的
+    <code>SMTPAppender</code> 挂到<strong>开发和测试</strong>上：每跑一次
+    <code>mvn test</code>，Logback 都要去连 SMTP；而且没设
+    <code>ADMIN_EMAIL</code> 时它会在启动阶段打一串配置错误。
+  </p>
+  <p>
+    所以保留两份，<strong>按启动参数选</strong>：
+  </p>
+  <ul>
+    <li><code>src/main/resources/logback.xml</code> &mdash; 开发/测试用，就是第 3 章那份（只有控制台）</li>
+    <li><code>src/main/resources/logback-prod.xml</code> &mdash; 下面这份，生产用</li>
+  </ul>
+<div class="code" data-lang="bash">
+<pre>
+java -Dlogback.configurationFile=logback-prod.xml -jar target/javalinky.jar
+</pre>
+</div>
+  <p>
+    Logback 默认只找 <code>logback.xml</code>，所以不加这个参数永远不会用到生产那份。
+    本章后面的 Dockerfile、systemd unit 和 Procfile 里都要带上它。
+  </p>
+</div>
+
+<div class="code" data-lang="xml" data-file="src/main/resources/logback-prod.xml">
 <pre>
 &lt;configuration&gt;
 
@@ -260,6 +286,42 @@ public final class RequestId {
 </pre>
 </div>
 
+<div class="box warn">
+  <div class="t">&#9888; <code>RequestId.install</code> 要排在 <code>Timing.install</code> <strong>之后</strong></div>
+  <p>
+    上面那句 <code>MDC.remove(MDC_KEY)</code> 写在 <code>after</code> 里，而
+    <strong>Javalin 按注册顺序执行同类型的过滤器</strong> ——
+    <code>after</code> 也是注册顺序，不是倒序。
+    所以如果把 <code>RequestId</code> 装在第 16 章的 <code>Timing</code> 前面，
+    它的清理会先跑，<code>Timing</code> 打慢请求日志时 MDC 已经空了：
+  </p>
+<div class="code" data-lang="text">
+<pre>
+10:42:07.113 WARN  [] c.e.javalinky.web.Timing - 慢请求 GET / 共 812ms ...
+                   ↑ 本该是 [a3f91b02]
+</pre>
+</div>
+  <p>
+    偏偏这正是最需要请求 ID 的那条日志。第 7 章的
+    <code>JavalinkyApp</code> 里，正确的顺序是：
+  </p>
+<div class="code" data-lang="java" data-file="JavalinkyApp.java">
+<pre>
+Timing.install(javalin, cfg);   // 量整个请求的耗时（它的 after 要读 MDC）
+RequestId.install(javalin);     // 把请求 id 放进 MDC 和响应头
+UnitOfWork.install(javalin);
+Csrf.install(javalin);
+CurrentUser.install(javalin);
+Authorization.install(javalin);
+</pre>
+</div>
+  <p>
+    一般的直觉是"请求 ID 要最先装，这样后面都能用"——
+    对 <code>before</code> 来说没错，但 <code>after</code> 的方向正好相反。
+    凡是在 <code>after</code> 里做清理的过滤器，都要放在<strong>用它的人后面</strong>。
+  </p>
+</div>
+
 <div class="box tip">
   <div class="t">&#128161; 为什么这个小东西价值很大</div>
   <p>
@@ -270,13 +332,49 @@ public final class RequestId {
     有了它：500 错误页上显示"错误编号 a3f91b02"，用户把这串字符发给你，
     <code>grep a3f91b02 javalinky.log</code> —— 整条链路的日志立刻全在眼前。
   </p>
-  <div class="code" data-lang="jte" data-file="error/500.jte">
+  <div class="code" data-lang="jte" data-file="src/main/jte/error/500.jte">
 <pre>
 &lt;p class="text-secondary small"&gt;
   如果需要帮助，请把这个编号告诉我们：&lt;code&gt;${requestId}&lt;/code&gt;
 &lt;/p&gt;
 </pre>
   </div>
+</div>
+
+<p>
+  模板里凭空出现的 <code>${requestId}</code> 得有人传进去。
+  第 7 章的 <code>ErrorPages</code> 现在要给 500 这一条多带一个参数：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/ErrorPages.java">
+<pre>
+public static void install(JavalinConfig config) {
+    config.routes.error(404, "html", ctx -&gt;
+        View.render(ctx, "error/404.jte", "页面不存在"));
+    config.routes.error(403, "html", ctx -&gt;
+        View.render(ctx, "error/403.jte", "没有权限"));
+
+    // 500 页把请求 id 显示出来，用户报错时能直接提供，方便在日志里定位
+    config.routes.error(500, "html", ctx -&gt;
+        View.render(ctx, "error/500.jte", "服务器错误",
+                    "requestId", String.valueOf(ctx.header(RequestId.HEADER))));
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么从响应头读，而不是从 MDC 读</div>
+  <p>
+    <code>MDC.get("requestId")</code> 看着更直接，但错误页有可能在
+    <code>RequestId</code> 的 <code>after</code> 清理之后才渲染 —— 那时 MDC 已经空了。
+    响应头是上面 <code>install</code> 里<strong>一进来就写好</strong>的，整个请求期间都在。
+  </p>
+  <p>
+    外面那层 <code>String.valueOf(...)</code> 不是多余的：JTE 的
+    <code>@param String requestId</code> 不接受缺失的参数，
+    真的拿不到时要给一个字符串（<code>"null"</code>）而不是 Java 的 <code>null</code>，
+    否则其它地方渲染 500 页会抛"参数缺失"，把一个 500 变成两个。
+  </p>
 </div>
 
 <h2 id="package">打包：一个 JAR 搞定</h2>
@@ -287,7 +385,11 @@ public final class RequestId {
   所以运行时编译模板的方式在生产环境行不通。
 </p>
 
-<p>解决办法是用 JTE 的 Maven 插件在打包时<strong>预编译</strong>模板：</p>
+<p>
+  解决办法是用 JTE 的 Maven 插件在打包时<strong>预编译</strong>模板。
+  注意要配<strong>两个执行</strong> —— 第 6 章说过 HTML 和纯文本是两个源目录、
+  两种 <code>ContentType</code>，预编译时也必须分别处理：
+</p>
 
 <div class="code" data-lang="xml" data-file="pom.xml（新增插件）">
 <pre>
@@ -295,35 +397,67 @@ public final class RequestId {
   &lt;groupId&gt;gg.jte&lt;/groupId&gt;
   &lt;artifactId&gt;jte-maven-plugin&lt;/artifactId&gt;
   &lt;version&gt;${jte.version}&lt;/version&gt;
-  &lt;configuration&gt;
-    &lt;sourceDirectory&gt;${basedir}/src/main/jte&lt;/sourceDirectory&gt;
-    &lt;contentType&gt;Html&lt;/contentType&gt;
-    &lt;!-- 把模板编译成 Java 源码，再由 javac 一起编译 --&gt;
-    &lt;targetDirectory&gt;${project.build.directory}/generated-sources/jte&lt;/targetDirectory&gt;
-  &lt;/configuration&gt;
   &lt;executions&gt;
+    &lt;!-- ① 网页和 HTML 邮件 --&gt;
     &lt;execution&gt;
+      &lt;id&gt;jte-html&lt;/id&gt;
       &lt;phase&gt;generate-sources&lt;/phase&gt;
       &lt;goals&gt;&lt;goal&gt;generate&lt;/goal&gt;&lt;/goals&gt;
+      &lt;configuration&gt;
+        &lt;sourceDirectory&gt;${basedir}/src/main/jte&lt;/sourceDirectory&gt;
+        &lt;contentType&gt;Html&lt;/contentType&gt;
+        &lt;!-- 把模板编译成 Java 源码，再由 javac 一起编译 --&gt;
+        &lt;targetDirectory&gt;${project.build.directory}/generated-sources/jte&lt;/targetDirectory&gt;
+      &lt;/configuration&gt;
+    &lt;/execution&gt;
+
+    &lt;!-- ② 纯文本邮件：另一个源目录、另一个 ContentType、另一个包名 --&gt;
+    &lt;execution&gt;
+      &lt;id&gt;jte-text&lt;/id&gt;
+      &lt;phase&gt;generate-sources&lt;/phase&gt;
+      &lt;goals&gt;&lt;goal&gt;generate&lt;/goal&gt;&lt;/goals&gt;
+      &lt;configuration&gt;
+        &lt;sourceDirectory&gt;${basedir}/src/main/jte-text&lt;/sourceDirectory&gt;
+        &lt;contentType&gt;Plain&lt;/contentType&gt;
+        &lt;packageName&gt;gg.jte.generated.text&lt;/packageName&gt;
+        &lt;targetDirectory&gt;${project.build.directory}/generated-sources/jte&lt;/targetDirectory&gt;
+      &lt;/configuration&gt;
     &lt;/execution&gt;
   &lt;/executions&gt;
 &lt;/plugin&gt;
 </pre>
 </div>
 
+<div class="box warn">
+  <div class="t">&#9888; <code>&lt;packageName&gt;</code> 必须给第二个执行换掉</div>
+  <p>
+    两个执行的产物都是 Java 源码，默认都生成在 <code>gg.jte.generated.*</code> 下。
+    如果不给纯文本那套换个包名，两边的类会撞在同一个包里 ——
+    <code>mvn package</code> 不一定报错，但运行时
+    <code>createPrecompiled</code> 按包名扫描时只能看到一套，
+    于是生产环境一发邮件就报"找不到 mail/confirm.txt.jte"。
+  </p>
+  <p>
+    这个坑只在<strong>生产模式</strong>暴露：开发模式两个引擎各自运行时编译，
+    包名由各自的输出目录隔开，完全正常。
+  </p>
+</div>
+
 <div class="code" data-lang="java" data-file="web/Templates.java（补上生产模式）">
 <pre>
-/** 开发用：从目录读源文件，改了就生效 */
-public static TemplateEngine directory() {
-    return TemplateEngine.create(
-        new DirectoryCodeResolver(Path.of("src", "main", "jte")),
-        Path.of("jte-classes", "html"),
-        ContentType.Html);
-}
-
 /** 生产用：读 jar 里预编译好的模板类，启动快、不需要编译器 */
 public static TemplateEngine precompiled() {
     return TemplateEngine.createPrecompiled(ContentType.Html);
+}
+
+/**
+ * 纯文本那套在另一个包里，所以不能用上面那个单参数的重载 ——
+ * 必须显式告诉它类加载器和包名。第一个参数是 classDirectory，
+ * 预编译的类已经在 classpath 上了，传 null。
+ */
+public static TemplateEngine textPrecompiled() {
+    return TemplateEngine.createPrecompiled(
+        null, ContentType.Plain, Templates.class.getClassLoader(), "gg.jte.generated.text");
 }
 </pre>
 </div>
@@ -342,7 +476,7 @@ DATABASE_URL="jdbc:h2:./data/prod-test;MODE=PostgreSQL" \
 DATABASE_USER=sa DATABASE_PASSWORD= \
 SECRET_KEY=$(openssl rand -hex 32) \
 ADMIN_EMAIL=you@example.com \
-java -jar target/javalinky.jar
+java -Dlogback.configurationFile=logback-prod.xml -jar target/javalinky.jar
 </pre>
 </div>
 
@@ -422,7 +556,7 @@ java -jar target/javalinky.jar
 <div class="code" data-lang="text" data-file="Procfile">
 <pre>
 release: java -cp target/javalinky.jar com.example.javalinky.Cli deploy
-web: java -XX:MaxRAMPercentage=75 -jar target/javalinky.jar
+web: java -XX:MaxRAMPercentage=75 -Dlogback.configurationFile=logback-prod.xml -jar target/javalinky.jar
 </pre>
 </div>
 
@@ -664,7 +798,9 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
 
 # exec 形式（不是 shell 形式）：这样 java 进程的 PID 是 1，
 # 能直接收到 docker stop 发的 SIGTERM，从而优雅关闭
-ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "app.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", \
+            "-Dlogback.configurationFile=logback-prod.xml", \
+            "-jar", "app.jar"]
 </pre>
 </div>
 
@@ -951,6 +1087,11 @@ sudo chown root:javalinky /etc/javalinky.env
 Description=Javalinky
 After=network.target postgresql.service
 Wants=postgresql.service
+# 限制重启频率，避免疯狂重启刷日志。
+# 注意这两个键属于 [Unit] —— 写在 [Service] 里 systemd 会直接忽略
+# （systemd-analyze verify 会提示 "Unknown key name ... ignoring"）
+StartLimitBurst=5
+StartLimitIntervalSec=120
 
 [Service]
 Type=simple
@@ -959,13 +1100,13 @@ Group=javalinky
 WorkingDirectory=/opt/javalinky
 EnvironmentFile=/etc/javalinky.env
 
-ExecStart=/usr/bin/java -XX:MaxRAMPercentage=70 -jar /opt/javalinky/javalinky.jar
+ExecStart=/usr/bin/java -XX:MaxRAMPercentage=70 \
+    -Dlogback.configurationFile=logback-prod.xml \
+    -jar /opt/javalinky/javalinky.jar
 
-# 挂了就自动重启，但限制频率避免疯狂重启刷日志
+# 挂了就自动重启
 Restart=always
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=120
 
 # 优雅关闭：发 SIGTERM 之后给 30 秒做完手里的请求
 KillSignal=SIGTERM

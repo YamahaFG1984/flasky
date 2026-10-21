@@ -43,9 +43,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -181,7 +181,7 @@ import io.javalin.rendering.template.JavalinJte;
 Javalin.create(config -&gt; {
     // directoryTemplateEngine() 从 src/main/jte 目录读模板：
     // 改 .jte 文件，刷新浏览器就生效，不用重启应用
-    config.fileRenderer(new JavalinJte(JavalinJte.directoryTemplateEngine()));
+    config.fileRenderer(new JavalinJte(JavalinJte.Companion.directoryTemplateEngine()));
 
     // ...
 }).start(7070);
@@ -196,8 +196,87 @@ Javalin.create(config -&gt; {
     预编译由 <code>jte-maven-plugin</code> 在 <code>mvn package</code> 时完成，第 17 章会配。
   </p>
   <p>
-    <code>JavalinJte.directoryTemplateEngine()</code> 从目录读源文件、运行时编译，支持热加载 —— 开发时用这个。
+    <code>JavalinJte.Companion.directoryTemplateEngine()</code> 从目录读源文件、运行时编译，支持热加载 —— 开发时用这个。
     第 7 章我们会按环境自动切换。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 那个 <code>.Companion.</code> 不是笔误</div>
+  <p>
+    <strong>Javalin 本身是用 Kotlin 写的</strong>。Kotlin 的静态工厂方法一般定义在
+    <code>companion object</code> 里；这东西编译成字节码后并不是 Java 的
+    <code>static</code> 方法，而是一个名叫 <code>Companion</code> 的静态嵌套对象的实例方法。
+    Kotlin 侧写 <code>JavalinJte.directoryTemplateEngine()</code> 就行，
+    <strong>Java 侧必须多写一截 <code>.Companion</code></strong>：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+// ❌ 编译不过：cannot find symbol: method directoryTemplateEngine()
+JavalinJte.directoryTemplateEngine()
+
+// ✅ Java 侧的正确写法
+JavalinJte.Companion.directoryTemplateEngine()
+</pre>
+</div>
+  <p>
+    只有标了 <code>@JvmStatic</code> 的成员才能省掉它，而这个方法没标。
+    后面凡是调 Javalin 类的“静态工厂方法”而找不到符号时，先试试加 <code>.Companion</code>。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 从这一章起，运行命令要从 <code>exec:java</code> 换成 <code>exec:exec</code></div>
+  <p>
+    把上面那行加进 <code>App.java</code>、再照第 1 章的 <code>mvn -q compile exec:java</code> 启动，
+    会在第一次渲染模板时炸掉：
+  </p>
+<div class="code" data-lang="text">
+<pre>
+java.lang.NoClassDefFoundError: gg/jte/Content
+</pre>
+</div>
+  <p>
+    依赖明明在 <code>pom.xml</code> 里，为什么找不到？因为
+    <strong><code>exec:java</code> 是在 Maven 自己的 JVM 里、用一个自建的类加载器跑你的 main 方法</strong>。
+    而 <code>directoryTemplateEngine()</code> 是<strong>运行时</strong>把 <code>.jte</code> 编译成 Java 类、
+    再用 <strong>另一个</strong> <code>URLClassLoader</code> 装进来的 —— 那个加载器的父级是
+    <strong>系统类加载器</strong>，而系统类加载器里只有 Maven 的东西，没有你的 <code>gg.jte.*</code>。
+    于是模板类加载到一半找不到父类。
+  </p>
+  <p>
+    解决办法不是调类加载器，而是<strong>别在 Maven 的 JVM 里跑</strong>：
+    <code>exec:exec</code> 会 fork 一个<strong>真正独立的 java 进程</strong>，
+    classpath 由命令行给全，一切照常。在 <code>pom.xml</code> 里把插件配置换成：
+  </p>
+<div class="code" data-lang="xml" data-file="pom.xml">
+<pre>
+&lt;plugin&gt;
+  &lt;groupId&gt;org.codehaus.mojo&lt;/groupId&gt;
+  &lt;artifactId&gt;exec-maven-plugin&lt;/artifactId&gt;
+  &lt;version&gt;3.5.0&lt;/version&gt;
+  &lt;configuration&gt;
+    &lt;executable&gt;java&lt;/executable&gt;
+    &lt;!-- %classpath 由插件展开成完整的 classpath --&gt;
+    &lt;commandlineArgs&gt;-classpath %classpath com.example.javalinky.App&lt;/commandlineArgs&gt;
+  &lt;/configuration&gt;
+&lt;/plugin&gt;
+</pre>
+</div>
+  <p>
+    以后启动一律是：
+  </p>
+<div class="code" data-lang="bash">
+<pre>
+mvn -q compile exec:exec
+</pre>
+</div>
+  <p>
+    <strong>注意用 <code>&lt;commandlineArgs&gt;</code> 而不是 <code>&lt;arguments&gt;&lt;classpath/&gt;</code></strong>。
+    后者只有 <code>exec:exec</code> 认得；一旦写进插件级的 <code>&lt;configuration&gt;</code>，
+    连带 <code>exec:java</code> 也会去解析它，然后报
+    <code>Unable to parse configuration ... parameter arguments</code>。
+    用 <code>commandlineArgs</code> 就不会互相干扰。
   </p>
 </div>
 
@@ -1119,7 +1198,7 @@ public class App {
         Javalin.create(config -&gt; {
 
             // --- 模板引擎 ---
-            config.fileRenderer(new JavalinJte(JavalinJte.directoryTemplateEngine()));
+            config.fileRenderer(new JavalinJte(JavalinJte.Companion.directoryTemplateEngine()));
 
             // --- 静态文件 ---
             config.staticFiles.add(f -&gt; {

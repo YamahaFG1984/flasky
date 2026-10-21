@@ -41,9 +41,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -217,6 +217,44 @@ mvn -q compile exec:java
 [main] INFO io.javalin.Javalin - You are running Javalin 7.2.3 (released ...).
 [main] INFO io.javalin.Javalin - Javalin started in 213ms \o/
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 你看到的可能是几百行 DEBUG —— 现在就配一个最小的 Logback</div>
+  <p>
+    上面那五行是<strong>配置好之后</strong>的样子。
+    Logback 在<strong>找不到配置文件</strong>时会退回默认行为：根日志级别是
+    <code>DEBUG</code>，全部打到控制台。Jetty 和 Javalin 在启动阶段的 DEBUG 日志非常多，
+    屏幕会被刷满，你自己的输出根本看不见。
+  </p>
+  <p>
+    加一个文件就好了。它放在 <code>src/main/resources/</code> 下，Logback 会自动找到：
+  </p>
+<div class="code" data-lang="xml" data-file="src/main/resources/logback.xml">
+<pre>
+&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;configuration&gt;
+  &lt;appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender"&gt;
+    &lt;encoder&gt;
+      &lt;pattern&gt;%d{HH:mm:ss.SSS} %-5level %logger{20} - %msg%n&lt;/pattern&gt;
+    &lt;/encoder&gt;
+  &lt;/appender&gt;
+
+  &lt;!-- 框架只看 INFO 及以上 --&gt;
+  &lt;logger name="org.eclipse.jetty" level="INFO"/&gt;
+  &lt;logger name="io.javalin" level="INFO"/&gt;
+
+  &lt;root level="INFO"&gt;
+    &lt;appender-ref ref="CONSOLE"/&gt;
+  &lt;/root&gt;
+&lt;/configuration&gt;
+</pre>
+</div>
+  <p>
+    第 16 章会往里加慢查询的 logger，第 17 章会在它旁边再放一份生产专用的
+    <code>logback-prod.xml</code>（文件、邮件 appender）。
+    现在这十几行足够用到那时候。
+  </p>
 </div>
 
 <p>

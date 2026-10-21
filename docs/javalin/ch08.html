@@ -43,9 +43,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -326,7 +326,8 @@ public final class CurrentUser {
                 return;
             }
             ctx.attribute(CTX_KEY, user);
-            user.setLastSeen(java.time.Instant.now());  // 第 10 章：记录最后活跃时间
+            // ↓ 这一行等第 10 章给 User 加上 lastSeen 字段之后再加（现在写了编译不过）
+            // user.setLastSeen(java.time.Instant.now());
         });
     }
 
@@ -662,7 +663,7 @@ private void register(Context ctx) {
     // 3. 创建用户
     var user = new User(email, form.username());
     user.setPassword(form.password());
-    user.setRole(services.roles(ctx).defaultRole());   // 第 9 章实现
+    user.setRole(services.roles(ctx).defaultRole());   // ← 第 9 章才有，见下面的说明
     users.save(user);
 
     // 4. 发确认邮件。注意：令牌要用 user.getId()，所以必须先 flush 拿到主键
@@ -674,6 +675,33 @@ private void register(Context ctx) {
     ctx.redirect(Routes.LOGIN);
 }
 </pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 这一章会用到两个第 9 章才有的东西</div>
+  <p>
+    上面那行 <code>services.roles(ctx).defaultRole()</code> 依赖
+    <code>RoleRepository</code>，而角色体系是<strong>第 9 章</strong>的内容。
+    现在想让注册跑通，有两条路：
+  </p>
+  <ol>
+    <li><strong>先把这一行删掉</strong>，等第 9 章再加回来 ——
+        <code>role</code> 可以为 null，注册流程本身不受影响。</li>
+    <li><strong>跳到第 9 章把角色那一节先做完</strong>，再回来。
+        配套代码的 <code>jv-ch08</code> 标签走的是这条路的简化版。</li>
+  </ol>
+  <p>
+    另外 <code>CurrentUser</code> 里的 <code>setLastSeen()</code> 和
+    <code>confirmEmailChange</code> 里的 <code>setAvatarHash(null)</code>
+    用的字段要到<strong>第 10 章</strong>才加进 <code>User</code>，
+    所以上面都先注释掉了。
+  </p>
+  <p>
+    等到第 9 章做完角色之后还有一件事要记得：<strong>测试里必须先灌角色</strong>。
+    <code>defaultRole()</code> 查不到"默认角色"时会抛
+    <code>IllegalStateException</code>，于是注册请求返回 500 ——
+    而错误信息里完全看不出和角色有关。第 9 章会专门说这件事。
+  </p>
 </div>
 
 <div class="box note">
@@ -791,6 +819,67 @@ config.routes.exception(jakarta.persistence.PersistenceException.class, (e, ctx)
   &lt;version&gt;4.5.0&lt;/version&gt;
 &lt;/dependency&gt;
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 加完这一条要立刻补一个 <code>jackson-bom</code>，否则运行时会崩</div>
+  <p>
+    <code>java-jwt</code> 自己带了一份 Jackson（它用 Jackson 解析 JWT 的载荷），
+    而 Javalin 也带了一份。两边版本不一样，Maven 的
+    <strong>“最近者优先”</strong>仲裁会挑出一个<strong>不自洽的组合</strong>：
+    <code>jackson-databind</code> 是新的，传递进来的 <code>jackson-core</code> 却是旧的。
+    编译毫无问题，一到运行时就是：
+  </p>
+<div class="code" data-lang="text">
+<pre>
+java.lang.NoSuchMethodError:
+  'void com.fasterxml.jackson.core.util.BufferRecycler.releaseToPool()'
+</pre>
+</div>
+  <p>
+    <code>NoSuchMethodError</code>（不是 <code>ClassNotFoundException</code>）几乎总是这个病：
+    类找到了，但是版本不对。先确认一下：
+  </p>
+<div class="code" data-lang="bash">
+<pre>
+mvn dependency:tree -Dincludes=com.fasterxml.jackson.core
+</pre>
+</div>
+  <p>
+    治法不是手动钉死某一条，而是<strong>导入官方的 BOM</strong> ——
+    让 Jackson 全家的版本由一份清单统一决定：
+  </p>
+<div class="code" data-lang="xml" data-file="pom.xml">
+<pre>
+&lt;properties&gt;
+  &lt;jackson.version&gt;2.20.0&lt;/jackson.version&gt;
+&lt;/properties&gt;
+
+&lt;dependencyManagement&gt;
+  &lt;dependencies&gt;
+    &lt;!-- scope=import + type=pom：把那份清单"摊开"成一堆版本约束 --&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;com.fasterxml.jackson&lt;/groupId&gt;
+      &lt;artifactId&gt;jackson-bom&lt;/artifactId&gt;
+      &lt;version&gt;${jackson.version}&lt;/version&gt;
+      &lt;type&gt;pom&lt;/type&gt;
+      &lt;scope&gt;import&lt;/scope&gt;
+    &lt;/dependency&gt;
+  &lt;/dependencies&gt;
+&lt;/dependencyManagement&gt;
+</pre>
+</div>
+  <p>
+    <code>dependencyManagement</code> 只<strong>规定版本</strong>，不引入依赖 ——
+    谁都没多拉一个 jar，但凡是 Jackson 的构件都统一成 2.20.0 了。
+    第 7 章的 <code>properties</code> 里其实已经有 <code>jackson.version</code>，
+    但光有属性没用，要真的 import 这个 BOM 才会生效。
+  </p>
+  <p>
+    <strong>这是 Java 生态里最值得养成的习惯之一</strong>：
+    凡是"一个项目分成十几个构件"的库（Jackson、JUnit、Netty、Spring），
+    都提供 BOM，用它比手写十几个版本号可靠得多。
+  </p>
 </div>
 
 <div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/util/Tokens.java">
@@ -1195,7 +1284,8 @@ private void confirmEmailChange(Context ctx) {
     }
 
     user.setEmail(newEmail);
-    user.setAvatarHash(null);      // 第 10 章：Gravatar 哈希是按邮箱算的，要重算
+    // ↓ 同样等第 10 章：Gravatar 哈希是按邮箱算的，换了邮箱要重算
+    // user.setAvatarHash(null);
     Flash.success(ctx, "邮箱已更新。");
     ctx.redirect(Routes.INDEX);
 }
@@ -1272,7 +1362,7 @@ class AuthTest {
     @Test
     void 未登录访问受保护页面会被挡住() {
         JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -&gt; {
-            // OkHttp 默认不跟随重定向，所以能直接看到 302/401
+            // 测试客户端默认不跟随重定向，所以能直接看到 302/401
             assertThat(client.get("/edit-profile").code()).isIn(302, 401);
         });
     }
@@ -1281,25 +1371,85 @@ class AuthTest {
     void 注册并登录的完整流程() {
         JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -&gt; {
             // JavalinTest 的客户端自带 Cookie 管理，所以会话能跨请求保持
-            var register = client.post("/auth/register", Map.of(
+            var register = postForm(client, "/auth/register", form(
+                "_csrf", csrfTokenFrom(client.get("/auth/register").body().string()),
                 "email", "john@example.com",
                 "username", "john",
                 "password", "cat12345",
-                "password2", "cat12345",
-                "_csrf", csrfTokenFrom(client.get("/auth/register"))
+                "password2", "cat12345"
             ));
             assertThat(register.code()).isIn(200, 302);
 
-            var login = client.post("/auth/login", Map.of(
+            var login = postForm(client, "/auth/login", form(
+                "_csrf", csrfTokenFrom(client.get("/auth/login").body().string()),
                 "email", "john@example.com",
-                "password", "cat12345",
-                "_csrf", csrfTokenFrom(client.get("/auth/login"))
+                "password", "cat12345"
             ));
             assertThat(login.code()).isEqualTo(302);
         });
     }
 }
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>client.post(path, Map)</code> 发的是 JSON，不是表单</div>
+  <p>
+    这是 <code>javalin-testtools</code> 最容易踩的一个坑。那个重载会把 Map
+    序列化成 JSON 发出去（<code>Content-Type: application/json</code>），
+    而服务端的 <code>ctx.formParam("email")</code> 只认
+    <code>application/x-www-form-urlencoded</code>。
+  </p>
+  <p>
+    结果是<strong>所有字段都是 null</strong>，处理器返回"请填写邮箱"，
+    但测试里看不出任何异常 —— 请求发出去了，也有响应，只是内容不对。
+    要发表单得用 <code>FormBody</code>：
+  </p>
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/TestHttp.java">
+<pre>
+package com.example.javalinky;
+
+import io.javalin.testtools.FormBody;
+import io.javalin.testtools.HttpClient;
+import io.javalin.testtools.Response;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.regex.Pattern;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+final class TestHttp {
+
+    private static final Pattern CSRF =
+        Pattern.compile("name=\"_csrf\" value=\"([^\"]+)\"");
+
+    static String csrfTokenFrom(String html) {
+        var m = CSRF.matcher(html);
+        assertThat(m.find()).as("页面里应该有 _csrf 隐藏域").isTrue();
+        return m.group(1);
+    }
+
+    /** 用 LinkedHashMap 保持顺序，可读性好一点 */
+    static Map&lt;String, String&gt; form(String... pairs) {
+        var map = new LinkedHashMap&lt;String, String&gt;();
+        for (int i = 0; i &lt; pairs.length; i += 2) map.put(pairs[i], pairs[i + 1]);
+        return map;
+    }
+
+    static Response postForm(HttpClient client, String path, Map&lt;String, String&gt; fields) {
+        var body = new FormBody.Builder();
+        fields.forEach(body::add);
+        return client.request(path, req -&gt; req.post(body.build()));
+    }
+
+    private TestHttp() {}
+}
+</pre>
+</div>
+  <p>
+    第 15 章会把这个类补全（登录、登出、切换用户等），现在这几个方法够用。
+  </p>
 </div>
 
 <div class="box tip">

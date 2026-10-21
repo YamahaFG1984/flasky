@@ -1,2 +1,2 @@
 release: java -cp target/javalinky.jar com.example.javalinky.Cli deploy
-web: java -XX:MaxRAMPercentage=75 -jar target/javalinky.jar
+web: java -XX:MaxRAMPercentage=75 -Dlogback.configurationFile=logback-prod.xml -jar target/javalinky.jar

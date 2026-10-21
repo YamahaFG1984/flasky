@@ -44,9 +44,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -92,16 +92,23 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 
 <div class="code" data-lang="xml" data-file="persistence.xml（新增属性）">
 <pre>
-&lt;!-- 超过这个毫秒数的查询会被记录。Hibernate 6+ 的属性名 --&gt;
+&lt;!-- 超过这个毫秒数的查询会被 org.hibernate.SQL_SLOW 记下来 --&gt;
 &lt;property name="hibernate.log_slow_query" value="500"/&gt;
-
-&lt;!-- 老版本（5.4.5+）的属性名，两个都写上更保险 --&gt;
-&lt;property name="hibernate.session.events.log.LOG_QUERIES_SLOWER_THAN_MS"
-          value="500"/&gt;
 
 &lt;!-- 顺便打开统计，后面的 N+1 检测器要用 --&gt;
 &lt;property name="hibernate.generate_statistics" value="true"/&gt;
 </pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 不要再写 <code>LOG_QUERIES_SLOWER_THAN_MS</code></div>
+  <p>
+    老资料里（Hibernate 5.4.5 ~ 5.6）这个属性叫
+    <code>hibernate.session.events.log.LOG_QUERIES_SLOWER_THAN_MS</code>。
+    <strong>Hibernate 6 把它换成了 <code>hibernate.log_slow_query</code>，7 里已经彻底没有了</strong>。
+    留着那一行不会报错，只是完全不起作用 —— 这比报错更坏，
+    因为你会以为慢查询日志开着。
+  </p>
 </div>
 
 <p>然后让对应的 logger 输出到日志（第 17 章会完整配 Logback）：</p>
@@ -120,6 +127,10 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 
   &lt;!-- 开发时想看全部 SQL 就把这个打开（生产千万别开，日志量巨大） --&gt;
   &lt;!-- &lt;logger name="org.hibernate.SQL" level="DEBUG"/&gt; --&gt;
+
+  &lt;!-- 框架只看 INFO 及以上（第 2 章就加了） --&gt;
+  &lt;logger name="org.eclipse.jetty" level="INFO"/&gt;
+  &lt;logger name="io.javalin" level="INFO"/&gt;
 
   &lt;root level="INFO"&gt;
     &lt;appender-ref ref="CONSOLE"/&gt;
@@ -181,12 +192,18 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 <pre>
 package com.example.javalinky.db;
 
+import org.hibernate.SessionEventListener;
 import org.hibernate.resource.jdbc.spi.StatementInspector;
 
 /**
  * 统计"当前请求发了多少条 SQL、一共花了多久"。
- * 原理：Hibernate 每次要执行 SQL 都会先调用 inspect()，
- * 我们在这里数一下（并不修改 SQL，原样返回）。
+ *
+ * 要两个钩子配合，少一个就只有条数没有耗时：
+ *   - StatementInspector.inspect()：Hibernate 每次要执行 SQL 都先调它 —— 计数、记下 SQL 文本
+ *   - SessionEventListener：jdbcExecuteStatementStart/End 给出真正的 JDBC 执行耗时
+ *
+ * 两个类都由 Hibernate 自己实例化（在 persistence.xml 里只写类名），
+ * 所以状态只能放在静态的 ThreadLocal 上。
  */
 public class QueryStats implements StatementInspector {
 
@@ -198,6 +215,8 @@ public class QueryStats implements StatementInspector {
         public long nanos;
         public String slowest;
         public long slowestNanos;
+        String lastSql;         // inspect() 记下来，给计时用
+        long startedAt;
     }
 
     public static void start() {
@@ -217,11 +236,14 @@ public class QueryStats implements StatementInspector {
     @Override
     public String inspect(String sql) {
         Counter counter = CURRENT.get();
-        if (counter != null) counter.count++;
+        if (counter != null) {
+            counter.count++;
+            counter.lastSql = sql;
+        }
         return sql;         // 必须原样返回，否则就改了 SQL
     }
 
-    /** 记录单条查询的耗时（由下面的计时包装调用） */
+    /** 记录单条查询的耗时 */
     public static void record(String sql, long nanos) {
         Counter counter = CURRENT.get();
         if (counter == null) return;
@@ -231,15 +253,60 @@ public class QueryStats implements StatementInspector {
             counter.slowest = sql;
         }
     }
+
+    /**
+     * 真正的计时在这里。Hibernate 会给每个 Session 建一个这个类的实例，
+     * 在每条 JDBC 语句执行的前后各回调一次。
+     */
+    public static class TimingListener implements SessionEventListener {
+
+        @Override
+        public void jdbcExecuteStatementStart() {
+            Counter counter = CURRENT.get();
+            if (counter != null) counter.startedAt = System.nanoTime();
+        }
+
+        @Override
+        public void jdbcExecuteStatementEnd() {
+            Counter counter = CURRENT.get();
+            if (counter == null || counter.startedAt == 0) return;
+            record(counter.lastSql, System.nanoTime() - counter.startedAt);
+            counter.startedAt = 0;
+        }
+    }
 }
 </pre>
 </div>
 
 <div class="code" data-lang="xml" data-file="persistence.xml（注册它）">
 <pre>
+&lt;!-- 每条 SQL 执行前都会过一遍这个类：计数 + 记下 SQL 文本 --&gt;
 &lt;property name="hibernate.session_factory.statement_inspector"
           value="com.example.javalinky.db.QueryStats"/&gt;
+
+&lt;!-- 每个 Session 一个监听器实例：给出 JDBC 执行耗时 --&gt;
+&lt;property name="hibernate.session.events.auto"
+          value="com.example.javalinky.db.QueryStats$TimingListener"/&gt;
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 只配 <code>statement_inspector</code> 的话，<code>db;dur</code> 永远是 0</div>
+  <p>
+    <code>inspect()</code> 只在 SQL <strong>发出之前</strong>被调用一次，
+    它没有任何办法知道这条语句跑了多久 —— 所以光靠它只能数条数。
+    耗时必须由 <code>SessionEventListener</code> 的
+    <code>jdbcExecuteStatementStart/End</code> 这对回调提供。
+  </p>
+  <p>
+    漏掉 <code>hibernate.session.events.auto</code> 这一行，代码照样编译、照样跑，
+    <code>Server-Timing</code> 头照样有 —— 只是 <code>db;dur</code> 恒等于 0。
+    一个只会在你盯着数字发呆时才发现的问题。
+  </p>
+  <p>
+    注意内部类的写法是 <code>QueryStats$TimingListener</code>（美元符号，不是点）：
+    这是 JVM 的二进制名，Hibernate 要用 <code>Class.forName()</code> 加载它。
+  </p>
 </div>
 
 <div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Timing.java">
@@ -325,37 +392,84 @@ config.requestLogger.http((ctx, ms) -&gt; {
 <pre>
 package com.example.javalinky;
 
-import com.example.javalinky.db.QueryStats;
+import com.example.javalinky.model.Post;
 import io.javalin.testtools.JavalinTest;
+import io.javalin.testtools.Response;
 import org.junit.jupiter.api.Test;
+
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 把"首页的查询条数不随文章数增长"这件事钉死。
+ * 查询条数不用给测试开后门 —— Timing 过滤器已经把它写进了 Server-Timing 响应头。
+ */
 class NPlusOneTest {
+
+    private static final Pattern QUERIES = Pattern.compile("queries;desc=\"(\\d+)\"");
 
     @Test
     void 首页列20篇文章时查询条数必须是常数() {
         var app = JavalinkyApp.create(TestFixtures.config());
 
         JavalinTest.test(app, (server, client) -&gt; {
-            // 准备 20 篇文章，作者各不相同
+            // 先用 1 篇文章量一个基准
             TestFixtures.withTransaction(em -&gt; {
                 TestFixtures.seedRoles(em);
-                for (int i = 0; i &lt; 20; i++) {
+                em.persist(new Post("文章 0", TestFixtures.user(em, "user0")));
+            });
+            int withOnePost = queryCount(client.get("/"));
+
+            // 再加到 20 篇，作者各不相同
+            TestFixtures.withTransaction(em -&gt; {
+                for (int i = 1; i &lt; 20; i++) {
                     var user = TestFixtures.user(em, "user" + i);
-                    em.persist(new com.example.javalinky.model.Post("文章 " + i, user));
+                    em.persist(new Post("文章 " + i, user));
                 }
             });
+            int withTwentyPosts = queryCount(client.get("/"));
 
-            client.get("/");      // 请求期间 QueryStats 在数
+            // 关键断言：条数不随文章数增长（join fetch 作者 + 一条聚合查评论数）
+            assertThat(withTwentyPosts)
+                .as("1 篇时 %d 条 SQL，20 篇时 %d 条 —— 多出来的就是 N+1",
+                    withOnePost, withTwentyPosts)
+                .isEqualTo(withOnePost);
 
-            // 这个上限是人工定的：count 查询 + 主查询 + 评论数聚合 + 当前用户
-            // 如果有人不小心引入了 N+1，这个数字会变成 20+，测试立刻变红
-            assertThat(lastQueryCount()).isLessThanOrEqualTo(6);
+            // 顺手给个绝对上限：count + 主查询 + 评论数聚合
+            assertThat(withTwentyPosts).isLessThanOrEqualTo(6);
         });
+    }
+
+    private static int queryCount(Response response) {
+        var values = response.headers().get("Server-Timing");
+        String timing = values.isEmpty() ? "" : values.get(0);
+        var m = QUERIES.matcher(timing);
+        assertThat(m.find()).as("Server-Timing 头里应该有 queries；实际是 %s", timing).isTrue();
+        return Integer.parseInt(m.group(1));
     }
 }
 </pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 断言"相等"比断言"小于某个数"强得多</div>
+  <p>
+    一个很容易写坏的版本是只断言 <code>&lt;= 6</code>。
+    那个 6 是拍脑袋定的：定大了（比如 30）等于没测，
+    定小了会因为无关的改动（多一次 <code>select</code> 当前用户）莫名变红。
+  </p>
+  <p>
+    <strong>对比 1 篇和 20 篇的查询条数是否<em>相等</em></strong>，
+    测的就是"条数与数据量无关"这个性质本身，和具体数字无关。
+    N+1 一旦回来，20 篇会比 1 篇多出 19 条，差值一目了然。
+  </p>
+  <p>
+    另外注意查询条数是从 <code>Server-Timing</code> 响应头读出来的，
+    而不是给测试加一个 <code>lastQueryCount()</code> 之类的静态方法。
+    测试用的是<strong>生产代码本来就对外暴露的东西</strong>，
+    顺带还验证了那个响应头真的有在工作。
+  </p>
 </div>
 
 <div class="box key">

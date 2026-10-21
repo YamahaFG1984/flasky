@@ -44,9 +44,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -1242,10 +1242,14 @@ jshell&gt; /exit
   </p>
   <div class="code" data-lang="bash">
 <pre>
-mvn -q compile exec:java -Dexec.mainClass=com.example.javalinky.Cli -Dexec.args="seed-roles"
+mvn -q compile exec:exec@cli -Dcli.args="seed-roles"
 </pre>
   </div>
-  <p>第 17 章部署时，<code>deploy</code> 命令就是用这个机制做的。</p>
+  <p>
+    <code>exec:exec@cli</code> 里的 <code>@cli</code> 指的是 <code>pom.xml</code> 里一个
+    <strong>命名执行</strong>（第 7 章会配），它把命令行参数从 <code>-Dcli.args</code> 透进去。
+    第 17 章部署时，<code>deploy</code> 命令就是用这个机制做的。
+  </p>
 </div>
 
 <h2 id="inviews">在处理器里用数据库</h2>
@@ -1255,7 +1259,33 @@ mvn -q compile exec:java -Dexec.mainClass=com.example.javalinky.Cli -Dexec.args=
   并用 <code>session['known']</code> 记住这是不是老朋友。我们照着做：
 </p>
 
-<div class="code" data-lang="java">
+<p>先把这两个小类建出来 —— 一个表单对象，一个页面模型：</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/form/NameForm.java">
+<pre>
+package com.example.javalinky.web.form;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+
+public record NameForm(
+    @NotBlank(message = "请填写名字")
+    @Size(max = 64, message = "名字最长 64 个字符")
+    String name
+) {}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/IndexPage.java">
+<pre>
+package com.example.javalinky.web;
+
+/** 首页的页面模型。name 为 null 表示还没填过表单。 */
+public record IndexPage(String name, boolean known) {}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="App.java">
 <pre>
 config.routes.post("/", ctx -&gt; {
     var form = new NameForm(ctx.formParam("name"));
@@ -1352,7 +1382,7 @@ public class App {
 
         // 2. Web
         Javalin.create(config -&gt; {
-            config.fileRenderer(new JavalinJte(JavalinJte.directoryTemplateEngine()));
+            config.fileRenderer(new JavalinJte(JavalinJte.Companion.directoryTemplateEngine()));
             config.staticFiles.add(f -&gt; {
                 f.directory = "/public";
                 f.location = Location.CLASSPATH;
@@ -1375,11 +1405,29 @@ public class App {
             config.routes.error(500, "html", ctx -&gt;
                 View.render(ctx, "error/500.jte", "服务器错误"));
 
-            Routes.registerMain(config);   // 第 7 章会这样把路由拆出去
+            // 这一章路由还直接写在这里（上面"在处理器里用数据库"那两段）。
+            // 第 7 章才会把它们挪进 MainRoutes 这样的路由模块。
+            config.routes.get("/", App::index);
+            config.routes.post("/", App::createUser);
         }).start(port);
     }
 }
 </pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 别去找 <code>Routes.registerMain()</code></div>
+  <p>
+    第 3 章建的 <code>Routes</code> 是一个<strong>只放 URL 常量</strong>的类
+    （<code>Routes.INDEX</code> 之类），它没有、也不该有注册路由的方法。
+    “把路由拆成模块”是第 7 章的事，那时会引入 <code>RouteModule</code> 接口和
+    <code>MainRoutes</code> / <code>AuthRoutes</code>。
+  </p>
+  <p>
+    这一章路由还留在 <code>App.java</code> 里。写成
+    <code>App::index</code> 这样的方法引用只是为了让 <code>main</code> 不要太长，
+    直接写成 lambda 也完全一样。
+  </p>
 </div>
 
 <div class="exercise">

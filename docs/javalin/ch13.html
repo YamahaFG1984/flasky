@@ -42,9 +42,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -226,7 +226,11 @@ public class CommentRepository {
             .getSingleResult();
     }
 
-    /** 某篇文章的评论，按时间正序（对话要顺着读） */
+    /**
+     * 某篇文章的评论，按时间正序（对话要顺着读）。
+     * 注意：本章后面讲"隐藏评论"时会给它加一个 includeDisabled 参数，
+     * 最终<strong>只保留那一个版本</strong>。
+     */
     public Page&lt;Comment&gt; findByPost(Post post, int page, int size) {
         long total = countByPost(post);
         var items = em.createQuery("""
@@ -340,29 +344,33 @@ post("/post/{id}/comments", this::createComment, Permission.COMMENT);
 /** 约定：page=-1 表示"最后一页" */
 private static final int LAST_PAGE = -1;
 
-private void post(Context ctx) {
+private void showPost(Context ctx) {
     long id = ctx.pathParamAsClass("id", Long.class).get();
     Post post = services.postRepo(ctx).findById(id)
         .orElseThrow(() -&gt; new NotFoundResponse("文章不存在"));
 
+    // 协管员能看到被隐藏的评论，普通读者不能 —— 下面每一处计数和查询都要带上它
+    User me = CurrentUser.get(ctx);
+    boolean canModerate = me != null &amp;&amp; me.can(Permission.MODERATE);
+
     var comments = services.commentRepo(ctx);
     int size = cfg.commentsPerPage();
     Integer requested = ctx.queryParamAsClass("page", Integer.class)
-                           .allowNullable().get();
+                           .getOrNull();
 
     int page;
     if (requested != null &amp;&amp; requested == LAST_PAGE) {
-        long total = comments.countByPost(post);
+        long total = comments.countByPost(post, canModerate);
         page = (int) Math.max(0, total - 1) / size + 1;
     } else {
         page = Page.clampPage(requested);
     }
 
-    User me = CurrentUser.get(ctx);
-    var commentPage = comments.findByPost(post, page, size);
+    var commentPage = comments.findByPost(post, page, size, canModerate);
 
     View.render(ctx, "post.jte", "文章",
-        "post", PostListPage.of(Page.of(List.of(post), 1, 1, 1), me),
+        "post", PostListPage.of(Page.of(List.of(post), 1, 1, 1), me,
+            Map.of(post.getId(), comments.countByPost(post, canModerate))),
         "comments", CommentListPage.of(commentPage, me, post.getId()),
         "form", FormView.empty());
 }
@@ -448,7 +456,50 @@ public Page&lt;Comment&gt; findByPost(Post post, int page, int size, boolean inc
 
     return Page.of(items, page, size, total);
 }
+
+/** countByPost 同样要带可见性参数，否则分页的总数和列表对不上 */
+public long countByPost(Post post, boolean includeDisabled) {
+    String filter = includeDisabled ? "" : " and c.disabled = false";
+    return em.createQuery(
+            "select count(c) from Comment c where c.post = :p" + filter, Long.class)
+        .setParameter("p", post)
+        .getSingleResult();
+}
+
+/**
+ * 批量查"每篇文章有多少条评论"（第 11 章的列表页要用）。
+ * 列表页千万别在循环里逐篇查 —— 那就是 N+1，第 16 章会用测试把它钉死。
+ */
+public Map&lt;Long, Long&gt; countCommentsByPost(List&lt;Long&gt; postIds) {
+    if (postIds.isEmpty()) return Map.of();
+    return em.createQuery("""
+            select c.post.id, count(c)
+              from Comment c
+             where c.post.id in :ids
+               and c.disabled = false
+             group by c.post.id
+            """, Object[].class)
+        .setParameter("ids", postIds)
+        .getResultStream()
+        .collect(Collectors.toMap(row -&gt; (Long) row[0], row -&gt; (Long) row[1]));
+}
 </pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 两个版本只留一个</div>
+  <p>
+    上面这一版 <code>findByPost</code> / <code>countByPost</code>
+    <strong>替换</strong>本章前面那个不带 <code>includeDisabled</code> 的版本，
+    不是和它共存。Java 允许重载，所以留着两个也能编译 ——
+    但那样迟早有人在某个页面上调了不过滤的那个，
+    把隐藏的评论原样显示给普通读者，而且这种 bug 测试很难覆盖到。
+  </p>
+  <p>
+    一个有用的习惯：<strong>涉及可见性和权限的查询，不要提供"不过滤"的重载</strong>。
+    让调用方必须显式写出 <code>true</code> 或 <code>false</code>，
+    code review 时一眼能看出谁在看什么。
+  </p>
 </div>
 
 <div class="box warn">
@@ -580,7 +631,7 @@ public record CommentListPage(long postId, Page&lt;Item&gt; page, boolean canMod
 <pre>
 private void moderate(Context ctx) {
     int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class)
-                                 .allowNullable().get());
+                                 .getOrNull());
 
     var source = services.commentRepo(ctx)
         .findAllForModeration(page, cfg.commentsPerPage());
@@ -669,8 +720,14 @@ path("/moderate", List.of(Permission.MODERATE), () -&gt; {
 <h2 id="counters">顺便讨论：评论计数</h2>
 
 <p>
-  第 11 章我们发现 <code>post.getComments().size()</code> 会造成 N+1，
-  并提到两个方案。现在正式比较一下：
+  第 11 章我们绕开了 <code>post.getComments().size()</code> 这个 N+1 陷阱，
+  改成把评论数当参数传进 <code>PostListPage.of</code>。
+  现在 <code>countCommentsByPost</code> 有了，那条链路才算接完整 ——
+  列表页先收齐这一页的文章 id，查一次，再渲染。
+</p>
+
+<p>
+  当时还提到另一个方案（在 <code>posts</code> 表加计数列）。现在正式比较一下：
 </p>
 
 <div class="tw">

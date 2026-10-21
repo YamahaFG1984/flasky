@@ -43,9 +43,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -388,7 +388,7 @@ public class SeedService {
 
 <div class="code" data-lang="bash">
 <pre>
-mvn -q compile exec:java -Dexec.mainClass=com.example.javalinky.Cli -Dexec.args="seed-roles"
+mvn -q compile exec:exec@cli -Dcli.args="seed-roles"
 </pre>
 </div>
 
@@ -663,7 +663,7 @@ public void register(JavalinConfig config) {
         // 公开页面
         get("/",               this::index);
         get("/user/{username}", this::userProfile);
-        get("/post/{id}",       this::post);
+        get("/post/{id}",       this::showPost);
 
         // 必须登录
         get("/edit-profile",   this::editProfileForm, Access.AUTHENTICATED);
@@ -693,6 +693,28 @@ public void register(JavalinConfig config) {
     });
 }
 </pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 上面是<strong>全书最终</strong>的路由表，不是这一章的</div>
+  <p>
+    把整张表列出来是为了让"权限怎么声明"一眼看全，但里面一大半处理器要到后面才写：
+  </p>
+  <table>
+    <thead><tr><th>路由</th><th>哪一章</th></tr></thead>
+    <tbody>
+      <tr><td><code>/user/{username}</code>、<code>/edit-profile</code></td><td>第 10 章</td></tr>
+      <tr><td><code>/post/{id}</code>、<code>/post</code>、<code>/edit/{id}</code></td><td>第 11 章</td></tr>
+      <tr><td><code>/follow/{username}</code>、<code>/unfollow/{username}</code></td><td>第 12 章</td></tr>
+      <tr><td><code>/moderate/*</code></td><td>第 13 章</td></tr>
+    </tbody>
+  </table>
+  <p>
+    这一章只需要留下 <code>get("/", this::index)</code> 和
+    <code>/admin</code> 那一块（用来验证权限检查真的生效）。
+    其余等到对应章节再加 —— 否则 <code>this::userProfile</code>
+    这些方法引用会一路报 <code>cannot find symbol</code>。
+  </p>
 </div>
 
 <div class="box key">
@@ -783,6 +805,29 @@ CREATE INDEX IF NOT EXISTS ix_roles_is_default ON roles (is_default);
 </pre>
 </div>
 
+<div class="box note">
+  <div class="t">&#9432; 两件关于版本号的事，先说清楚免得你困惑</div>
+  <p>
+    <strong>一、这个迁移在全新的库上其实什么都没做。</strong>
+    第 5 章的 <code>V1__create_roles_and_users.sql</code> 建
+    <code>roles</code> 表时已经带上了 <code>permissions</code> 和
+    <code>is_default</code> 两列（以及那个索引）。所以三条
+    <code>IF NOT EXISTS</code> 全部跳过。
+  </p>
+  <p>
+    那为什么还要它？因为<strong>已经按 V1 建好库并且在跑的环境</strong>
+    （比如你第 5 章就启动过一次开发库）未必有这两列 ——
+    <strong>迁移一旦执行过就不能再改</strong>，Flyway 会校验校验和。
+    所以增量只能写成新文件。这就是迁移和"直接改建表语句"的根本区别。
+  </p>
+  <p>
+    <strong>二、本书的迁移从 V1 跳到了 V3，没有 V2。</strong>
+    这是故意的：<code>V2__add_user_about_me.sql</code> 是第 5 章末尾
+    留给你的练习。Flyway 完全允许跳号（它只要求版本号<strong>递增</strong>），
+    所以不做那道练习也不影响后面任何一章。
+  </p>
+</div>
+
 <div class="checkpoint">
   <span>&#9873;</span>
   <div>原书检查点：本章对应原书 <b>git checkout 9a</b>（角色与权限）。</div>
@@ -794,6 +839,35 @@ CREATE INDEX IF NOT EXISTS ix_roles_is_default ON roles (is_default);
   权限逻辑是纯内存计算，不依赖 HTTP 也不依赖数据库 ——
   这正是最值得写单元测试的那一类代码。
 </p>
+
+<div class="box warn">
+  <div class="t">&#9888; 从这一章起，所有涉及注册的测试都要先灌角色</div>
+  <p>
+    <code>RoleRepository.defaultRole()</code> 查不到"默认角色"时会抛
+    <code>IllegalStateException</code>。注册处理器正好要调它，于是
+    <strong>任何没有预先灌入角色的测试，一注册就是 500</strong>，
+    而响应体里只有一句"服务器错误"，完全看不出和角色有关。
+  </p>
+  <p>
+    这相当于原书在 <code>setUp()</code> 里调的 <code>Role.insert_roles()</code>。
+    我们把它做成一个夹具方法，第 15 章会和其它夹具一起收进
+    <code>TestFixtures</code>：
+  </p>
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/TestFixtures.java">
+<pre>
+/** 相当于原书 setUp() 里的 Role.insert_roles() */
+static void seedRoles(EntityManager em) {
+    new SeedService(new RoleRepository(em)).seedRoles();
+}
+</pre>
+</div>
+  <p>
+    注意<strong>种子数据要灌在应用的那个内存库里</strong>。
+    第 7 章的 <code>AppConfig.test()</code> 给每次测试一个随机命名的库，
+    所以夹具必须用<strong>同一份</strong> <code>AppConfig</code> ——
+    这也是第 15 章把配置收到 <code>TestFixtures.config()</code> 里的原因。
+  </p>
+</div>
 
 <div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/PermissionTest.java">
 <pre>

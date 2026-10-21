@@ -42,9 +42,9 @@ cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7
 </pre>
 </div>
   <p>
-    每个标签都经过编译、测试和真实运行的验证。少数地方代码和本章文字不一致
-    （基本都是框架 API 的实际签名和书写顺序问题），逐条记在
-    <code>javalinky/TUTORIAL-DIFFS.md</code> 里。
+    每个标签都经过编译、测试和真实运行的验证，本章正文也已按照跑通的代码校对过一遍。
+    写代码过程中踩到的坑（框架 API 的实际签名、JTE 不允许的写法、依赖冲突……）
+    逐条记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，可以当成一份排错清单来读。
   </p>
 </div>
 
@@ -100,7 +100,8 @@ private String avatarHash;
 <h2 id="lastseen">最后活跃时间：一个性能陷阱</h2>
 
 <p>
-  第 8 章的 <code>CurrentUser.install()</code> 里有这么一行：
+  <code>lastSeen</code> 字段现在有了，可以把第 8 章
+  <code>CurrentUser.install()</code> 里注释掉的那一行启用了：
 </p>
 
 <div class="code" data-lang="java">
@@ -504,7 +505,7 @@ private void adminEditProfile(Context ctx) {
         ctx.formParam("email"),
         ctx.formParam("username"),
         ctx.formParam("confirmed") != null,
-        ctx.formParamAsClass("roleId", Long.class).allowNullable().get(),
+        ctx.formParamAsClass("roleId", Long.class).getOrNull(),
         ctx.formParam("name"),
         ctx.formParam("location"),
         ctx.formParam("aboutMe"));
@@ -608,8 +609,9 @@ private void adminEditProfile(Context ctx) {
           &lt;label class="form-label" for="f-roleId"&gt;角色&lt;/label&gt;
           &lt;select class="form-select" id="f-roleId" name="roleId"&gt;
             @for(var role : roles)
+              &lt;%-- 又是智能属性（第 4 章）：@if 不能放在属性名的位置 --%&gt;
               &lt;option value="${role.getId()}"
-                      @if(String.valueOf(role.getId()).equals(form.value("roleId")))selected@endif&gt;
+                      selected="${String.valueOf(role.getId()).equals(form.value("roleId"))}"&gt;
                 ${role.getName()}
               &lt;/option&gt;
             @endfor
