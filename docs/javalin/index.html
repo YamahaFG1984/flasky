@@ -228,6 +228,43 @@
   <li><strong>看到虚线框的「原书检查点」</strong>，那是告诉你这一节对应原书 GitHub 仓库的哪个标签（例如 <code>git checkout 5b</code>），方便你对着原版 Python 代码比较。</li>
 </ul>
 
+<h2 id="code">配套代码：一章一个标签</h2>
+
+<p>
+  这套教程有一份<strong>真正跑起来过</strong>的配套代码，就在同一个仓库的
+  <code>javalinky/</code> 目录里。它不是“示意代码” —— 每一章结束时的状态都打了标签，
+  并且逐章做过编译、单元/集成测试、以及真实启动访问的验证：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+git clone &lt;这个仓库&gt;
+cd javalinky
+
+git checkout jv-ch05                              # 想看第 5 章就 checkout 第 5 章
+mvn -q compile exec:exec@cli -Dcli.args="deploy"  # 建库 + 灌角色
+mvn -q compile exec:exec                          # 启动，打开 http://localhost:7070
+</pre>
+</div>
+
+<p>
+  标签从 <code>jv-ch01</code> 到 <code>jv-ch17</code>，<code>master</code> 上是最终形态。
+  每章页面开头都有一个“<strong>本章代码</strong>”卡片，写着对应的标签。
+  怎么造假数据、怎么收测试邮件、怎么打包部署，见
+  <code>javalinky/README.md</code>。
+</p>
+
+<div class="box note">
+  <div class="t">&#128270; 代码和文字对不上的时候，信代码</div>
+  <p>
+    教程是先写的，代码是之后真正跑起来的。这个过程里发现了几十处需要修正的地方 ——
+    框架 API 的实际签名（比如 <code>Validator.allowNullable()</code> 在 Javalin 7 已经改成
+    <code>getOrNull()</code>）、JTE 不允许的写法、少写的依赖和文件、以及必须调整的顺序。
+    每一条都记在 <code>javalinky/TUTORIAL-DIFFS.md</code> 里，也顺便是一份
+    “真实项目里会踩到什么坑”的清单，值得单独读一遍。
+  </p>
+</div>
+
 <div class="box warn">
   <div class="t">&#9888; 关于版本号</div>
   <p>

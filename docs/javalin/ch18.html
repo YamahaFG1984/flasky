@@ -30,6 +30,23 @@
   </ul>
 </div>
 
+<div class="box tip">
+  <div class="t">&#128230; 完整代码</div>
+  <p>
+    整套应用的最终形态在仓库的 <code>javalinky/</code> 目录里（<code>master</code> 分支）。
+    怎么跑起来、每一章对应哪个标签、以及和教程文字的差异清单，都在
+    <code>javalinky/README.md</code> 里。
+  </p>
+<div class="code" data-lang="bash">
+<pre>
+cd javalinky
+mvn -q compile exec:exec@cli -Dcli.args="deploy"   # 建库 + 灌角色
+mvn -q exec:exec@cli -Dcli.args="fake 100 400"     # 造点假数据
+mvn -q compile exec:exec                           # 启动
+</pre>
+</div>
+</div>
+
 <div id="chapter-toc"></div>
 
 <h2 id="ide">把 IDE 用好</h2>
