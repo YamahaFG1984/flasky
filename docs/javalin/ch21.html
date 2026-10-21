@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 21 章 · 实时：SSE 与 WebSocket — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="21">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 21 章</span>
+<h1>实时：SSE 与 WebSocket</h1>
+<p class="lede">
+  到现在为止，页面上的一切都是用户主动刷出来的。这一章让服务器能<strong>主动推</strong>：
+  有人评论了你的文章，立刻弹一条通知。
+  两种技术都做一遍 —— 先用 SSE 做通知（<strong>单向，而且就是普通 HTTP</strong>），
+  再用 WebSocket 做「正在输入」提示（<strong>双向，所以 SSE 做不了</strong>）。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>说得清 SSE 和 WebSocket 各自适合什么，以及为什么别一上来就选 WebSocket</li>
+    <li>用 <code>sse()</code> 做服务器推送，理解 <code>keepAlive()</code> 改变了什么</li>
+    <li><strong>知道为什么没有心跳的 SSE 连接池一定会泄漏</strong>（本章有实测）</li>
+    <li>用 <code>ws()</code> 做双向通信，并在 WebSocket 里正确拿到登录用户</li>
+    <li>知道实时功能在<strong>多实例部署</strong>下会怎样失效</li>
+  </ul>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128230; 本章代码</div>
+  <p>
+    这一章结束时的完整项目在仓库的 <code>javalinky/</code> 目录里，对应标签 <code>jv-ch21</code>：
+  </p>
+<div class="code" data-lang="bash">
+<pre>
+git checkout jv-ch21
+cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7070
+</pre>
+</div>
+  <p>
+    本章是第 19 章的直接延续：<code>LiveHub</code> 和 <code>PostPresence</code>
+    都是「应用级共享且可变」的对象，而且比限流器更难 —— 连接会在任意时刻消失。
+  </p>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="choose">先选对工具</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="轮询、SSE 与 WebSocket 的对比">
+  <text class="ttl" x="20" y="20">① 轮询：每 5 秒问一次「有新消息吗」</text>
+  <rect class="bx-d" x="20" y="30" width="720" height="62" rx="8"/>
+  <rect class="bx" x="40" y="44" width="70" height="26" rx="4"/><text class="mono sm" x="52" y="62">GET ?</text>
+  <rect class="bx" x="120" y="44" width="70" height="26" rx="4"/><text class="mono sm" x="132" y="62">GET ?</text>
+  <rect class="bx" x="200" y="44" width="70" height="26" rx="4"/><text class="mono sm" x="212" y="62">GET ?</text>
+  <rect class="bx-g" x="280" y="44" width="70" height="26" rx="4"/><text class="mono sm on-g" x="292" y="62">有了!</text>
+  <text class="sm on-r" x="370" y="62">99% 的请求是白问的；延迟最差等于轮询间隔</text>
+  <text class="sm" x="40" y="86">好处：零特殊技术，任何代理都支持。数据量小、几十个用户时完全够用 —— <tspan class="on-a">别一上来就否定它</tspan></text>
+
+  <text class="ttl on-g" x="20" y="116">② SSE：一个一直不关的 GET</text>
+  <rect class="bx-g" x="20" y="126" width="720" height="78" rx="8"/>
+  <rect class="bx" x="40" y="140" width="90" height="26" rx="4"/><text class="mono sm" x="52" y="158">GET /live</text>
+  <path class="ln-a" d="M135 153 H700"/>
+  <rect class="bx-g" x="220" y="140" width="56" height="26" rx="4"/><text class="mono sm on-g" x="232" y="158">event</text>
+  <rect class="bx-g" x="420" y="140" width="56" height="26" rx="4"/><text class="mono sm on-g" x="432" y="158">event</text>
+  <text class="sm" x="40" y="182">就是 HTTP：Content-Type: text/event-stream，服务器一行行往下写。</text>
+  <text class="sm on-g" x="40" y="198">浏览器端 new EventSource('/live')，<tspan class="on-g">自带断线重连</tspan>。只能服务器 → 浏览器。</text>
+
+  <text class="ttl on-b" x="20" y="228">③ WebSocket：升级成一条全双工的长连接</text>
+  <rect class="bx-b" x="20" y="238" width="720" height="78" rx="8"/>
+  <rect class="bx" x="40" y="252" width="110" height="26" rx="4"/><text class="mono sm" x="52" y="270">Upgrade: ws</text>
+  <path class="ln-a" d="M155 265 H700"/>
+  <rect class="bx-b" x="250" y="252" width="40" height="26" rx="4"/><text class="mono sm on-b" x="258" y="270">↓↑</text>
+  <rect class="bx-b" x="420" y="252" width="40" height="26" rx="4"/><text class="mono sm on-b" x="428" y="270">↓↑</text>
+  <text class="sm" x="40" y="294">两边都能随时发。代价：不是 HTTP 了，没有路由、没有中间件、没有自动重连，</text>
+  <text class="sm on-b" x="40" y="310">自己管消息格式，而且某些企业代理会掐掉它。</text>
+</svg>
+<figcaption>图 21-1　三种做法。<strong>往下走一层就多一层复杂度，所以要从上往下挑第一个够用的</strong></figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 决策很简单：只有「浏览器也要频繁往上发」才用 WebSocket</div>
+  <div class="tw">
+  <table>
+  <tr><th>场景</th><th>选什么</th><th>为什么</th></tr>
+  <tr><td>通知、未读数、进度条、股价、日志流</td><td><strong>SSE</strong></td><td>全是服务器单向推</td></tr>
+  <tr><td>聊天、协同编辑、游戏、「正在输入」</td><td><strong>WebSocket</strong></td><td>两边都要主动发</td></tr>
+  <tr><td>几十个用户、数据几秒钟不变也没事</td><td><strong>轮询</strong></td><td>复杂度最低，别过度设计</td></tr>
+  </table>
+  </div>
+  <p>
+    常见的误区是「要实时 = 上 WebSocket」。实际上<strong>大部分「实时」需求是单向的</strong>，
+    而 SSE 在单向场景下几乎全面占优：它是普通 HTTP，所以
+    Cookie、认证、压缩、HTTP/2 多路复用、反向代理配置<strong>全都照旧</strong>，
+    而且<strong>断线重连是浏览器内置的</strong> —— WebSocket 那边得自己写。
+  </p>
+</div>
+
+<h2 id="sse">用 SSE 做通知</h2>
+
+<h3>服务端：一个不会结束的处理器</h3>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+// SSE 也是普通的 HTTP GET，所以路由上的角色约束照常生效
+sse(Routes.LIVE, this::liveFeed, Access.AUTHENTICATED);
+
+private void liveFeed(SseClient client) {
+    User me = CurrentUser.require(client.ctx());
+
+    client.keepAlive();
+    services.live().register(me.getId(), client);
+
+    // 先打个招呼：浏览器收到任意一条数据才会认为连接真的建立了
+    client.sendEvent("hello", Map.of("connections",
+        services.live().connectionCount(me.getId())));
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>keepAlive()</code> 是这段代码的全部关键</div>
+  <p>
+    默认情况下，<strong>处理器方法一返回，Javalin 就关掉连接</strong> ——
+    那样客户端只会收到 <code>hello</code> 然后立刻断开重连，变成一个很昂贵的轮询。
+  </p>
+  <p>
+    <code>client.keepAlive()</code> 告诉 Javalin：这个连接我还要用，别关。
+    之后就由<strong>别的请求线程</strong>（比如处理「发评论」那个请求的线程）
+    往这个 <code>client</code> 上写数据。
+  </p>
+  <p>
+    <strong>所以 <code>SseClient</code> 一定是跨线程共享的对象</strong> ——
+    第 19 章讲的所有东西在这里全部适用。
+  </p>
+</div>
+
+<h3>连接登记处：<code>LiveHub</code></h3>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/LiveHub.java">
+<pre>
+public final class LiveHub implements AutoCloseable {
+
+    /**
+     * newKeySet() 给出的是一个并发安全的 Set（底层就是 ConcurrentHashMap）。
+     * 普通的 HashSet 在这里会直接出问题：一边遍历推送，一边有人断开连接。
+     */
+    private final Map&lt;Long, Set&lt;SseClient&gt;&gt; clients = new ConcurrentHashMap&lt;&gt;();
+
+    public void register(long userId, SseClient client) {
+        clients.computeIfAbsent(userId, id -&gt; ConcurrentHashMap.newKeySet()).add(client);
+        client.onClose(() -&gt; unregister(userId, client));
+    }
+
+    public void unregister(long userId, SseClient client) {
+        // compute 保证「删成员」和「删空集合」是一个原子动作。
+        // 分成 get + remove 两步的话，正好有人在这中间往空集合里 add，
+        // 那个连接就永远收不到消息了。
+        clients.compute(userId, (id, set) -&gt; {
+            if (set == null) return null;
+            set.remove(client);
+            return set.isEmpty() ? null : set;    // 返回 null = 把这个 key 删掉
+        });
+    }
+
+    public void send(long userId, String event, Object data) {
+        Set&lt;SseClient&gt; set = clients.get(userId);
+        if (set == null) return;
+
+        for (SseClient client : set) {
+            if (client.terminated()) { unregister(userId, client); continue; }
+            try {
+                client.sendEvent(event, data);
+            } catch (Exception e) {
+                // 推送失败就当这个连接废了。绝不能让它影响请求本身 ——
+                // 「通知没发出去」比「发评论失败」轻得多。
+                unregister(userId, client);
+            }
+        }
+    }
+}
+</pre>
+</div>
+
+<p>
+  一个用户可能开着好几个标签页，所以 <code>userId → 一组连接</code>。
+  到这里为止，这个类<strong>看起来</strong>是对的。
+</p>
+
+<h2 id="leak">实测：上面那个版本会泄漏连接</h2>
+
+<p>
+  写到这里我给它配了一个测试：连上 → 断开 → 再连上，断言「连接数还是 1」。
+  <strong>它失败了，显示 2。</strong>下面是查这个问题的完整过程，
+  因为结论比代码本身更值得记住。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 第一个假设：「断开应该立刻被发现」—— 错</div>
+  <p>
+    直觉是客户端关掉连接，服务端马上就知道了。<strong>TCP 不是这样工作的。</strong>
+    对端发一个 FIN 只表示「我不再发数据了」，连接进入半关闭状态；
+    服务端这边<strong>还能继续写</strong>。
+  </p>
+  <p>
+    所以 <code>client.onClose(...)</code> 这个回调<strong>不保证会被及时调用</strong>，
+    容器要先察觉到 I/O 出问题才会触发它。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 第二个假设：「那就推一次消息，写失败自然会发现」—— 还是错</div>
+  <p>
+    这就是 <code>send()</code> 里那段 try/catch 的设想。
+    于是我写了个探针：断开连接，然后连推 4 次消息，每次之后看连接数。
+  </p>
+<div class="code" data-lang="text">
+<pre>
+[probe] 连上后:              {"connections":1}
+[probe] 第 1 次推送后再连:    {"connections":2}
+[probe] 第 2 次推送后再连:    {"connections":2}
+[probe] 第 3 次推送后再连:    {"connections":2}
+[probe] 第 4 次推送后再连:    {"connections":2}
+</pre>
+</div>
+  <p>
+    <strong>死连接纹丝不动。</strong>原因还是 TCP：
+    往一个对端已关闭的 socket 写数据<strong>是会成功的</strong> ——
+    数据进了内核发送缓冲区，<code>write()</code> 就返回了。
+    要等对方回 RST、而且本地再写一次，才会真正报错。
+  </p>
+  <p>
+    也就是说：<strong>那段 try/catch 在这个场景下一次都不会被触发。</strong>
+    它不是没用（网络真断了时有用），但指望它来回收连接是靠不住的。
+  </p>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 正确答案：心跳。这就是为什么所有 SSE 实现都有心跳</div>
+  <p>
+    办法是<strong>主动、定期地往每个连接写一点东西</strong>。
+    SSE 协议规定以 <code>:</code> 开头的行是注释，客户端会忽略 ——
+    正好拿来当心跳。
+  </p>
+<div class="code" data-lang="java" data-file="web/LiveHub.java">
+<pre>
+public LiveHub(Duration interval) {
+    this.heartbeat = Executors.newSingleThreadScheduledExecutor(r -&gt; {
+        Thread t = new Thread(r, "sse-heartbeat");
+        t.setDaemon(true);      // 别拦着 JVM 退出
+        return t;
+    });
+    long millis = Math.max(1, interval.toMillis());
+    heartbeat.scheduleWithFixedDelay(this::ping, millis, millis, TimeUnit.MILLISECONDS);
+}
+
+/**
+ * 心跳：往每个连接写一行 SSE 注释（": ping"）。
+ * 浏览器会忽略注释行，但这次写会让已经断掉的连接暴露出来。
+ * 顺带还能穿过某些代理的空闲超时。
+ */
+void ping() {
+    clients.forEach((userId, set) -&gt; {
+        for (SseClient client : set) {
+            if (client.terminated()) { unregister(userId, client); continue; }
+            try {
+                client.sendComment("ping");
+            } catch (Exception e) {
+                unregister(userId, client);
+            }
+        }
+    });
+}
+</pre>
+</div>
+  <p>加上之后，同一个探针：</p>
+<div class="code" data-lang="text">
+<pre>
+[probe] 连上后:              {"connections":1}
+[probe] 第 1 次推送后再连:    {"connections":1}
+[probe] 第 2 次推送后再连:    {"connections":1}
+[probe] 第 3 次推送后再连:    {"connections":1}
+[probe] 第 4 次推送后再连:    {"connections":1}
+</pre>
+</div>
+  <p>
+    心跳还顺带解决了另外两个问题：<strong>穿过代理的空闲超时</strong>
+    （nginx 默认 60 秒没数据就断开），以及
+    <strong>让客户端能及时发现服务器挂了</strong>（收不到心跳就重连）。
+  </p>
+  <p>
+    <strong>所以心跳不是优化，是 SSE 的必需品。</strong>
+    生产环境 15~30 秒比较合适；本教程的测试档位配成 200ms，好让测试跑得快。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 测试要照着真实机制写，而不是照着直觉写</div>
+  <p>
+    最终那个测试长这样 —— 注释里把踩过的坑留下了：
+  </p>
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/LiveNotificationTest.java">
+<pre>
+/**
+ * 断开的连接必须被摘掉，否则 LiveHub 就是个内存泄漏。
+ *
+ * 这个测试的写法是实测出来的，过程值得记一下：
+ *   - 「关掉连接就立刻断言数量变了」不成立 —— TCP 对端关闭不会被服务端立刻感知
+ *   - 「推一次消息就会发现」也不成立 —— 往半关闭的 socket 写<b>是成功的</b>，
+ *     数据进了内核缓冲区。实测推 4 次，死连接依然挂在那里
+ *   - 真正有效的是<b>心跳</b>：定期写一行注释，写不动的才暴露出来
+ * 所以这里等的是一个心跳周期（测试档位配成 200ms）。
+ */
+@Test
+void 断开的连接会被心跳清理掉() throws Exception { /* ... */ }
+</pre>
+</div>
+  <p>
+    如果当初把第一个失败的测试「改成通过」（比如加个 <code>sleep</code> 再断言 &le; 2），
+    这个泄漏就会一直留在代码里。<strong>测试失败时先问「是测试错了还是代码错了」，
+    这次两个都错了。</strong>
+  </p>
+</div>
+
+<h3>浏览器端</h3>
+
+<div class="code" data-lang="js" data-file="src/main/resources/public/js/app.js">
+<pre>
+// 只有登录用户才有这个流。用 body 上的标记判断，省得未登录时白连一次。
+if (!document.body.dataset.authenticated) return;
+
+var source = new EventSource('/live');
+
+source.addEventListener('comment', function (e) {
+  var d = JSON.parse(e.data);
+  toast('&lt;a href="' + d.postUrl + '"&gt;' +
+        escapeHtml(d.author) + ' 评论了你的文章：' + escapeHtml(d.excerpt) + '&lt;/a&gt;');
+});
+
+// EventSource 自带重连（默认 3 秒），所以这里什么都不用做。
+// 真正需要处理的是「服务器明确说别再连了」—— 那种情况下要 close()。
+source.addEventListener('error', function () {
+  if (source.readyState === EventSource.CLOSED) {
+    console.info('实时通知已断开，不再重连');
+  }
+});
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 推送来的数据<strong>照样要转义</strong></div>
+  <p>
+    注意上面那个 <code>escapeHtml()</code>。推送的内容最终来自另一个用户的输入
+    （评论正文、用户名），而这里是用 <code>innerHTML</code> 拼出来的 ——
+    <strong>不转义就是一个标准的存储型 XSS</strong>。
+  </p>
+  <p>
+    服务端 JTE 模板的自动转义（第 3 章）<strong>管不到这里</strong>，
+    因为这段 HTML 是浏览器里拼的。
+    <strong>凡是自己拼 <code>innerHTML</code> 的地方，转义都得自己做</strong>
+    （或者改用 <code>textContent</code>，那样天然安全）。
+  </p>
+</div>
+
+<h2 id="ws">用 WebSocket 做「正在输入」</h2>
+
+<p>
+  这个功能 SSE 做不了，因为<strong>浏览器要主动往上发</strong>「我在打字」。
+</p>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+// WebSocket：双向的那种。浏览器要往上报「我在输入」，
+// 所以 SSE 不够用 —— 这正是两者的分界线。
+ws("/ws/post/{id}", this::postSocket);
+
+private void postSocket(WsConfig ws) {
+    ws.onConnect(ctx -&gt; {
+        long postId = ctx.pathParamAsClass("id", Long.class).get();
+        ctx.enableAutomaticPings();        // 协议级心跳，穿代理用的
+        services.presence().join(postId, ctx);
+    });
+
+    ws.onMessage(ctx -&gt; {
+        long postId = ctx.pathParamAsClass("id", Long.class).get();
+        // 只认一种消息，别的一律忽略 —— WebSocket 没有路由，
+        // 所有消息都挤在这一个入口，解析要严格
+        if (!"typing".equals(ctx.message())) return;
+
+        String username = wsUsername(ctx);
+        if (username != null) {
+            services.presence().typing(postId, ctx, username);
+        }
+    });
+
+    ws.onClose(ctx -&gt; { /* leave */ });
+    ws.onError(ctx -&gt; { /* leave */ });
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; WebSocket 的心跳<strong>不用自己写</strong></div>
+  <p>
+    <code>ctx.enableAutomaticPings()</code> 一行就够了。
+    和 SSE 不同，<strong>WebSocket 协议本身定义了 ping/pong 帧</strong>，
+    还有明确的关闭帧 —— 所以 <code>onClose</code> 是可靠的，
+    不需要 <code>LiveHub</code> 那套心跳兜底。
+  </p>
+  <p>
+    这是 WebSocket 相对 SSE 实打实的一个优势。
+    但也别忘了代价：它不是 HTTP 了，<strong>Javalin 的 <code>before</code>
+    过滤器、<code>error</code> 处理器、<code>UnitOfWork</code> 事务，
+    在 WebSocket 回调里一个都不生效</strong>。
+  </p>
+</div>
+
+<h3>在 WebSocket 里拿到登录用户</h3>
+
+<div class="code" data-lang="java">
+<pre>
+/**
+ * 从 WebSocket 握手时带过来的 HTTP 会话里取当前用户名。
+ *
+ * 关键点：用户身份<b>只能从服务端会话取</b>。
+ * WebSocket 升级用的还是普通 HTTP 请求，Cookie 照常带过来，
+ * 所以 ctx.sessionAttribute() 读得到 —— 千万别去信消息体里的用户名。
+ */
+private String wsUsername(WsContext ctx) {
+    Long userId = ctx.sessionAttribute(CurrentUser.SESSION_KEY);
+    if (userId == null) return null;
+
+    // 用户名在连接期间不会变，握手时查一次缓存在 ws 的属性里就够了，
+    // 不必每条消息都查库
+    String cached = ctx.attribute("username");
+    if (cached != null) return cached;
+
+    String username = Db.withEntityManager(em -&gt;
+        new UserRepository(em).findById(userId).map(User::getUsername).orElse(null));
+    if (username != null) ctx.attribute("username", username);
+    return username;
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 两个必须注意的点</div>
+  <p>
+    <strong>一、身份只能从会话取。</strong>
+    让客户端在消息里自报 <code>{"user":"admin"}</code> 是一个典型的越权漏洞 ——
+    WebSocket 连接建立之后就没有「每个请求再认证一次」这回事了，
+    所有消息都来自同一条连接，<strong>身份必须在握手时确定并锁死</strong>。
+  </p>
+  <p>
+    <strong>二、WebSocket 回调里没有 <code>EntityManager</code>。</strong>
+    第 5 章的 <code>UnitOfWork</code> 是一个 HTTP <code>before</code> 过滤器，
+    <strong>WebSocket 的消息回调不经过它</strong>。
+    所以 <code>Db.em(ctx)</code> 在这里会抛「当前请求没有 EntityManager」。
+    要自己开一个：
+  </p>
+<div class="code" data-lang="java" data-file="db/Db.java">
+<pre>
+/**
+ * 自己开一个 EntityManager 用完就关。
+ * 给<b>不走 HTTP 请求流程</b>的地方用：WebSocket 的回调、定时任务、Cli。
+ */
+public static &lt;T&gt; T withEntityManager(Function&lt;EntityManager, T&gt; work) {
+    try (EntityManager em = emf().createEntityManager()) {
+        return work.apply(em);
+    }
+}
+</pre>
+</div>
+</div>
+
+<h3>又一个实测发现：<code>WsContext</code> 每次事件都是新对象</h3>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>ctx != sender</code> 不能用来判断「是不是发起者」</div>
+  <p>
+    「转发给别人，不回给自己」听起来只要比一下对象就行：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+// ❌ 发起者也会收到自己的消息
+public void typing(long postId, WsContext sender, String username) {
+    each(postId, ctx -&gt; {
+        if (ctx != sender) ctx.send(...);
+    });
+}
+</pre>
+</div>
+  <p>
+    测试直接抓住了这个：断言「发起者不该收到自己的 typing」失败了。
+    原因是 <strong>Javalin 为每个事件新建一个 <code>WsContext</code></strong> ——
+    <code>onConnect</code> 时存进 Set 的那个，和 <code>onMessage</code>
+    回调里拿到的那个<strong>不是同一个实例</strong>，所以引用比较永远不相等。
+  </p>
+  <p>
+    正确的做法是按 <code>sessionId()</code> 比，它在一条连接的生命周期里是稳定的：
+  </p>
+<div class="code" data-lang="java" data-file="web/PostPresence.java">
+<pre>
+public void typing(long postId, WsContext sender, String username) {
+    String senderId = sender.sessionId();
+    each(postId, ctx -&gt; {
+        if (!ctx.sessionId().equals(senderId)) {
+            ctx.send(Map.of("type", "typing", "username", username));
+        }
+    });
+}
+</pre>
+</div>
+  <p>
+    顺带一提：<code>WsContext</code> <strong>重写了 <code>equals</code>/<code>hashCode</code></strong>
+    （按 sessionId），所以放进 <code>Set</code> 里去重是对的 ——
+    只有 <code>==</code> 这种引用比较会出问题。这种「集合语义对、引用语义错」
+    的组合特别容易蒙混过关。
+  </p>
+</div>
+
+<h2 id="scale">实时功能在多实例下会碎掉</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="多实例部署下推送丢失">
+  <rect class="bx-d" x="20" y="24" width="720" height="150" rx="9"/>
+
+  <rect class="bx" x="40" y="44" width="150" height="40" rx="6"/>
+  <text class="sm" x="115" y="68" text-anchor="middle">alice 的浏览器</text>
+  <rect class="bx" x="40" y="108" width="150" height="40" rx="6"/>
+  <text class="sm" x="115" y="132" text-anchor="middle">bob 的浏览器</text>
+
+  <rect class="bx-a" x="250" y="76" width="110" height="40" rx="6"/>
+  <text class="sm on-a" x="305" y="100" text-anchor="middle">负载均衡</text>
+
+  <rect class="bx-b" x="430" y="44" width="150" height="40" rx="6"/>
+  <text class="sm on-b" x="505" y="62" text-anchor="middle">实例 1</text>
+  <text class="mono sm" x="505" y="78" text-anchor="middle">LiveHub: {alice}</text>
+
+  <rect class="bx-b" x="430" y="108" width="150" height="40" rx="6"/>
+  <text class="sm on-b" x="505" y="126" text-anchor="middle">实例 2</text>
+  <text class="mono sm" x="505" y="142" text-anchor="middle">LiveHub: {}</text>
+
+  <path class="ln-d" d="M190 64 L250 88"/>
+  <path class="ln-d" d="M190 128 L250 104"/>
+  <path class="ln-a" d="M360 88 L430 64" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M360 104 L430 128" marker-end="url(#ar-a)"/>
+
+  <text class="sm on-r" x="600" y="70">alice 的连接在这</text>
+  <text class="sm on-r" x="600" y="134">bob 的评论到了这</text>
+
+  <rect class="bx-r" x="40" y="186" width="700" height="34" rx="7"/>
+  <text class="sm on-r" x="390" y="208" text-anchor="middle">实例 2 的 LiveHub 里没有 alice —— 这条通知<tspan class="on-r">直接丢了</tspan>，而且没有任何报错</text>
+</svg>
+<figcaption>图 21-2　第 19 章那句「多开一个实例你的锁就没了」，在这里的版本是「你的连接也没了」</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 解法：把推送从「进程内的 Map」换成「所有实例都订阅的频道」</div>
+  <div class="tw">
+  <table>
+  <tr><th>做法</th><th>怎么工作</th><th>代价</th></tr>
+  <tr><td><strong>粘性会话</strong></td>
+      <td>让同一个用户总是落到同一个实例</td>
+      <td>最省事，但实例重启时连接全断；扩缩容也会打乱</td></tr>
+  <tr><td><strong>Redis Pub/Sub</strong></td>
+      <td>发评论的实例 <code>PUBLISH</code>，所有实例 <code>SUBSCRIBE</code>
+          并推给本地连着的人</td>
+      <td>最常见的方案。多一个依赖；消息不持久（实例重启期间的会丢）</td></tr>
+  <tr><td><strong>消息队列</strong></td>
+      <td>同上，但用 Kafka / RabbitMQ，消息可持久化</td>
+      <td>重得多，适合通知本身就要可靠投递的场景</td></tr>
+  <tr><td><strong>托管服务</strong></td>
+      <td>Pusher、Ably、Supabase Realtime 之类</td>
+      <td>连接管理全交出去；花钱，而且多一个外部依赖</td></tr>
+  </table>
+  </div>
+  <p>
+    改造的范围其实很小：<code>LiveHub.send()</code> 从「直接写本地连接」
+    改成「<code>PUBLISH</code> 到频道」，再加一个订阅者在收到消息时写本地连接。
+    <strong>调用方一行都不用改。</strong>
+    这正是当初把推送收口到一个 <code>LiveHub</code> 里的价值。
+  </p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书没有对应章节。<code>mvn test</code> 应该看到 74 个测试全绿，其中 8 个来自本章。</div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>
+      <strong>亲眼看看 SSE 的报文。</strong>登录后
+      <code>curl -N -H "Cookie: JSESSIONID=..." http://localhost:7070/live</code>，
+      保持着，然后在另一个浏览器里评论你的文章。
+      注意 <code>-N</code>（不缓冲）—— 少了它你什么都看不到。
+      观察心跳的 <code>: ping</code> 行。
+    </li>
+    <li>
+      <strong>复现那个泄漏。</strong>把 <code>LiveHub</code> 的心跳停掉
+      （<code>heartbeat.shutdownNow()</code> 提前调），
+      跑 <code>LiveNotificationTest</code>，确认「断开的连接会被心跳清理掉」变红。
+    </li>
+    <li>
+      打开两个标签页，看 <code>hello</code> 事件里的 <code>connections</code> 变成 2。
+      关掉一个，等一个心跳周期，再开一个 —— 确认又回到 2 而不是 3。
+    </li>
+    <li>
+      <strong>验证 EventSource 的自动重连。</strong>连上之后把服务器
+      <kbd>Ctrl</kbd>+<kbd>C</kbd>，看浏览器控制台每 3 秒重试一次；
+      再把服务器起回来，确认它自己接上了 —— 这件事 WebSocket 要自己写几十行。
+    </li>
+    <li>
+      给通知加一个<strong>未读计数</strong>：在导航栏放一个小红点，
+      收到 <code>comment</code> 事件就 +1，点开通知列表清零。
+      想清楚一个问题：<strong>用户不在线时收到的通知怎么办？</strong>
+      （提示：实时推送和持久化通知是两件事，大多数系统两个都要）
+    </li>
+    <li>
+      <strong>WebSocket 的「正在输入」接到页面上。</strong>
+      在文章页连 <code>/ws/post/{id}</code>，评论框 <code>input</code> 事件时
+      节流发送 <code>typing</code>，收到别人的 typing 就显示
+      「xxx 正在输入…」并在 3 秒后消失。
+    </li>
+    <li>
+      故意往 WebSocket 发一条超大的消息（比如 10MB 的字符串）。
+      看会发生什么，然后查一下怎么配置消息大小上限。
+    </li>
+    <li>
+      （进阶）把 <code>LiveHub</code> 改成基于 Redis Pub/Sub。
+      本地用 <code>docker run -p 6379:6379 redis</code>，
+      起两个实例（不同端口），确认在实例 1 上登录的用户
+      能收到实例 2 上产生的通知。
+    </li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -36,6 +36,9 @@ public record AppConfig(
     // 上传（第 20 章）：头像存在哪
     String avatarDir,
 
+    // 实时（第 21 章）：SSE 心跳间隔（毫秒）
+    long sseHeartbeatMillis,
+
     // 开发辅助
     boolean devLogging,
     boolean routeOverview,
@@ -69,6 +72,7 @@ public record AppConfig(
             500,
             env.getInt("LOGIN_ATTEMPTS", 10), env.getInt("LOGIN_WINDOW_SECONDS", 300),
             env.get("AVATAR_DIR", "data/avatars"),
+            env.getInt("SSE_HEARTBEAT_MILLIS", 20_000),
             true, true, true
         );
     }
@@ -93,6 +97,7 @@ public record AppConfig(
             Long.MAX_VALUE,          // 测试里不报慢查询
             1000, 60,                // 限流在测试里形同虚设，免得干扰别的用例
             env.get("AVATAR_DIR", "target/test-avatars"),
+            env.getInt("SSE_HEARTBEAT_MILLIS", 300),   // 测试里调小，好验证清理
             false, false, true
         );
     }
@@ -117,6 +122,7 @@ public record AppConfig(
             env.getInt("SLOW_QUERY_MILLIS", 500),
             env.getInt("LOGIN_ATTEMPTS", 5), env.getInt("LOGIN_WINDOW_SECONDS", 300),
             env.require("AVATAR_DIR"),      // ← 生产必须显式给，别写在容器的临时层里
+            env.getInt("SSE_HEARTBEAT_MILLIS", 20_000),
             false, false, false                // 生产环境关掉所有开发辅助
         );
     }

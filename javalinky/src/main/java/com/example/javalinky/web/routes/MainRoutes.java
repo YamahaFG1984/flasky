@@ -21,6 +21,8 @@ import com.example.javalinky.web.page.UserProfilePage;
 import io.javalin.config.JavalinConfig;
 import io.javalin.http.BadRequestResponse;
 import io.javalin.http.Context;
+import io.javalin.http.sse.SseClient;
+import io.javalin.websocket.WsConfig;
 import io.javalin.http.ForbiddenResponse;
 import io.javalin.http.NotFoundResponse;
 
@@ -53,6 +55,14 @@ public class MainRoutes implements RouteModule {
             get("/user/{username}/following", this::following);
             get("/post/{id}", this::showPost);
             get("/avatars/{file}", this::serveAvatar);      // 第 20 章：上传的头像，公开可读
+
+            // 第 21 章：实时通知。SSE 是单向的（服务器 → 浏览器），
+            // 对「推通知」这个场景刚好够用，而且就是一个普通的 HTTP 长连接。
+            sse(Routes.LIVE, this::liveFeed, Access.AUTHENTICATED);
+
+            // WebSocket：双向的那种。浏览器要往上报「我在输入」，
+            // 所以 SSE 不够用 —— 这正是两者的分界线。
+            ws("/ws/post/{id}", this::postSocket);
 
             // 首页的两个标签页（用 POST + CSRF，因为它改变了服务端认知的状态）
             post("/show-all",      this::showAll,      Access.AUTHENTICATED);
@@ -205,6 +215,16 @@ public class MainRoutes implements RouteModule {
 
         services.commentRepo(ctx).save(new Comment(form.body(), post, me));
         Flash.success(ctx, "评论已发布。");
+
+        // 第 21 章：通知作者（自己评论自己的文章就不用通知了）
+        User author = post.getAuthor();
+        if (!author.getId().equals(me.getId())) {
+            services.live().send(author.getId(), "comment", Map.of(
+                "postId",   post.getId(),
+                "postUrl",  Routes.post(post.getId(), LAST_PAGE) + "#comments",
+                "author",   me.getUsername(),
+                "excerpt",  excerpt(form.body(), 60)));
+        }
 
         // 跳到最后一页，这样用户能立刻看到自己的评论
         ctx.redirect(Routes.post(postId, LAST_PAGE) + "#comments");
@@ -395,6 +415,89 @@ public class MainRoutes implements RouteModule {
      * 没走 staticFiles 是因为这些文件在数据目录里，不在 classpath 上；
      * 而且这样才能自己控制 Content-Type 和缓存头。
      */
+    /**
+     * 实时通知流（第 21 章）。
+     *
+     * 这个方法返回后连接<b>不会</b>关闭 —— keepAlive() 告诉 Javalin
+     * 把它留着。之后由 LiveHub 在别的请求线程里往这个 client 上写数据。
+     */
+    private void liveFeed(SseClient client) {
+        User me = CurrentUser.require(client.ctx());
+
+        client.keepAlive();
+        services.live().register(me.getId(), client);
+
+        // 先打个招呼：浏览器收到任意一条数据才会认为连接真的建立了
+        client.sendEvent("hello", Map.of("connections",
+            services.live().connectionCount(me.getId())));
+    }
+
+    /**
+     * 文章页的 WebSocket（第 21 章）。
+     *
+     * 注意这里<b>没有</b>登录要求：看文章本来就不用登录。
+     * 但 onMessage 里的用户名必须<b>从会话里取</b>，绝不能信客户端发来的 ——
+     * 否则任何人都能冒充别人「正在输入」。
+     */
+    private void postSocket(WsConfig ws) {
+        ws.onConnect(ctx -> {
+            long postId = ctx.pathParamAsClass("id", Long.class).get();
+            ctx.enableAutomaticPings();        // 协议级心跳，穿代理用的
+            services.presence().join(postId, ctx);
+        });
+
+        ws.onMessage(ctx -> {
+            long postId = ctx.pathParamAsClass("id", Long.class).get();
+            // 只认一种消息，别的一律忽略 —— WebSocket 没有路由，
+            // 所有消息都挤在这一个入口，解析要严格
+            if (!"typing".equals(ctx.message())) return;
+
+            String username = wsUsername(ctx);
+            if (username != null) {
+                services.presence().typing(postId, ctx, username);
+            }
+        });
+
+        ws.onClose(ctx -> {
+            long postId = ctx.pathParamAsClass("id", Long.class).get();
+            services.presence().leave(postId, ctx);
+        });
+
+        ws.onError(ctx -> {
+            long postId = ctx.pathParamAsClass("id", Long.class).get();
+            services.presence().leave(postId, ctx);
+        });
+    }
+
+    /**
+     * 从 WebSocket 握手时带过来的 HTTP 会话里取当前用户名。
+     *
+     * 关键点：用户身份<b>只能从服务端会话取</b>。
+     * WebSocket 升级用的还是普通 HTTP 请求，Cookie 照常带过来，
+     * 所以 ctx.sessionAttribute() 读得到 —— 千万别去信消息体里的用户名。
+     */
+    private String wsUsername(io.javalin.websocket.WsContext ctx) {
+        Long userId = ctx.sessionAttribute(CurrentUser.SESSION_KEY);
+        if (userId == null) return null;
+
+        // 用户名在连接期间不会变，握手时查一次缓存在 ws 的属性里就够了，
+        // 不必每条消息都查库
+        String cached = ctx.attribute("username");
+        if (cached != null) return cached;
+
+        String username = Db.withEntityManager(em ->
+            new com.example.javalinky.db.UserRepository(em).findById(userId)
+                .map(User::getUsername).orElse(null));
+        if (username != null) ctx.attribute("username", username);
+        return username;
+    }
+
+    /** 通知里只带一小段正文，长了截断 */
+    private static String excerpt(String body, int max) {
+        String flat = body.replaceAll("\\s+", " ").strip();
+        return flat.length() <= max ? flat : flat.substring(0, max) + "…";
+    }
+
     private void serveAvatar(Context ctx) {
         String file = ctx.pathParam("file");
 

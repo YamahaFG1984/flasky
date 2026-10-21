@@ -12,7 +12,8 @@ import java.time.Instant;
 
 public final class CurrentUser {
 
-    private static final String SESSION_KEY = "userId";
+    /** 会话里存当前用户 id 的键。WebSocket 侧（第 21 章）也要读它 */
+    public static final String SESSION_KEY = "userId";
     private static final String CTX_KEY = "currentUser";
 
     /** 最后活跃时间的最小更新间隔。每个请求都写一次库太浪费 */

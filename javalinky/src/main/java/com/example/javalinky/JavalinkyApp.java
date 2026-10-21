@@ -102,6 +102,7 @@ public final class JavalinkyApp {
 
             // 优雅关闭
             javalin.events.serverStopping(() -> {
+                services.live().close();        // 第 21 章：停掉心跳、关掉所有 SSE 连接
                 mailer.close();
                 Db.close();
             });

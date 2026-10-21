@@ -44,6 +44,19 @@ public final class Db {
         return em;
     }
 
+    /**
+     * 自己开一个 EntityManager 用完就关（第 21 章）。
+     *
+     * 给<b>不走 HTTP 请求流程</b>的地方用：WebSocket 的回调、定时任务、Cli。
+     * 这些地方没有经过 UnitOfWork 过滤器，所以 em(ctx) 拿不到东西。
+     * 只读用途，不开事务。
+     */
+    public static <T> T withEntityManager(java.util.function.Function<EntityManager, T> work) {
+        try (EntityManager em = emf().createEntityManager()) {
+            return work.apply(em);
+        }
+    }
+
     public static void close() {
         if (emf != null) emf.close();
     }

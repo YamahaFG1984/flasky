@@ -23,7 +23,9 @@ public record Services(
     MailService mail,
     AuthService auth,
     RateLimiter loginLimiter,     // 第 19 章：应用级单例，所有请求线程共用
-    AvatarStore avatars           // 第 20 章
+    AvatarStore avatars,          // 第 20 章
+    LiveHub live,                 // 第 21 章：连着的 SSE 客户端
+    PostPresence presence         // 第 21 章：WebSocket，文章页的在场者
 ) {
 
     public static Services wire(AppConfig cfg, MailService mail) {
@@ -31,7 +33,10 @@ public record Services(
             cfg.loginAttempts(),
             (double) cfg.loginAttempts() / cfg.loginWindowSeconds());
         var avatars = new AvatarStore(java.nio.file.Path.of(cfg.avatarDir()));
-        return new Services(cfg, mail, new AuthService(cfg, mail), loginLimiter, avatars);
+        return new Services(cfg, mail, new AuthService(cfg, mail),
+                            loginLimiter, avatars,
+                            new LiveHub(java.time.Duration.ofMillis(cfg.sseHeartbeatMillis())),
+                            new PostPresence());
     }
 
     // ---- 请求级别的仓储（每次调用都用当前请求的 EntityManager）----

@@ -29,6 +29,7 @@ public final class TestFixtures {
             Long.MAX_VALUE,
             1000, 60,                           // 限流：测试里放得很宽
             "target/test-avatars/" + UUID.randomUUID(),   // 每个测试一个独立目录
+            200,                                // SSE 心跳：测试里 200ms
             false, false, true);
     }
 

@@ -18,7 +18,8 @@
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
   <link rel="stylesheet" href="/css/app.css">
 </head>
-<body>
+<%-- data-authenticated 让 app.js 知道要不要连 SSE（第 21 章）--%>
+<body data-authenticated="${layout.isAuthenticated() ? "1" : null}">
 
 <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
   <div class="container">
