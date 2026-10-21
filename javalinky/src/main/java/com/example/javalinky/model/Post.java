@@ -27,6 +27,10 @@ public class Post {
     @JoinColumn(name = "author_id", nullable = false)
     private User author;
 
+    @OneToMany(mappedBy = "post", fetch = FetchType.LAZY,
+               cascade = CascadeType.ALL, orphanRemoval = true)
+    private java.util.List<Comment> comments = new java.util.ArrayList<>();
+
     protected Post() {}
 
     public Post(String body, User author) {
@@ -51,4 +55,5 @@ public class Post {
     public Instant getTimestamp() { return timestamp; }
     public void setTimestamp(Instant timestamp) { this.timestamp = timestamp; }
     public User getAuthor() { return author; }
+    public java.util.List<Comment> getComments() { return comments; }
 }

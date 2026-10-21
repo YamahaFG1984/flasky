@@ -1,5 +1,6 @@
 @import gg.jte.Content
 @import com.example.javalinky.web.Layout
+@import com.example.javalinky.model.Permission
 @import com.example.javalinky.web.Routes
 
 @param Layout layout
@@ -33,6 +34,9 @@
           <li class="nav-item">
             <a class="nav-link" href="${Routes.user(layout.currentUser().getUsername())}">我的主页</a>
           </li>
+        @endif
+        @if(layout.can(Permission.MODERATE))
+          <li class="nav-item"><a class="nav-link" href="${Routes.MODERATE}">协管评论</a></li>
         @endif
       </ul>
 

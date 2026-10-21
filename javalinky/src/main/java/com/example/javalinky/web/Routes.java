@@ -28,6 +28,20 @@ public final class Routes {
         return "/post/" + id + "?page=" + page;
     }
 
+    public static final String MODERATE = "/moderate";
+
+    public static String comments(long postId) {
+        return "/post/" + postId + "/comments";
+    }
+
+    public static String enableComment(long id) {
+        return "/moderate/enable/" + id;
+    }
+
+    public static String disableComment(long id) {
+        return "/moderate/disable/" + id;
+    }
+
     public static String editPost(long id) {
         return "/edit/" + id;
     }

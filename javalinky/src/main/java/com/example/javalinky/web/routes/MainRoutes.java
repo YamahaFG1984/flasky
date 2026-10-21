@@ -2,6 +2,7 @@ package com.example.javalinky.web.routes;
 
 import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.db.Page;
+import com.example.javalinky.model.Comment;
 import com.example.javalinky.model.Post;
 import com.example.javalinky.model.Permission;
 import com.example.javalinky.model.Role;
@@ -9,7 +10,9 @@ import com.example.javalinky.model.User;
 import com.example.javalinky.web.*;
 import com.example.javalinky.web.form.AdminEditProfileForm;
 import com.example.javalinky.web.form.EditProfileForm;
+import com.example.javalinky.web.form.CommentForm;
 import com.example.javalinky.web.form.PostForm;
+import com.example.javalinky.web.page.CommentListPage;
 import com.example.javalinky.web.page.FollowListPage;
 import com.example.javalinky.web.page.PostListPage;
 import com.example.javalinky.web.page.UserProfilePage;
@@ -62,6 +65,16 @@ public class MainRoutes implements RouteModule {
             get("/edit/{id}",  this::editPostForm, Permission.WRITE);
             post("/edit/{id}", this::editPost,     Permission.WRITE);
 
+            // 需要 COMMENT 权限
+            post("/post/{id}/comments", this::createComment, Permission.COMMENT);
+
+            // 整个前缀都需要 MODERATE 权限 —— path 块可以挂角色
+            path("/moderate", List.of(Permission.MODERATE), () -> {
+                get("",               this::moderate);
+                post("/enable/{id}",  this::enableComment);
+                post("/disable/{id}", this::disableComment);
+            });
+
             // 管理员专属：整个前缀挂一个角色
             path("/admin", List.of(Permission.ADMIN), () -> {
                 get("/edit-profile/{id}",  this::adminEditProfileForm);
@@ -89,7 +102,7 @@ public class MainRoutes implements RouteModule {
 
         View.render(ctx, "index.jte", "首页",
                     "form", FormView.empty(),
-                    "posts", PostListPage.of(posts, me),
+                    "posts", PostListPage.of(posts, me, commentCounts(ctx, posts)),
                     "showFollowed", showFollowed);
     }
 
@@ -125,6 +138,9 @@ public class MainRoutes implements RouteModule {
         ctx.redirect(Routes.INDEX);     // Post/Redirect/Get
     }
 
+    /** 约定：page=-1 表示“最后一页” */
+    private static final int LAST_PAGE = -1;
+
     /**
      * 单篇文章页。URL: /post/{id}
      * 方法名不能叫 post —— 会盖住静态导入的 ApiBuilder.post(...)，
@@ -135,10 +151,91 @@ public class MainRoutes implements RouteModule {
         Post post = services.postRepo(ctx).findById(id)
             .orElseThrow(() -> new NotFoundResponse("文章不存在"));
 
-        // 第 13 章会在这里加上评论列表
+        User me = CurrentUser.get(ctx);
+        boolean canModerate = me != null && me.can(Permission.MODERATE);
+
+        var comments = services.commentRepo(ctx);
+        int size = cfg.commentsPerPage();
+        Integer requested = ctx.queryParamAsClass("page", Integer.class).getOrNull();
+
+        int page;
+        if (requested != null && requested == LAST_PAGE) {
+            long total = comments.countByPost(post, canModerate);
+            page = (int) Math.max(0, total - 1) / size + 1;
+        } else {
+            page = Page.clampPage(requested);
+        }
+
+        var commentPage = comments.findByPost(post, page, size, canModerate);
+
         View.render(ctx, "post.jte", "文章",
-                    "post", PostListPage.of(
-                        Page.of(List.of(post), 1, 1, 1), CurrentUser.get(ctx)));
+            "post", PostListPage.of(Page.of(List.of(post), 1, 1, 1), me,
+                Map.of(post.getId(), comments.countByPost(post, canModerate))),
+            "comments", CommentListPage.of(commentPage, me, post.getId()),
+            "form", FormView.empty());
+    }
+
+    private void createComment(Context ctx) {
+        User me = CurrentUser.require(ctx);
+        long postId = ctx.pathParamAsClass("id", Long.class).get();
+
+        Post post = services.postRepo(ctx).findById(postId)
+            .orElseThrow(() -> new NotFoundResponse("文章不存在"));
+
+        var form = new CommentForm(ctx.formParam("body"));
+        var errors = Forms.validate(form);
+        if (!errors.isEmpty()) {
+            Flash.danger(ctx, errors.values().iterator().next().get(0));
+            ctx.redirect(Routes.post(postId) + "#comment-form");
+            return;
+        }
+
+        services.commentRepo(ctx).save(new Comment(form.body(), post, me));
+        Flash.success(ctx, "评论已发布。");
+
+        // 跳到最后一页，这样用户能立刻看到自己的评论
+        ctx.redirect(Routes.post(postId, LAST_PAGE) + "#comments");
+    }
+
+    // ---------- 协管评论 ----------
+
+    private void moderate(Context ctx) {
+        int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class).getOrNull());
+
+        var source = services.commentRepo(ctx)
+            .findAllForModeration(page, cfg.commentsPerPage());
+
+        View.render(ctx, "moderate.jte", "协管评论",
+            "comments", CommentListPage.of(source, CurrentUser.get(ctx), 0));
+    }
+
+    private void disableComment(Context ctx) {
+        setCommentDisabled(ctx, true);
+    }
+
+    private void enableComment(Context ctx) {
+        setCommentDisabled(ctx, false);
+    }
+
+    private void setCommentDisabled(Context ctx, boolean disabled) {
+        long id = ctx.pathParamAsClass("id", Long.class).get();
+        Comment comment = services.commentRepo(ctx).findById(id)
+            .orElseThrow(() -> new NotFoundResponse("评论不存在"));
+
+        comment.setDisabled(disabled);     // 托管对象，提交时自动 UPDATE
+        Flash.success(ctx, disabled ? "评论已隐藏。" : "评论已恢复显示。");
+
+        // 操作完回到原来那一页，别让协管员每次都从第 1 页重新找
+        String page = ctx.formParam("page");
+        ctx.redirect(page == null
+            ? Routes.MODERATE
+            : Routes.MODERATE + "?page=" + page);
+    }
+
+    /** 一条聚合查询批量查出这一页所有文章的评论数 */
+    private Map<Long, Long> commentCounts(Context ctx, Page<Post> posts) {
+        return services.commentRepo(ctx).countCommentsByPost(
+            posts.items().stream().map(Post::getId).toList());
     }
 
     private void editPostForm(Context ctx) {
@@ -198,7 +295,8 @@ public class MainRoutes implements RouteModule {
             user,
             viewer != null && viewer.isAdministrator(),
             viewer != null && viewer.getId().equals(user.getId()),
-            postRepo.countByAuthor(user), 0,   // 评论数第 13 章填上
+            postRepo.countByAuthor(user),
+            services.commentRepo(ctx).countByAuthor(user),
             follows.countFollowersVisible(user),
             follows.countFollowingVisible(user),
             viewer != null && viewer.can(Permission.FOLLOW)
@@ -208,7 +306,7 @@ public class MainRoutes implements RouteModule {
 
         View.render(ctx, "user.jte", user.getUsername(),
                     "page", page,
-                    "posts", PostListPage.of(posts, viewer));
+                    "posts", PostListPage.of(posts, viewer, commentCounts(ctx, posts)));
     }
 
     // ---------- 关注 ----------

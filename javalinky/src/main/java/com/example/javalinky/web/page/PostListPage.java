@@ -6,6 +6,7 @@ import com.example.javalinky.model.Post;
 import com.example.javalinky.model.User;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 public record PostListPage(Page<Item> page) {
 
@@ -20,6 +21,15 @@ public record PostListPage(Page<Item> page) {
     ) {}
 
     public static PostListPage of(Page<Post> source, User viewer) {
+        return of(source, viewer, Map.of());
+    }
+
+    /**
+     * @param commentCounts 文章 id → 评论数。一条聚合查询批量查出来，
+     *                      不要在这里逐篇 post.getComments().size() —— 那是 N+1。
+     */
+    public static PostListPage of(Page<Post> source, User viewer,
+                                  Map<Long, Long> commentCounts) {
         List<Item> items = source.items().stream()
             .map(post -> new Item(
                 post.getId(),
@@ -27,7 +37,7 @@ public record PostListPage(Page<Item> page) {
                 post.getTimestamp(),
                 post.getAuthor().getUsername(),
                 post.getAuthor().avatarHash(),
-                0,                              // 评论数，第 13 章填上
+                commentCounts.getOrDefault(post.getId(), 0L),
                 canEdit(viewer, post)))
             .toList();
 
