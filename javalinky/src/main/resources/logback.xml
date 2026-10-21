@@ -8,6 +8,12 @@
     </encoder>
   </appender>
 
+  <!-- 慢查询单独一个 logger，方便在生产环境只开这一个 -->
+  <logger name="org.hibernate.SQL_SLOW" level="INFO"/>
+
+  <!-- 开发时想看全部 SQL 就把这个打开（生产千万别开，日志量巨大） -->
+  <!-- <logger name="org.hibernate.SQL" level="DEBUG"/> -->
+
   <!-- 框架只看 INFO 及以上 -->
   <logger name="org.eclipse.jetty" level="INFO"/>
   <logger name="io.javalin" level="INFO"/>

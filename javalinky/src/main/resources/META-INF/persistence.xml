@@ -29,9 +29,20 @@
       <property name="hibernate.hikari.maximumPoolSize" value="10"/>
       <property name="hibernate.hikari.minimumIdle" value="2"/>
 
-      <!-- 开发期看 SQL（第 16 章会换成更好的方式） -->
+      <!-- 开发期看 SQL -->
       <property name="hibernate.format_sql" value="true"/>
       <property name="hibernate.highlight_sql" value="true"/>
+
+      <!-- 第 16 章：性能观测 -->
+      <!-- 超过这个毫秒数的查询会被 org.hibernate.SQL_SLOW 记下来 -->
+      <property name="hibernate.log_slow_query" value="500"/>
+      <property name="hibernate.generate_statistics" value="true"/>
+      <!-- 每条 SQL 执行前都会过一遍这个类：计数 + 记下 SQL 文本 -->
+      <property name="hibernate.session_factory.statement_inspector"
+                value="com.example.javalinky.db.QueryStats"/>
+      <!-- 每个 Session 一个监听器实例：给出 JDBC 执行耗时 -->
+      <property name="hibernate.session.events.auto"
+                value="com.example.javalinky.db.QueryStats$TimingListener"/>
     </properties>
   </persistence-unit>
 </persistence>

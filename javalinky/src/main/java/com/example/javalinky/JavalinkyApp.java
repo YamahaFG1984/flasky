@@ -61,6 +61,7 @@ public final class JavalinkyApp {
             javalin.concurrency.useVirtualThreads = true;
 
             // 过滤器（顺序有讲究，见下面的说明）
+            Timing.install(javalin, cfg);   // 最先装：它要量整个请求的耗时
             UnitOfWork.install(javalin);
             Csrf.install(javalin);
             CurrentUser.install(javalin);   // 必须在 UnitOfWork 之后：它要用 EntityManager
