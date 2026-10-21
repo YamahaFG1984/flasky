@@ -2,6 +2,7 @@ package com.example.javalinky.web;
 
 import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.db.Db;
+import com.example.javalinky.db.RoleRepository;
 import com.example.javalinky.db.UserRepository;
 import com.example.javalinky.mail.MailService;
 import com.example.javalinky.service.AuthService;
@@ -25,4 +26,5 @@ public record Services(
 
     // ---- 请求级别的仓储（每次调用都用当前请求的 EntityManager）----
     public UserRepository users(Context ctx) { return new UserRepository(Db.em(ctx)); }
+    public RoleRepository roles(Context ctx) { return new RoleRepository(Db.em(ctx)); }
 }

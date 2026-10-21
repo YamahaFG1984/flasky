@@ -54,6 +54,7 @@ public final class JavalinkyApp {
             UnitOfWork.install(javalin);
             Csrf.install(javalin);
             CurrentUser.install(javalin);   // 必须在 UnitOfWork 之后：它要用 EntityManager
+            Authorization.install(javalin); // beforeMatched：按路由上声明的角色检查权限
 
             // 按配置开关开发辅助
             if (cfg.devLogging())    javalin.bundledPlugins.enableDevLogging();

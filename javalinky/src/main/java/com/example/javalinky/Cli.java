@@ -2,6 +2,7 @@ package com.example.javalinky;
 
 import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.db.Db;
+import com.example.javalinky.service.SeedService;
 
 public class Cli {
 
@@ -19,7 +20,8 @@ public class Cli {
                 Db.init(cfg.jdbcUrl(), cfg.dbUser(), cfg.dbPassword());
                 System.out.println("数据库已升级到最新版本");
             }
-            // seed-roles / fake / deploy 分别在第 9、11、17 章加入
+            case "seed-roles" -> run(cfg, SeedService::insertRoles);
+            // fake / deploy 分别在第 11、17 章加入
             default -> {
                 System.err.println("未知命令：" + args[0]);
                 usage();
@@ -29,11 +31,29 @@ public class Cli {
         Db.close();
     }
 
+    private static void run(AppConfig cfg, Runnable task) {
+        Db.init(cfg.jdbcUrl(), cfg.dbUser(), cfg.dbPassword());
+        var em = Db.emf().createEntityManager();
+        try {
+            em.getTransaction().begin();
+            SeedService.use(em);
+            task.run();
+            em.getTransaction().commit();
+            System.out.println("完成");
+        } catch (RuntimeException e) {
+            if (em.getTransaction().isActive()) em.getTransaction().rollback();
+            throw e;
+        } finally {
+            em.close();
+        }
+    }
+
     private static void usage() {
         System.err.println("""
             用法：java -cp javalinky.jar com.example.javalinky.Cli <命令>
 
               migrate            跑数据库迁移
+              seed-roles         创建/更新角色（可重复执行）
             """);
     }
 }

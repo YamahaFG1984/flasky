@@ -1,6 +1,8 @@
 package com.example.javalinky;
 
 import com.example.javalinky.config.AppConfig;
+import com.example.javalinky.db.Db;
+import com.example.javalinky.service.SeedService;
 import com.example.javalinky.util.Passwords;
 import io.javalin.testtools.FormBody;
 import io.javalin.testtools.HttpClient;
@@ -45,7 +47,10 @@ class AuthTest {
 
     @Test
     void 注册并登录的完整流程() {
-        JavalinTest.test(JavalinkyApp.create(AppConfig.load()), (server, client) -> {
+        var app = JavalinkyApp.create(AppConfig.load());
+        seedRoles();          // 注册时要给新用户分配默认角色
+
+        JavalinTest.test(app, (server, client) -> {
             // 测试客户端自带 Cookie 管理，所以会话能跨请求保持
             var register = postForm(client, "/auth/register", form(
                 "_csrf", csrfTokenFrom(client.get("/auth/register").body().string()),
@@ -99,6 +104,19 @@ class AuthTest {
         var map = new LinkedHashMap<String, String>();
         for (int i = 0; i < pairs.length; i += 2) map.put(pairs[i], pairs[i + 1]);
         return map;
+    }
+
+    /** 灌入角色。相当于原书测试里的 Role.insert_roles()（第 15 章会挪进 TestFixtures） */
+    static void seedRoles() {
+        var em = Db.emf().createEntityManager();
+        try {
+            em.getTransaction().begin();
+            SeedService.use(em);
+            SeedService.insertRoles();
+            em.getTransaction().commit();
+        } finally {
+            em.close();
+        }
     }
 
     static Response postForm(HttpClient client, String path, Map<String, String> fields) {

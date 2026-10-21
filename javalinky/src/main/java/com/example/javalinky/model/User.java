@@ -65,6 +65,15 @@ public class User {
     public Role getRole() { return role; }
     public void setRole(Role role) { this.role = role; }
 
+    /** 相当于原书的 user.can(permission) */
+    public boolean can(Permission permission) {
+        return role != null && role.has(permission);
+    }
+
+    public boolean isAdministrator() {
+        return can(Permission.ADMIN);
+    }
+
     @Override
     public String toString() {
         return "User[" + username + "]";

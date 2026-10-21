@@ -2,6 +2,7 @@ package com.example.javalinky.web.routes;
 
 import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.db.Db;
+import com.example.javalinky.model.Role;
 import com.example.javalinky.model.User;
 import com.example.javalinky.service.AuthService;
 import com.example.javalinky.util.Tokens;
@@ -147,9 +148,15 @@ public class AuthRoutes implements RouteModule {
             return;
         }
 
-        // 3. 创建用户（第 9 章会在这里顺手分配默认角色）
+        // 3. 创建用户并分配角色：配置里的管理员邮箱直接拿管理员角色
+        var roles = services.roles(ctx);
+        Role role = email.equalsIgnoreCase(cfg.adminEmail())
+            ? roles.findByName("管理员").orElseGet(roles::defaultRole)
+            : roles.defaultRole();
+
         var user = new User(email, form.username());
         user.setPassword(form.password());
+        user.setRole(role);
         users.save(user);
 
         // 4. 发确认邮件。注意：令牌要用 user.getId()，所以必须先 flush 拿到主键
