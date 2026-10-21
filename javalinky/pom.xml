@@ -19,6 +19,8 @@
     <logback.version>1.5.20</logback.version>
     <jte.version>3.2.4</jte.version>
     <hibernate-validator.version>9.0.1.Final</hibernate-validator.version>
+    <hibernate.version>7.4.2.Final</hibernate.version>
+    <flyway.version>11.14.0</flyway.version>
   </properties>
 
   <!-- 3. 依赖 -->
@@ -61,6 +63,46 @@
       <groupId>org.glassfish.expressly</groupId>
       <artifactId>expressly</artifactId>
       <version>6.0.0</version>
+    </dependency>
+
+    <!-- Hibernate ORM（自带 Jakarta Persistence 接口） -->
+    <dependency>
+      <groupId>org.hibernate.orm</groupId>
+      <artifactId>hibernate-core</artifactId>
+      <version>${hibernate.version}</version>
+    </dependency>
+
+    <!-- 连接池。Hibernate 的这个模块会自动把 HikariCP 接上 -->
+    <dependency>
+      <groupId>org.hibernate.orm</groupId>
+      <artifactId>hibernate-hikaricp</artifactId>
+      <version>${hibernate.version}</version>
+    </dependency>
+
+    <!-- 数据库迁移 -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+      <version>${flyway.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+      <version>${flyway.version}</version>
+    </dependency>
+
+    <!-- 开发和测试用：H2，零配置的嵌入式数据库 -->
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <version>2.3.232</version>
+    </dependency>
+
+    <!-- 生产用：PostgreSQL 驱动 -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.7.8</version>
     </dependency>
   </dependencies>
 

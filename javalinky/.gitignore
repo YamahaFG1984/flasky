@@ -2,6 +2,9 @@ target/
 .env
 *.log
 
+# H2 开发库（第 5 章）
+data/
+
 # IDE
 .idea/
 *.iml
