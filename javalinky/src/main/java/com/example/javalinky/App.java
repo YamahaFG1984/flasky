@@ -1,7 +1,10 @@
 package com.example.javalinky;
 
+import com.example.javalinky.web.UserPage;
+import com.example.javalinky.web.View;
 import io.javalin.Javalin;
-import io.javalin.http.NotFoundResponse;
+import io.javalin.http.staticfiles.Location;
+import io.javalin.rendering.template.JavalinJte;
 
 public class App {
 
@@ -9,31 +12,37 @@ public class App {
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "7070"));
 
         Javalin.create(config -> {
-            // --- 开发期辅助（第 7 章会按环境开关） ---
+
+            // --- 模板引擎 ---
+            config.fileRenderer(new JavalinJte(JavalinJte.Companion.directoryTemplateEngine()));
+
+            // --- 静态文件 ---
+            config.staticFiles.add(f -> {
+                f.directory = "/public";
+                f.location = Location.CLASSPATH;
+                f.hostedPath = "/";
+            });
+
+            // --- 开发期辅助 ---
             config.bundledPlugins.enableDevLogging();
             config.bundledPlugins.enableRouteOverview("/routes");
 
-            // --- 钩子 ---
-            config.routes.before(ctx ->
-                ctx.attribute("startedAt", System.nanoTime()));
-
-            config.routes.after(ctx -> {
-                long started = ctx.attribute("startedAt");
-                long ms = (System.nanoTime() - started) / 1_000_000;
-                ctx.header("X-Response-Time", ms + "ms");
-            });
+            // --- 自定义错误页 ---
+            config.routes.error(404, "html", ctx ->
+                View.render(ctx, "error/404.jte", "页面不存在"));
+            config.routes.error(403, "html", ctx ->
+                View.render(ctx, "error/403.jte", "没有权限"));
+            config.routes.error(500, "html", ctx ->
+                View.render(ctx, "error/500.jte", "服务器错误"));
 
             // --- 路由 ---
-            config.routes.get("/", ctx -> ctx.html("<h1>Hello World!</h1>"));
+            config.routes.get("/", ctx ->
+                View.render(ctx, "index.jte", "首页"));
 
             config.routes.get("/user/{name}", ctx -> {
                 String name = ctx.pathParam("name");
-                if (name.isBlank()) throw new NotFoundResponse();
-                ctx.html("<h1>Hello, " + name + "!</h1>");
+                View.render(ctx, "user.jte", name, "page", new UserPage(name, 3));
             });
-
-            config.routes.get("/whoami", ctx ->
-                ctx.html("<p>你的浏览器是 " + ctx.header("User-Agent") + "</p>"));
 
         }).start(port);
     }

@@ -17,6 +17,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <javalin.version>7.2.3</javalin.version>
     <logback.version>1.5.20</logback.version>
+    <jte.version>3.2.4</jte.version>
   </properties>
 
   <!-- 3. 依赖 -->
@@ -33,17 +34,42 @@
       <artifactId>logback-classic</artifactId>
       <version>${logback.version}</version>
     </dependency>
+
+    <!-- Javalin 与 JTE 的胶水层：提供 JavalinJte -->
+    <dependency>
+      <groupId>io.javalin</groupId>
+      <artifactId>javalin-rendering-jte</artifactId>
+      <version>${javalin.version}</version>
+    </dependency>
+
+    <!-- JTE 本体（含运行时编译器，开发期热加载需要它） -->
+    <dependency>
+      <groupId>gg.jte</groupId>
+      <artifactId>jte</artifactId>
+      <version>${jte.version}</version>
+    </dependency>
   </dependencies>
 
   <!-- 4. 插件：告诉 Maven 用什么工具干活 -->
   <build>
     <plugins>
-      <!-- 用 mvn exec:java 直接运行 main 方法，省得手拼 classpath -->
+      <!-- mvn exec:exec 另起一个 JVM 跑 main 方法，省得手拼 classpath。
+           为什么不是 exec:java？见第 3 章：exec:java 在 Maven 自己的 JVM 里用
+           独立类加载器跑应用，JTE 运行时编译出来的模板类看不见 gg.jte.*，
+           会抛 NoClassDefFoundError: gg/jte/Content。exec:exec 起的是真 JVM，
+           和部署时 java -jar 的行为一致。 -->
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
         <version>3.5.0</version>
         <configuration>
+          <executable>java</executable>
+          <arguments>
+            <argument>-classpath</argument>
+            <classpath/>
+            <argument>com.example.javalinky.App</argument>
+          </arguments>
+          <!-- exec:java 用得到（第 1、2 章还没引入 JTE，两个都能跑） -->
           <mainClass>com.example.javalinky.App</mainClass>
         </configuration>
       </plugin>

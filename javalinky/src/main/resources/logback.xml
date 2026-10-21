@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 没有这个文件时，Logback 默认按 DEBUG 打印，Jetty 会把终端刷满。
+     第 16、17 章会把它扩展成带文件、邮件 appender 的生产配置。 -->
+<configuration>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{20} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- 框架只看 INFO 及以上 -->
+  <logger name="org.eclipse.jetty" level="INFO"/>
+  <logger name="io.javalin" level="INFO"/>
+
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+</configuration>
