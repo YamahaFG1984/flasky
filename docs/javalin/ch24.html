@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 24 章 · 依赖治理 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="24">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 24 章</span>
+<h1>依赖治理</h1>
+<p class="lede">
+  这个项目的 <code>pom.xml</code> 里有二十来条依赖，
+  而 <code>mvn dependency:tree</code> 展开之后是<strong>一百多个 jar</strong>。
+  这一章讲怎么管住它们：版本冲突怎么查、哪些工具可信哪些会误报、
+  以及怎么把「已经治好的问题」钉住不让它退回去。
+  <strong>本章所有的输出都是在这个项目上真跑出来的</strong>，不是编的例子。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>搞清 Maven 的「最近者优先」仲裁规则，以及它什么时候会选错</li>
+    <li>会用 <code>dependency:tree</code> / <code>analyze</code>，<strong>并知道后者一半的警告是误报</strong></li>
+    <li>用 <code>maven-enforcer-plugin</code> 把规则变成构建门槛</li>
+    <li>分清 <code>dependencyConvergence</code> 和 <code>requireUpperBoundDeps</code>，知道该用哪个</li>
+    <li>知道怎么查依赖里的已知漏洞，以及怎么决定升不升级</li>
+  </ul>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128230; 本章代码</div>
+  <p>
+    这一章结束时的完整项目在仓库的 <code>javalinky/</code> 目录里，对应标签 <code>jv-ch24</code>：
+  </p>
+<div class="code" data-lang="bash">
+<pre>
+git checkout jv-ch24
+cd javalinky &amp;&amp; mvn validate      # 看 enforcer 跑起来
+</pre>
+</div>
+  <p>
+    本章在 <code>pom.xml</code> 上加了 <code>maven-enforcer-plugin</code>，
+    并修掉了它报出来的 <strong>4 条真实问题</strong>。
+  </p>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="arbitration">Maven 怎么决定用哪个版本</h2>
+
+<p>
+  这是一切的起点。npm 可以让同一个库的多个版本共存（嵌套
+  <code>node_modules</code>），<strong>Java 不行</strong> ——
+  一个 classpath 上同一个类只能有一份。所以 Maven 必须挑一个。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="Maven 的最近者优先仲裁">
+  <text class="ttl" x="20" y="18">「最近者优先」：看<strong>路径长度</strong>，不看版本高低</text>
+
+  <rect class="bx-d" x="20" y="30" width="720" height="120" rx="9"/>
+  <text class="mono sm" x="40" y="54">你的项目</text>
+  <text class="mono sm" x="60" y="76">├─ A ──────────────── jackson-core <tspan class="on-g">2.20</tspan>　　深度 2</text>
+  <text class="mono sm" x="60" y="98">└─ B ── C ── D ────── jackson-core <tspan class="on-r">2.15</tspan>　　深度 4</text>
+  <rect class="bx-g" x="60" y="110" width="660" height="28" rx="5"/>
+  <text class="sm on-g" x="72" y="129">Maven 选 2.20（路径短）—— 这次碰巧是对的</text>
+
+  <rect class="bx-r" x="20" y="162" width="720" height="76" rx="9"/>
+  <text class="ttl on-r" x="40" y="184">但把两边调个个儿……</text>
+  <text class="mono sm" x="60" y="206">├─ A ──────────────── jackson-core <tspan class="on-r">2.15</tspan>　　深度 2　← 被选中</text>
+  <text class="mono sm" x="60" y="228">└─ B ── C ── D ────── jackson-core <tspan class="on-g">2.20</tspan>　　深度 4　← D 需要 2.20 的新 API</text>
+</svg>
+<figcaption>图 24-1　仲裁只看路径长度。<strong>选中的版本低于某条路径的要求时，就会出事</strong></figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 出事的形状永远是同一个：<code>NoSuchMethodError</code></div>
+  <p>
+    第 8 章我们已经撞过一次：引入 <code>java-jwt</code> 之后运行时抛
+  </p>
+<div class="code" data-lang="text">
+<pre>
+java.lang.NoSuchMethodError:
+  'void com.fasterxml.jackson.core.util.BufferRecycler.releaseToPool()'
+</pre>
+</div>
+  <p>
+    原因就是仲裁选了一个<strong>比某个使用者要求的还低</strong>的
+    <code>jackson-core</code>。<strong>编译期完全正常</strong> ——
+    因为编译时用的是另一个模块的字节码，运行时才发现方法不存在。
+  </p>
+  <p>
+    <strong>这是 Java 依赖地狱的标准症状，值得单独记住：
+    <code>NoSuchMethodError</code> / <code>NoSuchFieldError</code> 几乎总是版本冲突；
+    <code>ClassNotFoundException</code> 才是「压根没这个依赖」。</strong>
+  </p>
+</div>
+
+<h2 id="tree">第一个工具：<code>dependency:tree</code></h2>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn dependency:tree                                       # 整棵树（一百多行）
+mvn dependency:tree -Dincludes=com.fasterxml.jackson      # 只看某个 groupId
+mvn dependency:tree -Dincludes=:::*:jar                   # 过滤语法：group:artifact:type:version
+mvn dependency:tree -Dverbose                             # <b>连被淘汰的版本一起显示</b>
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>-Dverbose</code> 才是排查冲突真正要用的那个</div>
+  <p>
+    默认输出<strong>只显示赢家</strong>，所以你看到的是一棵「干净」的树 ——
+    冲突已经被悄悄解决掉了。加上 <code>-Dverbose</code> 会把
+    <code>(omitted for conflict with 2.20.0)</code> 这类注记也打出来，
+    那才是你要找的东西。
+  </p>
+</div>
+
+<h2 id="analyze">第二个工具：<code>dependency:analyze</code>（一半是误报）</h2>
+
+<p>
+  这个命令回答两个问题：<strong>你用了但没声明的</strong>、
+  <strong>你声明了但没用的</strong>。在本项目上真跑一次：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn dependency:analyze
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+[WARNING] Used undeclared dependencies found:
+[WARNING]    org.junit.jupiter:junit-jupiter-api:jar:5.14.0:test
+[WARNING]    org.jetbrains.kotlin:kotlin-stdlib:jar:2.2.20:compile
+[WARNING]    org.eclipse.jetty:jetty-server:jar:12.1.12:compile
+[WARNING]    org.slf4j:slf4j-api:jar:2.0.18:compile
+[WARNING]    jakarta.persistence:jakarta.persistence-api:jar:3.2.0:compile
+[WARNING]    gg.jte:jte-runtime:jar:3.2.4:compile
+[WARNING]    jakarta.servlet:jakarta.servlet-api:jar:6.0.0:compile
+[WARNING]    jakarta.mail:jakarta.mail-api:jar:2.1.3:compile
+[WARNING]    org.eclipse.jetty.ee10:jetty-ee10-servlet:jar:12.1.12:compile
+[WARNING]    jakarta.validation:jakarta.validation-api:jar:3.1.1:compile
+[WARNING] Unused declared dependencies found:
+[WARNING]    ch.qos.logback:logback-classic:jar:1.5.20:compile
+[WARNING]    org.hibernate.validator:hibernate-validator:jar:9.0.1.Final:compile
+[WARNING]    org.glassfish.expressly:expressly:jar:6.0.0:compile
+[WARNING]    org.hibernate.orm:hibernate-hikaricp:jar:7.4.2.Final:compile
+[WARNING]    org.flywaydb:flyway-database-postgresql:jar:11.14.0:compile
+[WARNING]    com.h2database:h2:jar:2.3.232:compile
+[WARNING]    org.eclipse.angus:angus-mail:jar:2.0.3:compile
+[WARNING]    org.postgresql:postgresql:jar:42.7.8:compile
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 下面那一组<strong>几乎全是误报</strong>，照着删会把应用删崩</div>
+  <p>
+    「Unused declared」里的每一个都是<strong>必需的</strong>，
+    原因是同一个：
+    <strong>它们是通过 <code>ServiceLoader</code> 或反射在运行时加载的，
+    我们的代码里一行都不会 <code>import</code> 它们</strong>，
+    而分析器只会扫字节码里的引用。
+  </p>
+  <div class="tw">
+  <table>
+  <tr><th>被判「没用」的</th><th>实际怎么被用到</th><th>删了会怎样</th></tr>
+  <tr><td><code>logback-classic</code></td><td>SLF4J 在启动时通过 ServiceLoader 找实现</td>
+      <td>日志全部消失，只剩一句「没有日志实现」的警告</td></tr>
+  <tr><td><code>h2</code> / <code>postgresql</code></td><td>JDBC 驱动，按 URL 前缀自动注册</td>
+      <td>启动时「No suitable driver」</td></tr>
+  <tr><td><code>hibernate-validator</code><br><code>expressly</code></td>
+      <td>Bean Validation 的<strong>实现</strong>，我们只 import 了 <code>jakarta.validation</code> 的接口</td>
+      <td>校验直接抛「找不到实现」</td></tr>
+  <tr><td><code>angus-mail</code></td><td>Jakarta Mail 的实现，同上</td><td>发不出邮件</td></tr>
+  <tr><td><code>hibernate-hikaricp</code></td><td>连接池集成，persistence.xml 里按类名配的</td><td>启动失败</td></tr>
+  <tr><td><code>flyway-database-postgresql</code></td><td>Flyway 的 PG 方言插件</td><td>连 PG 时迁移失败</td></tr>
+  </table>
+  </div>
+  <p>
+    <strong>这就是「接口和实现分开」这种设计的代价</strong>：
+    静态分析看不见运行时的连线。遇到这类误报，正确做法是
+    <strong>标注出来而不是删掉</strong>：
+  </p>
+<div class="code" data-lang="xml">
+<pre>
+&lt;plugin&gt;
+  &lt;artifactId&gt;maven-dependency-plugin&lt;/artifactId&gt;
+  &lt;configuration&gt;
+    &lt;ignoredUnusedDeclaredDependencies&gt;
+      &lt;!-- 这些是运行时实现，靠 ServiceLoader 加载，分析器看不见 --&gt;
+      &lt;ignoredUnusedDeclaredDependency&gt;ch.qos.logback:logback-classic&lt;/ignoredUnusedDeclaredDependency&gt;
+      &lt;ignoredUnusedDeclaredDependency&gt;com.h2database:h2&lt;/ignoredUnusedDeclaredDependency&gt;
+      &lt;!-- ... --&gt;
+    &lt;/ignoredUnusedDeclaredDependencies&gt;
+  &lt;/configuration&gt;
+&lt;/plugin&gt;
+</pre>
+</div>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 上面那一组（Used undeclared）倒是真问题</div>
+  <p>
+    我们的代码直接 <code>import org.eclipse.jetty...</code>、
+    <code>import jakarta.persistence...</code>、<code>org.slf4j...</code>，
+    但 <code>pom.xml</code> 里<strong>一条都没声明</strong> ——
+    它们是跟着 <code>javalin</code> 和 <code>hibernate-core</code> 蹭进来的。
+  </p>
+  <p>
+    风险很具体：<strong>哪天 Javalin 换掉 Jetty（比如上 Jetty 13），
+    我们的代码会毫无预警地编译不过</strong>，
+    而我们从来没主动选择过依赖 Jetty。
+  </p>
+  <p>
+    <strong>「我 import 它，我就该声明它」</strong> ——
+    这条规矩让「我依赖什么」变成一个显式的决定。
+    不过也要权衡：全部声明意味着多出十几条，而且每条都要自己管版本。
+    实践中的折中是：<strong>稳定的 API 包（<code>jakarta.*</code>、
+    <code>slf4j-api</code>）显式声明；
+    框架内部的实现细节（Jetty）就让它跟着框架走</strong>，
+    并接受「框架换引擎时我要改代码」这个事实。
+  </p>
+</div>
+
+<h2 id="enforcer">把规则变成构建门槛</h2>
+
+<p>
+  上面两个命令要人记得去跑。<strong><code>maven-enforcer-plugin</code>
+  能让违规直接构建失败</strong> —— 这才叫治理。
+</p>
+
+<h3>两条容易混的规则</h3>
+
+<div class="tw">
+<table>
+<tr><th></th><th><code>dependencyConvergence</code></th><th><code>requireUpperBoundDeps</code></th></tr>
+<tr><td>要求</td><td>所有路径请求的版本<strong>完全一致</strong></td>
+    <td>仲裁结果<strong>不低于</strong>任何一条路径的要求</td></tr>
+<tr><td>在本项目上</td><td><strong>7 条失败</strong></td><td><strong>4 条失败</strong></td></tr>
+<tr><td>失败的性质</td><td>大多是无害的补丁号差异</td><td><strong>每一条都是真问题</strong></td></tr>
+<tr><td>适合当门槛吗</td><td>太严，会被噪音淹没</td><td><strong>适合</strong></td></tr>
+</table>
+</div>
+
+<p>
+  <code>dependencyConvergence</code> 在本项目上报的 7 条，长这样：
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+Dependency convergence error for gg.jte:jte:jar:3.2.3 paths to dependency are:
++-com.example:javalinky:jar:1.0-SNAPSHOT
+  +-io.javalin:javalin-rendering-jte:jar:7.2.3:compile
+    +-gg.jte:jte:jar:3.2.3:compile
+and
++-com.example:javalinky:jar:1.0-SNAPSHOT
+  +-gg.jte:jte:jar:3.2.4:compile
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 这一条其实完全没问题</div>
+  <p>
+    我们在 <code>pom.xml</code> 里直接写了 JTE 3.2.4，
+    而 <code>javalin-rendering-jte</code> 依赖的是 3.2.3。
+    仲裁选了 <strong>3.2.4</strong>（直接声明胜出），
+    <strong>比谁要求的都高</strong> —— 向后兼容的补丁版本，安全。
+  </p>
+  <p>
+    另外 6 条是 <code>slf4j-api</code> 2.0.17 vs 2.0.18 之类，同理。
+    如果把 <code>dependencyConvergence</code> 设成门槛，
+    你每周都要处理这种噪音，最后的结果一定是<strong>把规则关掉</strong>。
+  </p>
+</div>
+
+<h3><code>requireUpperBoundDeps</code> 报出来的 4 条，全是真的</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn enforcer:enforce -Drules=requireUpperBoundDeps
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+Require upper bound dependencies error for org.eclipse.angus:angus-activation:2.0.2 [runtime]
++-com.example:javalinky:1.0-SNAPSHOT
+  +-org.eclipse.angus:angus-mail:2.0.3
+    +-org.eclipse.angus:angus-activation:2.0.2 [runtime]      ← 仲裁选了这个
+and
++-com.example:javalinky:1.0-SNAPSHOT
+  +-org.hibernate.orm:hibernate-core:7.4.2.Final
+    +-org.glassfish.jaxb:jaxb-runtime:4.0.7 [runtime]
+      +-org.glassfish.jaxb:jaxb-core:4.0.7 [runtime]
+        +-org.eclipse.angus:angus-activation:2.0.3 [runtime]  ← 但这条路径要 2.0.3
+</pre>
+</div>
+
+<p>一共 4 条：</p>
+
+<div class="tw">
+<table>
+<tr><th>构件</th><th>仲裁选了</th><th>有人要求</th></tr>
+<tr><td><code>jakarta.activation:jakarta.activation-api</code></td><td>2.1.3</td><td>2.1.4</td></tr>
+<tr><td><code>jakarta.xml.bind:jakarta.xml.bind-api</code></td><td>4.0.4</td><td>4.0.5</td></tr>
+<tr><td><code>org.eclipse.angus:angus-activation</code></td><td>2.0.2</td><td>2.0.3</td></tr>
+<tr><td><code>org.jboss.logging:jboss-logging</code></td><td>3.6.1.Final</td><td>3.6.3.Final</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 这正是 jackson 那个 bug 的形状 —— 只是这次<strong>还没炸</strong></div>
+  <p>
+    四条全都是「拿到的版本比某个使用者要求的低」。
+    目前没出问题，只是因为那几个补丁版本之间<strong>碰巧</strong>没有
+    新增必需的 API。
+  </p>
+  <p>
+    <strong>这就是这个规则的价值：它在事故发生<em>之前</em>就把隐患标出来了。</strong>
+    第 8 章那个 <code>NoSuchMethodError</code> 是线上炸了才去查的；
+    这四条是构建时就被拦住的。
+  </p>
+</div>
+
+<h3>修法：在 <code>dependencyManagement</code> 里钉住</h3>
+
+<div class="code" data-lang="xml" data-file="pom.xml">
+<pre>
+&lt;dependencyManagement&gt;
+  &lt;dependencies&gt;
+    &lt;!-- 第 24 章：把被「最近者优先」仲裁到<b>偏低</b>版本的依赖钉回去。
+         这几条是 mvn enforcer requireUpperBoundDeps 真实报出来的，不是凭空加的。 --&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;jakarta.activation&lt;/groupId&gt;
+      &lt;artifactId&gt;jakarta.activation-api&lt;/artifactId&gt;
+      &lt;version&gt;2.1.4&lt;/version&gt;
+    &lt;/dependency&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;jakarta.xml.bind&lt;/groupId&gt;
+      &lt;artifactId&gt;jakarta.xml.bind-api&lt;/artifactId&gt;
+      &lt;version&gt;4.0.5&lt;/version&gt;
+    &lt;/dependency&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;org.eclipse.angus&lt;/groupId&gt;
+      &lt;artifactId&gt;angus-activation&lt;/artifactId&gt;
+      &lt;version&gt;2.0.3&lt;/version&gt;
+    &lt;/dependency&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;org.jboss.logging&lt;/groupId&gt;
+      &lt;artifactId&gt;jboss-logging&lt;/artifactId&gt;
+      &lt;version&gt;3.6.3.Final&lt;/version&gt;
+    &lt;/dependency&gt;
+
+    &lt;!-- 第 8 章就加的：用 BOM 统一整个 Jackson 家族 --&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;com.fasterxml.jackson&lt;/groupId&gt;
+      &lt;artifactId&gt;jackson-bom&lt;/artifactId&gt;
+      &lt;version&gt;${jackson.version}&lt;/version&gt;
+      &lt;type&gt;pom&lt;/type&gt;
+      &lt;scope&gt;import&lt;/scope&gt;
+    &lt;/dependency&gt;
+  &lt;/dependencies&gt;
+&lt;/dependencyManagement&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+$ mvn enforcer:enforce -Drules=requireUpperBoundDeps
+[INFO] Rule 0: ...RequireUpperBoundDeps passed
+[INFO] BUILD SUCCESS
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 优先用 BOM，不得已才一条条钉</div>
+  <p>
+    上面四条是手写的，因为它们来自不同的项目、没有共同的 BOM。
+    <strong>只要有 BOM 就用 BOM</strong>（第 8 章的
+    <code>jackson-bom</code>）：手写版本号意味着<strong>你从此要自己盯着它们升级</strong>，
+    而 BOM 是上游维护的。
+  </p>
+</div>
+
+<h3>最终的 enforcer 配置</h3>
+
+<div class="code" data-lang="xml" data-file="pom.xml">
+<pre>
+&lt;plugin&gt;
+  &lt;groupId&gt;org.apache.maven.plugins&lt;/groupId&gt;
+  &lt;artifactId&gt;maven-enforcer-plugin&lt;/artifactId&gt;
+  &lt;version&gt;3.5.0&lt;/version&gt;
+  &lt;executions&gt;
+    &lt;execution&gt;
+      &lt;id&gt;enforce-dependencies&lt;/id&gt;
+      &lt;phase&gt;validate&lt;/phase&gt;        &lt;!-- 最早的阶段，几秒就跑完 --&gt;
+      &lt;goals&gt;&lt;goal&gt;enforce&lt;/goal&gt;&lt;/goals&gt;
+      &lt;configuration&gt;
+        &lt;rules&gt;
+          &lt;requireMavenVersion&gt;&lt;version&gt;[3.9,)&lt;/version&gt;&lt;/requireMavenVersion&gt;
+          &lt;requireJavaVersion&gt;&lt;version&gt;[21,)&lt;/version&gt;&lt;/requireJavaVersion&gt;
+
+          &lt;!-- 仲裁结果不能低于任何一条路径要求的版本。
+               这正是第 8 章 jackson 那个 NoSuchMethodError 的形状 --&gt;
+          &lt;requireUpperBoundDeps/&gt;
+
+          &lt;!-- 同一个依赖在 pom 里写了两遍（版本还不同）—— 纯粹的人为失误 --&gt;
+          &lt;banDuplicatePomDependencyVersions/&gt;
+
+          &lt;!-- 版本范围让构建不可复现：今天和下周拉到的可能不是同一个 jar --&gt;
+          &lt;requireReleaseDeps&gt;
+            &lt;message&gt;不要用 SNAPSHOT 依赖&lt;/message&gt;
+            &lt;onlyWhenRelease&gt;true&lt;/onlyWhenRelease&gt;
+          &lt;/requireReleaseDeps&gt;
+        &lt;/rules&gt;
+      &lt;/configuration&gt;
+    &lt;/execution&gt;
+  &lt;/executions&gt;
+&lt;/plugin&gt;
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 治理的要点是<strong>「修完之后钉住」</strong></div>
+  <p>
+    手工跑一次 <code>dependency:tree</code> 把冲突解决掉，是一次性的劳动 ——
+    下次有人加一条依赖，问题就回来了，而且没人会发现。
+  </p>
+  <p>
+    把它变成构建门槛之后，「引入冲突」这件事会在<strong>提交 PR 的那一刻</strong>
+    就被挡住，成本从「线上排查两小时」降到「改一行版本号」。
+  </p>
+  <p>
+    放在 <code>validate</code> 阶段是因为它<strong>几秒钟就跑完</strong> ——
+    在编译和测试之前失败，开发者不用等。
+  </p>
+</div>
+
+<h2 id="cve">已知漏洞：查，然后判断</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+# OWASP Dependency-Check：对着 NVD 数据库扫
+mvn org.owasp:dependency-check-maven:check
+
+# 第一次要下载整个 NVD 数据库，很慢（而且现在需要 NVD API key）
+# CI 上记得缓存 ~/.m2/repository/org/owasp/dependency-check-data
+</pre>
+</div>
+
+<div class="tw">
+<table>
+<tr><th>工具</th><th>特点</th></tr>
+<tr><td><strong>OWASP Dependency-Check</strong></td>
+    <td>开源、本地跑、不传代码出去。误报较多（靠文件名猜构件）</td></tr>
+<tr><td><strong>GitHub Dependabot</strong></td>
+    <td>免费、自动提 PR 升级。<strong>公开仓库基本没理由不开</strong></td></tr>
+<tr><td><strong>Snyk / Sonatype</strong></td>
+    <td>商业，数据质量和可达性分析更好，要钱</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 「有 CVE」不等于「你被影响」</div>
+  <p>
+    最著名的例子是 Log4Shell 时期的集体恐慌：很多人在
+    <strong>根本没用 log4j</strong> 的项目里疯狂升级，
+    也有人升级了 <code>log4j-api</code>（没有漏洞的那个）而漏掉了
+    <code>log4j-core</code>。
+  </p>
+  <p>判断一个 CVE 是否影响你，问三个问题：</p>
+  <ol>
+    <li><strong>这个有漏洞的类/方法，在你的代码路径上吗？</strong>
+        （很多 CVE 只影响某个你从没调过的解析器）</li>
+    <li><strong>攻击者能控制到达那里的输入吗？</strong></li>
+    <li><strong>升级的代价是什么？</strong>有没有破坏性变更</li>
+  </ol>
+  <p>
+    <strong>但也别滑到另一个极端。</strong>默认动作应该是升级 ——
+    只有当升级代价确实很大时，才花时间做上面的分析。
+    「我分析过了，不影响」这句话需要<strong>有人为它负责</strong>，
+    而且下次依赖变动时结论可能就变了。
+  </p>
+</div>
+
+<h2 id="upgrade">升级这件事</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn versions:display-dependency-updates     # 哪些依赖有新版
+mvn versions:display-plugin-updates         # <b>插件也要升</b>，很多人忘了这条
+mvn versions:display-property-updates       # 用 property 管的版本号
+
+mvn versions:set -DnewVersion=1.1.0         # 改自己项目的版本
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 小步快跑，比攒着一次升强得多</div>
+  <p>
+    「等不忙了一次性升级」听着合理，实际是最糟的策略：
+  </p>
+  <ul>
+    <li>攒了两年再升，<strong>一次要跨越十几个破坏性变更</strong>，
+        而且出了问题不知道是哪一个造成的</li>
+    <li>中间的 CVE 全都在你身上挂着</li>
+    <li>最后往往升不动了，变成「这个项目不能动」</li>
+  </ul>
+  <p>
+    <strong>可行的节奏</strong>：开 Dependabot，补丁版本自动合（测试绿就行），
+    次版本每月看一眼，主版本当成一个正经任务排期。
+    <strong>前提是你的测试套件足够可信</strong> ——
+    这就是第 15 章那 120 个测试在这里的价值：
+    它们让「升级」从一件需要勇气的事，变成一件看 CI 红绿的事。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 关于「没有锁文件」这件事</div>
+  <p>
+    npm 有 <code>package-lock.json</code> 保证每次装的一模一样，
+    <strong>Maven 没有对应物</strong>。替代方案是三件事一起用：
+  </p>
+  <ul>
+    <li><strong>永远写死版本号</strong>，不要用 <code>[1.0,2.0)</code> 这种范围</li>
+    <li><strong>用 BOM</strong> 统一一组相关依赖</li>
+    <li><strong>enforcer</strong> 把仲裁结果钉住</li>
+  </ul>
+  <p>
+    要更强的可复现性，可以看 <code>maven-dependency-plugin</code> 的
+    <code>dependency:list -DoutputFile=</code>，
+    把完整的解析结果提交进版本库，再加一个测试比对 ——
+    这是穷人版的锁文件，但确实管用。
+  </p>
+</div>
+
+<h2 id="checklist">一张检查清单</h2>
+
+<div class="tw">
+<table>
+<tr><th>什么时候</th><th>做什么</th></tr>
+<tr><td>加一条新依赖前</td>
+    <td>看它的传递依赖（<code>dependency:tree</code>）；
+        看它最近一次发布是什么时候；想想能不能不加</td></tr>
+<tr><td>加完之后</td>
+    <td><code>mvn validate</code> 看 enforcer 有没有红；
+        <code>dependency:tree -Dverbose</code> 看有没有把别人挤下去</td></tr>
+<tr><td>遇到 <code>NoSuchMethodError</code></td>
+    <td><strong>先想版本冲突</strong>，<code>dependency:tree -Dincludes=&lt;那个 groupId&gt;</code></td></tr>
+<tr><td>每月</td>
+    <td><code>versions:display-dependency-updates</code>，
+        升补丁和次版本</td></tr>
+<tr><td>CI 里常驻</td>
+    <td>enforcer（已配）+ Dependabot + 漏洞扫描</td></tr>
+<tr><td>打 fat jar 时</td>
+    <td>记得 shade 的 <code>&lt;filters&gt;</code>（第 7 章）和
+        <code>ServicesResourceTransformer</code> —— 依赖合并会出各种怪事</td></tr>
+</table>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书没有对应章节。本章没加测试，但给构建加了一道门槛：<code>mvn validate</code> 现在会检查依赖收敛。</div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>
+      <strong>看看被淘汰的版本。</strong>跑
+      <code>mvn dependency:tree -Dverbose -Dincludes=org.slf4j</code>，
+      找出 <code>(omitted for conflict with ...)</code> 那几行。
+    </li>
+    <li>
+      <strong>亲手制造一次冲突。</strong>在 <code>pom.xml</code> 里显式加一条
+      <code>org.slf4j:slf4j-api:1.7.36</code>（一个老得多的版本），
+      然后 <code>mvn validate</code>。看 enforcer 怎么拦你。
+    </li>
+    <li>
+      把 <code>requireUpperBoundDeps</code> 换成 <code>dependencyConvergence</code>，
+      跑一次，数一数报了几条，判断一下其中几条是真问题。
+      体会为什么本章选了前者。
+    </li>
+    <li>
+      <strong>验证「误报」真的是误报。</strong>按 <code>dependency:analyze</code>
+      的建议把 <code>com.h2database:h2</code> 删掉，<code>mvn test</code>。
+      看报错长什么样，想清楚为什么分析器看不见它。
+    </li>
+    <li>
+      反过来，按它的建议<strong>显式声明</strong> <code>org.slf4j:slf4j-api</code>
+      和 <code>jakarta.persistence:jakarta.persistence-api</code>。
+      再跑 <code>dependency:analyze</code>，看警告少了几条。
+    </li>
+    <li>
+      给仓库开 <strong>Dependabot</strong>：加一个
+      <code>.github/dependabot.yml</code>，<code>package-ecosystem: maven</code>，
+      每周检查。看它第一周提了几个 PR。
+    </li>
+    <li>
+      跑一次 <code>mvn org.owasp:dependency-check-maven:check</code>
+      （要耐心，第一次很慢）。对报出来的每一条问那三个问题。
+    </li>
+    <li>
+      （进阶）做一个<strong>穷人版锁文件</strong>：
+      用 <code>dependency:list -DoutputFile=deps.txt -DoutputScope=false</code>
+      把解析结果存进版本库，再写一个测试比对当前结果和文件是否一致。
+      然后故意升一个依赖，看测试怎么告诉你 classpath 变了。
+    </li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

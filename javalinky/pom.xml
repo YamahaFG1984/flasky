@@ -35,6 +35,29 @@
        导入 jackson-bom 能把整组 jackson 对齐到同一个版本。 -->
   <dependencyManagement>
     <dependencies>
+      <!-- 第 24 章：把被「最近者优先」仲裁到<b>偏低</b>版本的依赖钉回去。
+           这几条是 mvn enforcer requireUpperBoundDeps 真实报出来的，不是凭空加的。 -->
+      <dependency>
+        <groupId>jakarta.activation</groupId>
+        <artifactId>jakarta.activation-api</artifactId>
+        <version>2.1.4</version>
+      </dependency>
+      <dependency>
+        <groupId>jakarta.xml.bind</groupId>
+        <artifactId>jakarta.xml.bind-api</artifactId>
+        <version>4.0.5</version>
+      </dependency>
+      <dependency>
+        <groupId>org.eclipse.angus</groupId>
+        <artifactId>angus-activation</artifactId>
+        <version>2.0.3</version>
+      </dependency>
+      <dependency>
+        <groupId>org.jboss.logging</groupId>
+        <artifactId>jboss-logging</artifactId>
+        <version>3.6.3.Final</version>
+      </dependency>
+
       <dependency>
         <groupId>com.fasterxml.jackson</groupId>
         <artifactId>jackson-bom</artifactId>
@@ -251,6 +274,39 @@
       </plugin>
 
       <!-- 测试一律跑在 TEST 档位：内存库、不发邮件、随机端口 -->
+      <!-- 第 24 章：依赖治理的看门人。把「已经治好的问题」钉住，不让它退回去 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>enforce-dependencies</id>
+            <phase>validate</phase>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <requireMavenVersion><version>[3.9,)</version></requireMavenVersion>
+                <requireJavaVersion><version>[21,)</version></requireJavaVersion>
+
+                <!-- 仲裁结果不能低于任何一条路径要求的版本。
+                     这正是第 8 章 jackson 那个 NoSuchMethodError 的形状 -->
+                <requireUpperBoundDeps/>
+
+                <!-- 同一个依赖在 pom 里写了两遍（版本还不同）—— 纯粹的人为失误 -->
+                <banDuplicatePomDependencyVersions/>
+
+                <!-- 版本范围让构建不可复现：今天和下周拉到的可能不是同一个 jar -->
+                <requireReleaseDeps>
+                  <message>不要用 SNAPSHOT 依赖</message>
+                  <onlyWhenRelease>true</onlyWhenRelease>
+                </requireReleaseDeps>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
