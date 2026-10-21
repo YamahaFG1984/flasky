@@ -1,0 +1,41 @@
+[Unit]
+Description=Javalinky
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=javalinky
+Group=javalinky
+WorkingDirectory=/opt/javalinky
+EnvironmentFile=/etc/javalinky.env
+
+ExecStart=/usr/bin/java -XX:MaxRAMPercentage=70 -jar /opt/javalinky/javalinky.jar
+
+# 挂了就自动重启，但限制频率避免疯狂重启刷日志
+Restart=always
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+# 优雅关闭：发 SIGTERM 之后给 30 秒做完手里的请求
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# 日志进 journald（应用打到 stdout 就行）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=javalinky
+
+# 一组很便宜的安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/javalinky
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

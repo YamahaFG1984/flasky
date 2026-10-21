@@ -1,6 +1,7 @@
 package com.example.javalinky.web.routes;
 
 import com.example.javalinky.config.AppConfig;
+import com.example.javalinky.db.Db;
 import com.example.javalinky.db.Page;
 import com.example.javalinky.model.Comment;
 import com.example.javalinky.model.Post;
@@ -40,6 +41,9 @@ public class MainRoutes implements RouteModule {
     @Override
     public void register(JavalinConfig config) {
         config.routes.apiBuilder(() -> {
+
+            // 健康检查：容器编排和 deploy.sh 都要用它判断“真的能服务了”
+            get("/healthz", this::health);
 
             // 公开页面
             get("/", this::index);
@@ -81,6 +85,12 @@ public class MainRoutes implements RouteModule {
                 post("/edit-profile/{id}", this::adminEditProfile);
             });
         });
+    }
+
+    /** 连一次数据库，确认不是“端口开着但后面全是坏的” */
+    private void health(Context ctx) {
+        Db.em(ctx).createNativeQuery("select 1").getSingleResult();
+        ctx.contentType("text/plain").result("ok");
     }
 
     // ---------- 首页 ----------

@@ -14,6 +14,7 @@ import io.javalin.json.JavalinJackson;
 import io.javalin.Javalin;
 import io.javalin.http.staticfiles.Location;
 import io.javalin.rendering.template.JavalinJte;
+import org.eclipse.jetty.server.ForwardedRequestCustomizer;
 
 /** 应用工厂：给一份配置，返回一个配好但还没启动的 Javalin 实例。 */
 public final class JavalinkyApp {
@@ -60,8 +61,18 @@ public final class JavalinkyApp {
 
             javalin.concurrency.useVirtualThreads = true;
 
+            // 只在明确知道自己跑在代理后面时才开：否则客户端可以伪造 X-Forwarded-For
+            if (cfg.behindProxy()) {
+                javalin.jetty.modifyHttpConfiguration(httpConfig ->
+                    httpConfig.addCustomizer(new ForwardedRequestCustomizer()));
+            }
+
             // 过滤器（顺序有讲究，见下面的说明）
-            Timing.install(javalin, cfg);   // 最先装：它要量整个请求的耗时
+            // 顺序：Timing 先装，RequestId 后装。
+            // Javalin 按注册顺序跑 after 过滤器，RequestId 的 after 会清掉 MDC，
+            // 所以它必须排在 Timing 的 after 之后，否则慢请求日志里的 requestId 是空的。
+            Timing.install(javalin, cfg);   // 量整个请求的耗时
+            RequestId.install(javalin);     // 把请求 id 放进 MDC 和响应头
             UnitOfWork.install(javalin);
             Csrf.install(javalin);
             CurrentUser.install(javalin);   // 必须在 UnitOfWork 之后：它要用 EntityManager
@@ -70,6 +81,7 @@ public final class JavalinkyApp {
             // 按配置开关开发辅助
             if (cfg.devLogging())    javalin.bundledPlugins.enableDevLogging();
             if (cfg.routeOverview()) javalin.bundledPlugins.enableRouteOverview("/routes");
+            // 把 http:// 的请求 301 到 https://
             if (cfg.httpsOnly())     javalin.bundledPlugins.enableSslRedirects();
 
             // 错误页

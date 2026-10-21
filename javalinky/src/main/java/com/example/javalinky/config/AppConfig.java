@@ -15,6 +15,7 @@ public record AppConfig(
     // 安全
     String secretKey,          // 签发令牌用（第 8 章）
     boolean httpsOnly,         // 会话 Cookie 是否只在 HTTPS 下发送
+    boolean behindProxy,       // 是否跑在 nginx/负载均衡后面（信任 X-Forwarded-*）
 
     // 邮件
     MailConfig mail,
@@ -54,7 +55,7 @@ public record AppConfig(
             env.get("DATABASE_USER", "sa"),
             env.get("DATABASE_PASSWORD", ""),
             env.get("SECRET_KEY", "dev-only-insecure-key-change-in-prod"),
-            false,
+            false, false,
             MailConfig.fromEnv(),
             env.get("ADMIN_EMAIL", "admin@example.com"),
             20, 50, 30,
@@ -76,7 +77,7 @@ public record AppConfig(
                 + ";MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
             "sa", "",
             "test-secret-key",
-            false,
+            false, false,
             MailConfig.disabled(),   // 测试时不真的发邮件
             "admin@example.com",
             20, 50, 30,
@@ -96,6 +97,7 @@ public record AppConfig(
             env.require("DATABASE_PASSWORD"),
             env.require("SECRET_KEY"),         // ← 绝不能用默认值
             env.getBoolean("HTTPS_ONLY", true),
+            env.getBoolean("BEHIND_PROXY", false),
             MailConfig.fromEnv(),
             env.require("ADMIN_EMAIL"),
             env.getInt("POSTS_PER_PAGE", 20),

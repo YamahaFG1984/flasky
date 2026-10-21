@@ -1,0 +1,60 @@
+<configuration>
+
+  <!-- 用环境变量控制，不用改文件就能调整 -->
+  <property name="LOG_DIR"   value="${LOG_DIR:-logs}"/>
+  <property name="LOG_LEVEL" value="${LOG_LEVEL:-INFO}"/>
+
+  <!-- ① 控制台（容器 / PaaS） -->
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{requestId}] %logger{25} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- ② 滚动文件（传统服务器） -->
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${LOG_DIR}/javalinky.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <fileNamePattern>${LOG_DIR}/javalinky.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+      <maxFileSize>100MB</maxFileSize>
+      <maxHistory>30</maxHistory>
+      <totalSizeCap>3GB</totalSizeCap>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{requestId}] %logger{25} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- ③ 严重错误发邮件。注意用 ERROR 过滤器，否则会被日志淹没 -->
+  <appender name="EMAIL" class="ch.qos.logback.classic.net.SMTPAppender">
+    <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+      <level>ERROR</level>
+    </filter>
+    <smtpHost>${MAIL_HOST:-localhost}</smtpHost>
+    <smtpPort>${MAIL_PORT:-1025}</smtpPort>
+    <STARTTLS>${MAIL_STARTTLS:-false}</STARTTLS>
+    <username>${MAIL_USERNAME:-}</username>
+    <password>${MAIL_PASSWORD:-}</password>
+    <to>${ADMIN_EMAIL}</to>
+    <from>${MAIL_FROM:-javalinky@localhost}</from>
+    <subject>[Javalinky] 应用错误：%logger{20} - %msg</subject>
+    <!-- 一封邮件里带上出错前的若干条日志，便于还原现场 -->
+    <cyclicBufferTracker class="ch.qos.logback.core.spi.CyclicBufferTracker">
+      <bufferSize>20</bufferSize>
+    </cyclicBufferTracker>
+  </appender>
+  <!-- 邮件发送比较慢，包一层异步，别拖慢请求 -->
+  <appender name="ASYNC_EMAIL" class="ch.qos.logback.classic.AsyncAppender">
+    <appender-ref ref="EMAIL"/>
+    <discardingThreshold>0</discardingThreshold>
+    <queueSize>256</queueSize>
+  </appender>
+
+  <logger name="org.hibernate.SQL_SLOW" level="INFO"/>
+
+  <root level="${LOG_LEVEL}">
+    <appender-ref ref="CONSOLE"/>
+    <appender-ref ref="FILE"/>
+    <appender-ref ref="ASYNC_EMAIL"/>
+  </root>
+</configuration>

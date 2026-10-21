@@ -13,8 +13,10 @@ public final class ErrorPages {
             View.render(ctx, "error/404.jte", "页面不存在"));
         config.routes.error(403, "html", ctx ->
             View.render(ctx, "error/403.jte", "没有权限"));
+        // 500 页把请求 id 显示出来，用户报错时能直接提供，方便在日志里定位
         config.routes.error(500, "html", ctx ->
-            View.render(ctx, "error/500.jte", "服务器错误"));
+            View.render(ctx, "error/500.jte", "服务器错误",
+                        "requestId", String.valueOf(ctx.header(RequestId.HEADER))));
     }
 
     private ErrorPages() {}

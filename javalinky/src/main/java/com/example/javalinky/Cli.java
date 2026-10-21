@@ -26,7 +26,16 @@ public class Cli {
                 int posts = args.length > 2 ? Integer.parseInt(args[2]) : 200;
                 run(cfg, () -> SeedService.fake(users, posts));
             }
-            // deploy 在第 17 章加入
+            // 第 17 章：部署时执行的一组任务
+            case "deploy" -> {
+                // ① Db.init 里会先跑 Flyway 迁移
+                // ② 创建/更新角色定义（第 9 章）
+                // ③ 确保每个用户都关注了自己（第 12 章）
+                run(cfg, () -> {
+                    SeedService.insertRoles();
+                    SeedService.addSelfFollows();
+                });
+            }
             default -> {
                 System.err.println("未知命令：" + args[0]);
                 usage();
@@ -60,6 +69,7 @@ public class Cli {
               migrate            跑数据库迁移
               seed-roles         创建/更新角色（可重复执行）
               fake [用户数] [文章数]  生成假数据（开发用）
+              deploy             部署时执行的全部任务（迁移 + 角色 + 自关注）
             """);
     }
 }

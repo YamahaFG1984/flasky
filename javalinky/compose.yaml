@@ -1,0 +1,44 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      APP_PROFILE: prod
+      SITE_BASE_URL: http://localhost:8080
+      DATABASE_URL: jdbc:postgresql://db:5432/javalinky
+      DATABASE_USER: javalinky
+      DATABASE_PASSWORD: ${DB_PASSWORD:?必须在 .env 里设置 DB_PASSWORD}
+      SECRET_KEY: ${SECRET_KEY:?必须设置 SECRET_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+    depends_on:
+      db:
+        condition: service_healthy     # 等数据库真的能连上，而不只是容器起来了
+    restart: unless-stopped
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: javalinky
+      POSTGRES_USER: javalinky
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?}
+    volumes:
+      - pgdata:/var/lib/postgresql/data    # 数据要放在命名卷里，否则重建容器就没了
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U javalinky -d javalinky"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # 开发/演示用的假邮件服务器，生产环境去掉
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "8025:8025"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

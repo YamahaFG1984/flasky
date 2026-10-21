@@ -22,7 +22,7 @@ public final class TestFixtures {
             "jdbc:h2:mem:test-" + UUID.randomUUID() + ";MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
             "sa", "",
             "test-secret-key-at-least-32-chars-long",
-            false,
+            false, false,
             MailConfig.disabled(),              // 测试不发真邮件
             "admin@example.com",
             20, 50, 30,
