@@ -10,6 +10,7 @@ import com.example.javalinky.web.*;
 import com.example.javalinky.web.form.AdminEditProfileForm;
 import com.example.javalinky.web.form.EditProfileForm;
 import com.example.javalinky.web.form.PostForm;
+import com.example.javalinky.web.page.FollowListPage;
 import com.example.javalinky.web.page.PostListPage;
 import com.example.javalinky.web.page.UserProfilePage;
 import io.javalin.config.JavalinConfig;
@@ -40,11 +41,21 @@ public class MainRoutes implements RouteModule {
             // 公开页面
             get("/", this::index);
             get("/user/{username}", this::userProfile);
+            get("/user/{username}/followers", this::followers);
+            get("/user/{username}/following", this::following);
             get("/post/{id}", this::showPost);
+
+            // 首页的两个标签页（用 POST + CSRF，因为它改变了服务端认知的状态）
+            post("/show-all",      this::showAll,      Access.AUTHENTICATED);
+            post("/show-followed", this::showFollowed, Access.AUTHENTICATED);
 
             // 必须登录
             get("/edit-profile",  this::editProfileForm, Access.AUTHENTICATED);
             post("/edit-profile", this::editProfile,     Access.AUTHENTICATED);
+
+            // 需要 FOLLOW 权限
+            post("/follow/{username}",   this::follow,   Permission.FOLLOW);
+            post("/unfollow/{username}", this::unfollow, Permission.FOLLOW);
 
             // 需要 WRITE 权限
             post("/post",      this::createPost,   Permission.WRITE);
@@ -61,13 +72,39 @@ public class MainRoutes implements RouteModule {
 
     // ---------- 首页 ----------
 
+    private static final String COOKIE_SHOW_FOLLOWED = "show_followed";
+
     private void index(Context ctx) {
         int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class).getOrNull());
-        var posts = services.postRepo(ctx).findAll(page, cfg.postsPerPage());
+        User me = CurrentUser.get(ctx);
+
+        // 只有登录用户才可能选“只看关注”
+        boolean showFollowed = me != null
+            && "1".equals(ctx.cookie(COOKIE_SHOW_FOLLOWED));
+
+        var repo = services.postRepo(ctx);
+        Page<Post> posts = showFollowed
+            ? repo.findTimeline(me, page, cfg.postsPerPage())
+            : repo.findAll(page, cfg.postsPerPage());
 
         View.render(ctx, "index.jte", "首页",
                     "form", FormView.empty(),
-                    "posts", PostListPage.of(posts, CurrentUser.get(ctx)));
+                    "posts", PostListPage.of(posts, me),
+                    "showFollowed", showFollowed);
+    }
+
+    /** 切换到“全部” */
+    private void showAll(Context ctx) {
+        CurrentUser.require(ctx);
+        ctx.cookie(COOKIE_SHOW_FOLLOWED, "", 0);     // maxAge=0 就是删除
+        ctx.redirect(Routes.INDEX);
+    }
+
+    /** 切换到“只看关注” */
+    private void showFollowed(Context ctx) {
+        CurrentUser.require(ctx);
+        ctx.cookie(COOKIE_SHOW_FOLLOWED, "1", 30 * 24 * 60 * 60);   // 30 天
+        ctx.redirect(Routes.INDEX);
     }
 
     // ---------- 文章 ----------
@@ -149,12 +186,10 @@ public class MainRoutes implements RouteModule {
     // ---------- 用户主页 ----------
 
     private void userProfile(Context ctx) {
-        var users = services.users(ctx);
-        User user = users.findByUsername(ctx.pathParam("username"))
-            .orElseThrow(() -> new NotFoundResponse("没有这个用户"));
-
+        User user = loadUserByUsername(ctx);
         User viewer = CurrentUser.get(ctx);
         var postRepo = services.postRepo(ctx);
+        var follows = services.follows(ctx);
 
         int pageNo = Page.clampPage(ctx.queryParamAsClass("page", Integer.class).getOrNull());
         var posts = postRepo.findByAuthor(user, pageNo, cfg.postsPerPage());
@@ -164,14 +199,82 @@ public class MainRoutes implements RouteModule {
             viewer != null && viewer.isAdministrator(),
             viewer != null && viewer.getId().equals(user.getId()),
             postRepo.countByAuthor(user), 0,   // 评论数第 13 章填上
-            0, 0,                       // 关注数，第 12 章填上
+            follows.countFollowersVisible(user),
+            follows.countFollowingVisible(user),
             viewer != null && viewer.can(Permission.FOLLOW)
                 && !viewer.getId().equals(user.getId()),
-            false, false);              // 关注状态，第 12 章填上
+            follows.isFollowing(viewer, user),
+            follows.isFollowing(user, viewer));
 
         View.render(ctx, "user.jte", user.getUsername(),
                     "page", page,
                     "posts", PostListPage.of(posts, viewer));
+    }
+
+    // ---------- 关注 ----------
+
+    private void follow(Context ctx) {
+        User me = CurrentUser.require(ctx);
+        User target = loadUserByUsername(ctx);
+
+        if (me.getId().equals(target.getId())) {
+            Flash.warning(ctx, "你不能关注自己。");
+            ctx.redirect(Routes.user(target.getUsername()));
+            return;
+        }
+
+        var follows = services.follows(ctx);
+        if (follows.isFollowing(me, target)) {
+            Flash.info(ctx, "你已经关注了 " + target.getUsername() + "。");
+        } else {
+            follows.follow(me, target);
+            Flash.success(ctx, "已关注 " + target.getUsername() + "。");
+        }
+        ctx.redirect(Routes.user(target.getUsername()));
+    }
+
+    private void unfollow(Context ctx) {
+        User me = CurrentUser.require(ctx);
+        User target = loadUserByUsername(ctx);
+
+        services.follows(ctx).unfollow(me, target);
+        Flash.info(ctx, "已取消关注 " + target.getUsername() + "。");
+        ctx.redirect(Routes.user(target.getUsername()));
+    }
+
+    private void followers(Context ctx) {
+        User user = loadUserByUsername(ctx);
+        int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class).getOrNull());
+
+        var source = services.follows(ctx)
+            .followersOf(user, page, cfg.followersPerPage());
+
+        View.render(ctx, "follow_list.jte", user.getUsername() + " 的粉丝",
+            "page", FollowListPage.of(
+                user.getUsername() + " 的粉丝",
+                user.getUsername(),
+                Routes.followers(user.getUsername()),
+                source, true));
+    }
+
+    private void following(Context ctx) {
+        User user = loadUserByUsername(ctx);
+        int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class).getOrNull());
+
+        var source = services.follows(ctx)
+            .followingOf(user, page, cfg.followersPerPage());
+
+        View.render(ctx, "follow_list.jte", user.getUsername() + " 关注的人",
+            "page", FollowListPage.of(
+                user.getUsername() + " 关注的人",
+                user.getUsername(),
+                Routes.following(user.getUsername()),
+                source, false));
+    }
+
+    private User loadUserByUsername(Context ctx) {
+        return services.users(ctx).findByUsername(ctx.pathParam("username"))
+            .orElseThrow(() -> new NotFoundResponse("没有这个用户"));
     }
 
     // ---------- 编辑自己的资料 ----------

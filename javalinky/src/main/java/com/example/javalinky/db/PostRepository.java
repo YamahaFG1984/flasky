@@ -60,4 +60,40 @@ public class PostRepository {
             .getResultList();
         return Page.of(items, page, size, total);
     }
+
+    /**
+     * 查出某用户关注的人发的全部文章（他的“时间线”）。
+     *
+     * 对应的 SQL 大致是：
+     *   select p.* from posts p
+     *     join follows f on f.followed_id = p.author_id
+     *    where f.follower_id = ?
+     *    order by p.timestamp desc
+     *    limit ? offset ?
+     */
+    public Page<Post> findTimeline(User user, int page, int size) {
+        long total = em.createQuery("""
+                select count(p)
+                  from Post p
+                  join Follow f on f.followed = p.author
+                 where f.follower = :me
+                """, Long.class)
+            .setParameter("me", user)
+            .getSingleResult();
+
+        var items = em.createQuery("""
+                select p
+                  from Post p
+                  join fetch p.author
+                  join Follow f on f.followed = p.author
+                 where f.follower = :me
+                 order by p.timestamp desc
+                """, Post.class)
+            .setParameter("me", user)
+            .setFirstResult((page - 1) * size)
+            .setMaxResults(size)
+            .getResultList();
+
+        return Page.of(items, page, size, total);
+    }
 }

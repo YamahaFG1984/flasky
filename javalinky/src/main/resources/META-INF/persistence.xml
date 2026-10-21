@@ -11,6 +11,7 @@
     <class>com.example.javalinky.model.Role</class>
     <class>com.example.javalinky.model.User</class>
     <class>com.example.javalinky.model.Post</class>
+    <class>com.example.javalinky.model.Follow</class>
 
     <!-- 不扫描未列出的类，避免意外 -->
     <exclude-unlisted-classes>true</exclude-unlisted-classes>

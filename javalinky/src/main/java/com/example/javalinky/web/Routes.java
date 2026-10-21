@@ -40,6 +40,18 @@ public final class Routes {
         return "/follow/" + enc(username);
     }
 
+    public static String unfollow(String username) {
+        return "/unfollow/" + enc(username);
+    }
+
+    public static String followers(String username) {
+        return "/user/" + enc(username) + "/followers";
+    }
+
+    public static String following(String username) {
+        return "/user/" + enc(username) + "/following";
+    }
+
     /** 绝对 URL：邮件里的链接必须用这个（第 6 章） */
     public static String absolute(String base, String path) {
         return base + path;

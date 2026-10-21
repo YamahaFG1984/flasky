@@ -4,6 +4,8 @@ import com.example.javalinky.util.Gravatar;
 import com.example.javalinky.util.Passwords;
 import jakarta.persistence.*;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "users", indexes = {
@@ -52,6 +54,16 @@ public class User {
     @JoinColumn(name = "role_id")
     private Role role;
 
+    /** 我关注了谁（我是 follower） */
+    @OneToMany(mappedBy = "follower", fetch = FetchType.LAZY,
+               cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<Follow> following = new ArrayList<>();
+
+    /** 谁关注了我（我是 followed） */
+    @OneToMany(mappedBy = "followed", fetch = FetchType.LAZY,
+               cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<Follow> followers = new ArrayList<>();
+
     protected User() {}
 
     public User(String email, String username) {
@@ -81,6 +93,9 @@ public class User {
     public Instant getMemberSince() { return memberSince; }
     public Role getRole() { return role; }
     public void setRole(Role role) { this.role = role; }
+
+    public List<Follow> getFollowing() { return following; }
+    public List<Follow> getFollowers() { return followers; }
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }

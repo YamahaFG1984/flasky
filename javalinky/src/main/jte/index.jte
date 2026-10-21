@@ -6,6 +6,7 @@
 @param Layout layout
 @param FormView form
 @param PostListPage posts
+@param boolean showFollowed = false
 
 @template.layout.base(layout = layout, content = @`
   <div class="p-4 mb-4 bg-body-tertiary rounded-3">
@@ -26,6 +27,25 @@
       @template.tag.markdown_editor(form = form, name = "body", label = "想说点什么？")
       <button class="btn btn-primary" type="submit">发布</button>
     </form>
+  @endif
+
+  @if(layout.isAuthenticated())
+    <ul class="nav nav-tabs mb-3">
+      <li class="nav-item">
+        <form method="post" action="/show-all">
+          @template.tag.csrf(token = layout.csrfToken())
+          <button class="nav-link border-0 bg-transparent ${showFollowed ? "" : "active"}"
+                  type="submit">全部文章</button>
+        </form>
+      </li>
+      <li class="nav-item">
+        <form method="post" action="/show-followed">
+          @template.tag.csrf(token = layout.csrfToken())
+          <button class="nav-link border-0 bg-transparent ${showFollowed ? "active" : ""}"
+                  type="submit">我关注的</button>
+        </form>
+      </li>
+    </ul>
   @endif
 
   @template.tag.posts(layout = layout, posts = posts)

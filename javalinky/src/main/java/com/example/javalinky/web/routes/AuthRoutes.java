@@ -159,8 +159,10 @@ public class AuthRoutes implements RouteModule {
         user.setRole(role);
         users.save(user);
 
-        // 4. 发确认邮件。注意：令牌要用 user.getId()，所以必须先 flush 拿到主键
+        // 4. flush 拿到主键：后面发邮件要用 id，自关注也要用
         Db.em(ctx).flush();
+        services.follows(ctx).follow(user, user);    // ← 自己关注自己，时间线里才有自己的文章
+
         String token = services.auth().confirmationToken(user.getId());
         services.mail().sendConfirmation(user.getEmail(), user.getUsername(), token);
 

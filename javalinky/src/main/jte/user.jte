@@ -47,13 +47,38 @@
         <strong>${page.commentCount()}</strong> 条评论
       </p>
 
-      <div class="d-flex gap-2 flex-wrap">
+      <div class="d-flex gap-2 flex-wrap align-items-center">
         @if(page.isSelf())
           <a class="btn btn-sm btn-outline-secondary" href="${Routes.EDIT_PROFILE}">编辑资料</a>
         @endif
         @if(layout.isAdmin())
           <a class="btn btn-sm btn-outline-danger"
              href="${Routes.adminEditProfile(page.id())}">编辑资料（管理员）</a>
+        @endif
+
+        @if(page.canFollow())
+          @if(page.isFollowing())
+            <form method="post" action="${Routes.unfollow(page.username())}">
+              @template.tag.csrf(token = layout.csrfToken())
+              <button class="btn btn-sm btn-outline-secondary" type="submit">取消关注</button>
+            </form>
+          @else
+            <form method="post" action="${Routes.follow(page.username())}">
+              @template.tag.csrf(token = layout.csrfToken())
+              <button class="btn btn-sm btn-primary" type="submit">关注</button>
+            </form>
+          @endif
+        @endif
+
+        <a class="btn btn-sm btn-link" href="${Routes.followers(page.username())}">
+          粉丝 <span class="badge text-bg-secondary">${page.followerCount()}</span>
+        </a>
+        <a class="btn btn-sm btn-link" href="${Routes.following(page.username())}">
+          关注 <span class="badge text-bg-secondary">${page.followingCount()}</span>
+        </a>
+
+        @if(page.followsYou())
+          <span class="badge text-bg-light border">关注了你</span>
         @endif
       </div>
     </div>

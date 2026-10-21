@@ -2,6 +2,7 @@ package com.example.javalinky.web;
 
 import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.db.Db;
+import com.example.javalinky.db.FollowRepository;
 import com.example.javalinky.db.PostRepository;
 import com.example.javalinky.db.RoleRepository;
 import com.example.javalinky.db.UserRepository;
@@ -29,4 +30,5 @@ public record Services(
     public UserRepository users(Context ctx) { return new UserRepository(Db.em(ctx)); }
     public RoleRepository roles(Context ctx) { return new RoleRepository(Db.em(ctx)); }
     public PostRepository postRepo(Context ctx) { return new PostRepository(Db.em(ctx)); }
+    public FollowRepository follows(Context ctx) { return new FollowRepository(Db.em(ctx)); }
 }

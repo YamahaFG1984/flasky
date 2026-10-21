@@ -1,5 +1,6 @@
 package com.example.javalinky.service;
 
+import com.example.javalinky.db.FollowRepository;
 import com.example.javalinky.db.RoleRepository;
 import com.example.javalinky.model.Permission;
 import com.example.javalinky.model.Post;
@@ -92,6 +93,7 @@ public class SeedService {
             user.setAboutMe(faker.lorem().sentence(12));
             user.setRole(defaultRole);
             em.persist(user);
+            em.persist(new com.example.javalinky.model.Follow(user, user));   // 自关注
             created++;
 
             // 每 50 条 flush 一次，别让一级缓存无限膨胀
@@ -153,5 +155,23 @@ public class SeedService {
                 faker.lorem().paragraph(4),
                 faker.lorem().sentence(6),
                 faker.lorem().sentence(6));
+    }
+
+    /**
+     * 确保每个用户都关注了自己。幂等，可以反复执行。
+     * 相当于原书的 User.add_self_follows()。
+     */
+    public static void addSelfFollows() {
+        var follows = new FollowRepository(em);
+        var users = em.createQuery("select u from User u", User.class).getResultList();
+
+        int added = 0;
+        for (User user : users) {
+            if (!follows.isFollowing(user, user)) {
+                follows.follow(user, user);
+                added++;
+            }
+        }
+        System.out.printf("为 %d 个用户补上了自关注%n", added);
     }
 }
