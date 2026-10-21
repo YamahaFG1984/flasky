@@ -49,6 +49,10 @@ public class User {
     @Column(name = "avatar_hash", length = 32)
     private String avatarHash;
 
+    /** 第 20 章：上传的头像文件名。为空表示回退到 Gravatar */
+    @Column(name = "avatar_file", length = 80)
+    private String avatarFile;
+
     /** 关系的"多"这一侧：真正的外键列在这里 */
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "role_id")
@@ -116,6 +120,10 @@ public class User {
         }
         return avatarHash;
     }
+
+    public String getAvatarFile()              { return avatarFile; }
+    public void   setAvatarFile(String file)   { this.avatarFile = file; }
+    public boolean hasUploadedAvatar()         { return avatarFile != null && !avatarFile.isBlank(); }
 
     public void setAvatarHash(String hash) {
         this.avatarHash = hash;

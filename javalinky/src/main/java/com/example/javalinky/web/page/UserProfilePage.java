@@ -13,7 +13,7 @@ public record UserProfilePage(
     String email,           // 只有管理员能看到，否则是空串
     Instant memberSince,
     Instant lastSeen,
-    String avatarUrl,
+    com.example.javalinky.util.Avatar avatar,
     long postCount,
     long commentCount,
     long followerCount,
@@ -38,7 +38,7 @@ public record UserProfilePage(
             viewerIsAdmin ? user.getEmail() : "",
             user.getMemberSince(),
             user.getLastSeen(),
-            Gravatar.url(user.avatarHash(), 256),
+            com.example.javalinky.util.Avatar.of(user),
             postCount, commentCount, followerCount, followingCount,
             isSelf, canFollow, isFollowing, followsYou);
     }

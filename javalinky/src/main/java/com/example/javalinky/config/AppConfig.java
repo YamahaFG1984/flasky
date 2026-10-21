@@ -33,6 +33,9 @@ public record AppConfig(
     int loginAttempts,
     int loginWindowSeconds,
 
+    // 上传（第 20 章）：头像存在哪
+    String avatarDir,
+
     // 开发辅助
     boolean devLogging,
     boolean routeOverview,
@@ -65,6 +68,7 @@ public record AppConfig(
             20, 50, 30,
             500,
             env.getInt("LOGIN_ATTEMPTS", 10), env.getInt("LOGIN_WINDOW_SECONDS", 300),
+            env.get("AVATAR_DIR", "data/avatars"),
             true, true, true
         );
     }
@@ -88,6 +92,7 @@ public record AppConfig(
             20, 50, 30,
             Long.MAX_VALUE,          // 测试里不报慢查询
             1000, 60,                // 限流在测试里形同虚设，免得干扰别的用例
+            env.get("AVATAR_DIR", "target/test-avatars"),
             false, false, true
         );
     }
@@ -111,6 +116,7 @@ public record AppConfig(
             env.getInt("COMMENTS_PER_PAGE", 30),
             env.getInt("SLOW_QUERY_MILLIS", 500),
             env.getInt("LOGIN_ATTEMPTS", 5), env.getInt("LOGIN_WINDOW_SECONDS", 300),
+            env.require("AVATAR_DIR"),      // ← 生产必须显式给，别写在容器的临时层里
             false, false, false                // 生产环境关掉所有开发辅助
         );
     }

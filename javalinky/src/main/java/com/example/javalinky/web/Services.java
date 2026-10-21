@@ -9,6 +9,7 @@ import com.example.javalinky.db.RoleRepository;
 import com.example.javalinky.db.UserRepository;
 import com.example.javalinky.mail.MailService;
 import com.example.javalinky.service.AuthService;
+import com.example.javalinky.service.AvatarStore;
 import io.javalin.http.Context;
 
 /**
@@ -21,14 +22,16 @@ public record Services(
     AppConfig config,
     MailService mail,
     AuthService auth,
-    RateLimiter loginLimiter      // 第 19 章：应用级单例，所有请求线程共用
+    RateLimiter loginLimiter,     // 第 19 章：应用级单例，所有请求线程共用
+    AvatarStore avatars           // 第 20 章
 ) {
 
     public static Services wire(AppConfig cfg, MailService mail) {
         var loginLimiter = new RateLimiter(
             cfg.loginAttempts(),
             (double) cfg.loginAttempts() / cfg.loginWindowSeconds());
-        return new Services(cfg, mail, new AuthService(cfg, mail), loginLimiter);
+        var avatars = new AvatarStore(java.nio.file.Path.of(cfg.avatarDir()));
+        return new Services(cfg, mail, new AuthService(cfg, mail), loginLimiter, avatars);
     }
 
     // ---- 请求级别的仓储（每次调用都用当前请求的 EntityManager）----

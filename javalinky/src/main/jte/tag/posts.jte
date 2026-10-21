@@ -11,7 +11,7 @@
   <li class="d-flex gap-3">
     <a href="${Routes.user(post.authorUsername())}">
       <img class="rounded" width="40" height="40" loading="lazy"
-           src="${Gravatar.url(post.authorAvatarHash(), 40)}"
+           src="${post.authorAvatar().url(40)}"
            alt="${post.authorUsername()} 的头像">
     </a>
 

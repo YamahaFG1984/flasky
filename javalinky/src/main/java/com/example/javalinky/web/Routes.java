@@ -11,6 +11,12 @@ public final class Routes {
     public static final String LOGOUT = "/auth/logout";
     public static final String REGISTER = "/auth/register";
     public static final String EDIT_PROFILE = "/edit-profile";
+    public static final String DELETE_AVATAR = "/edit-profile/avatar/delete";
+
+    /** 第 20 章：上传的头像 */
+    public static String avatar(String filename) {
+        return "/avatars/" + filename;
+    }
     public static final String CHANGE_PASSWORD = "/auth/change-password";
     public static final String CHANGE_EMAIL = "/auth/change-email";
     public static final String RESET_PASSWORD = "/auth/reset";

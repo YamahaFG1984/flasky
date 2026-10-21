@@ -11,7 +11,8 @@ public record FollowListPage(
     String baseUrl,
     Page<Item> page
 ) {
-    public record Item(String username, String name, String avatarHash, Instant since) {}
+    public record Item(String username, String name,
+                       com.example.javalinky.util.Avatar avatar, Instant since) {}
 
     /** showFollower=true 表示列"关注者"，false 表示列"被关注者" */
     public static FollowListPage of(String title, String ownerUsername, String baseUrl,
@@ -20,7 +21,7 @@ public record FollowListPage(
             .map(f -> new Item(
                 (showFollower ? f.getFollower() : f.getFollowed()).getUsername(),
                 orEmpty((showFollower ? f.getFollower() : f.getFollowed()).getName()),
-                (showFollower ? f.getFollower() : f.getFollowed()).avatarHash(),
+                com.example.javalinky.util.Avatar.of(showFollower ? f.getFollower() : f.getFollowed()),
                 f.getTimestamp()))
             .toList();
         return new FollowListPage(title, ownerUsername, baseUrl,

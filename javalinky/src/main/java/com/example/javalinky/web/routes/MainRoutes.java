@@ -8,6 +8,7 @@ import com.example.javalinky.model.Post;
 import com.example.javalinky.model.Permission;
 import com.example.javalinky.model.Role;
 import com.example.javalinky.model.User;
+import com.example.javalinky.service.AvatarStore;
 import com.example.javalinky.web.*;
 import com.example.javalinky.web.form.AdminEditProfileForm;
 import com.example.javalinky.web.form.EditProfileForm;
@@ -51,6 +52,7 @@ public class MainRoutes implements RouteModule {
             get("/user/{username}/followers", this::followers);
             get("/user/{username}/following", this::following);
             get("/post/{id}", this::showPost);
+            get("/avatars/{file}", this::serveAvatar);      // 第 20 章：上传的头像，公开可读
 
             // 首页的两个标签页（用 POST + CSRF，因为它改变了服务端认知的状态）
             post("/show-all",      this::showAll,      Access.AUTHENTICATED);
@@ -59,6 +61,7 @@ public class MainRoutes implements RouteModule {
             // 必须登录
             get("/edit-profile",  this::editProfileForm, Access.AUTHENTICATED);
             post("/edit-profile", this::editProfile,     Access.AUTHENTICATED);
+            post(Routes.DELETE_AVATAR, this::deleteAvatar, Access.AUTHENTICATED);
 
             // 需要 FOLLOW 权限
             post("/follow/{username}",   this::follow,   Permission.FOLLOW);
@@ -387,6 +390,40 @@ public class MainRoutes implements RouteModule {
 
     // ---------- 编辑自己的资料 ----------
 
+    /**
+     * 把上传的头像发出去（第 20 章）。
+     * 没走 staticFiles 是因为这些文件在数据目录里，不在 classpath 上；
+     * 而且这样才能自己控制 Content-Type 和缓存头。
+     */
+    private void serveAvatar(Context ctx) {
+        String file = ctx.pathParam("file");
+
+        // AvatarStore.find 会再做一次路径校验，这里只挡住明显不合法的
+        var path = services.avatars().find(file)
+            .orElseThrow(() -> new NotFoundResponse("没有这个头像"));
+
+        String ext = file.substring(file.lastIndexOf('.') + 1);
+        var type = com.example.javalinky.util.ImageType.byExtension(ext);
+        ctx.contentType(type == null ? "application/octet-stream" : type.contentType());
+
+        // 文件名是内容的随机标识，改了头像就是新文件名 —— 所以可以放心长期缓存
+        ctx.header("Cache-Control", "public, max-age=31536000, immutable");
+        try {
+            ctx.result(java.nio.file.Files.newInputStream(path));
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    private void deleteAvatar(Context ctx) {
+        User user = CurrentUser.require(ctx);
+        String file = user.getAvatarFile();
+        user.setAvatarFile(null);
+        if (file != null) services.avatars().delete(file);
+        Flash.info(ctx, "已改回 Gravatar 头像。");
+        ctx.redirect(Routes.EDIT_PROFILE);
+    }
+
     private void editProfileForm(Context ctx) {
         User user = CurrentUser.require(ctx);
         // GET 时把当前值回填进表单
@@ -414,6 +451,24 @@ public class MainRoutes implements RouteModule {
                         "form", new FormView(formValues(form), errors),
                         "admin", false, "targetUser", null);
             return;
+        }
+
+        // 头像是可选的：没选文件就什么都不做
+        var upload = ctx.uploadedFile("avatar");
+        if (upload != null && upload.size() > 0) {
+            var result = services.avatars().store(upload.content(), upload.size());
+            if (result instanceof AvatarStore.Result.Rejected rejected) {
+                // 校验失败要把已填的文字一起带回去，别让用户重打一遍
+                View.render(ctx, "edit_profile.jte", "编辑资料",
+                            "form", new FormView(formValues(form),
+                                Map.of("avatar", List.of(rejected.reason().message))),
+                            "admin", false, "targetUser", null);
+                return;
+            }
+            String old = user.getAvatarFile();
+            user.setAvatarFile(((AvatarStore.Result.Stored) result).filename());
+            // 换了新的就把旧文件删掉，否则磁盘只增不减
+            if (old != null) services.avatars().delete(old);
         }
 
         user.setName(blankToNull(form.name()));

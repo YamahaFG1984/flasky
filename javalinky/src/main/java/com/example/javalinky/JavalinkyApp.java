@@ -4,6 +4,7 @@ import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.db.Db;
 import com.example.javalinky.db.UnitOfWork;
 import com.example.javalinky.mail.MailService;
+import com.example.javalinky.service.AvatarStore;
 import com.example.javalinky.mail.Mailer;
 import com.example.javalinky.web.*;
 import com.example.javalinky.web.routes.*;
@@ -60,6 +61,13 @@ public final class JavalinkyApp {
                 h.setSessionHandler(Sessions.handler(cfg.httpsOnly())));
 
             javalin.concurrency.useVirtualThreads = true;
+
+            // 第 20 章：multipart 的上限。这是比应用层校验更早的一道闸 ——
+            // 超了之后 Jetty 直接拒收，请求体根本不会被读完。
+            javalin.jetty.multipartConfig.maxFileSize(
+                AvatarStore.MAX_BYTES, io.javalin.config.SizeUnit.BYTES);
+            javalin.jetty.multipartConfig.maxTotalRequestSize(
+                AvatarStore.MAX_BYTES + 1024 * 1024, io.javalin.config.SizeUnit.BYTES);
 
             // 只在明确知道自己跑在代理后面时才开：否则客户端可以伪造 X-Forwarded-For
             if (cfg.behindProxy()) {

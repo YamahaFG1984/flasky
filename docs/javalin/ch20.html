@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 20 章 · 文件上传 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="20">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 20 章</span>
+<h1>文件上传</h1>
+<p class="lede">
+  第 10 章的头像用的是 Gravatar —— 省事，但要求用户去另一个网站注册。
+  这一章让用户直接传一张图。上传功能的代码量很小，
+  <strong>难的部分全在「怎么不被它害死」</strong>：
+  它是整个应用里攻击面最大的入口，没有之一。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 <code>ctx.uploadedFile()</code> 接收文件，知道 <code>enctype</code> 为什么不能漏</li>
+    <li>理解为什么<strong>扩展名和 Content-Type 一个都不能信</strong>，改用魔数识别</li>
+    <li>知道文件名必须由服务端生成，以及目录穿越是怎么发生的</li>
+    <li>在三个层次上限制大小，知道每一层挡住的是什么</li>
+    <li>把文件发出去，并配对缓存头</li>
+    <li>写出真正有价值的上传测试 —— 测的是恶意输入，不是正常路径</li>
+  </ul>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128230; 本章代码</div>
+  <p>
+    这一章结束时的完整项目在仓库的 <code>javalinky/</code> 目录里，对应标签 <code>jv-ch20</code>：
+  </p>
+<div class="code" data-lang="bash">
+<pre>
+git checkout jv-ch20
+cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7070
+</pre>
+</div>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="threat">先看清楚风险</h2>
+
+<p>
+  上传功能的本质是：<strong>允许陌生人往你的服务器硬盘上写东西</strong>。
+  把这句话念两遍，下面每一条防护措施的必要性就都清楚了。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 350" role="img" aria-label="文件上传的五类风险">
+  <text class="ttl on-r" x="20" y="20">一个「只是存张图」的功能，能出的事</text>
+
+  <rect class="bx-r" x="20" y="32" width="350" height="68" rx="8"/>
+  <text class="ttl on-r" x="38" y="54">① 传上来的根本不是图片</text>
+  <text class="sm" x="38" y="74">shell.jsp 改名叫 avatar.png，Content-Type 随便伪造。</text>
+  <text class="sm" x="38" y="91">如果服务器会执行它 —— 整台机器就没了。</text>
+
+  <rect class="bx-r" x="390" y="32" width="350" height="68" rx="8"/>
+  <text class="ttl on-r" x="408" y="54">② 文件名里带路径</text>
+  <text class="sm" x="408" y="74">filename = "../../../.ssh/authorized_keys"</text>
+  <text class="sm" x="408" y="91">直接原样拼进路径的话，写到哪都有可能。</text>
+
+  <rect class="bx-r" x="20" y="112" width="350" height="68" rx="8"/>
+  <text class="ttl on-r" x="38" y="134">③ 把磁盘塞满</text>
+  <text class="sm" x="38" y="154">不限大小 = 任何人都能上传 10GB。</text>
+  <text class="sm" x="38" y="171">磁盘满了之后，数据库和日志会一起挂掉。</text>
+
+  <rect class="bx-r" x="390" y="112" width="350" height="68" rx="8"/>
+  <text class="ttl on-r" x="408" y="134">④ 存储型 XSS</text>
+  <text class="sm" x="408" y="154">SVG 里可以写 &lt;script&gt;。按 image/svg+xml 发出去，</text>
+  <text class="sm" x="408" y="171">浏览器会<tspan class="on-r">执行它</tspan> —— 在你的域名下。</text>
+
+  <rect class="bx-r" x="20" y="192" width="720" height="68" rx="8"/>
+  <text class="ttl on-r" x="38" y="214">⑤ 覆盖别人的文件</text>
+  <text class="sm" x="38" y="234">用原始文件名存的话，两个人都传 avatar.png，后一个把前一个覆盖了。</text>
+  <text class="sm" x="38" y="251">更糟的是有人故意传一个叫 index.html 或者 .htaccess 的东西。</text>
+
+  <rect class="bx-g" x="20" y="272" width="720" height="66" rx="9"/>
+  <text class="ttl on-g" x="38" y="294">一句话防线</text>
+  <text class="sm" x="38" y="316">① 类型按<tspan class="on-g">内容</tspan>判断　② 文件名由<tspan class="on-g">服务端</tspan>生成　③ 大小在<tspan class="on-g">三层</tspan>都卡</text>
+  <text class="sm" x="38" y="333">④ 存在<tspan class="on-g">不会被执行</tspan>的目录　⑤ 发出去时自己设 Content-Type，别让浏览器猜</text>
+</svg>
+<figcaption>图 20-1　上传功能的五类风险，以及对应的五条防线</figcaption>
+</figure>
+
+<h2 id="receive">接收：<code>ctx.uploadedFile()</code></h2>
+
+<p>Javalin 这边的 API 很小：</p>
+
+<div class="code" data-lang="java">
+<pre>
+UploadedFile file = ctx.uploadedFile("avatar");   // 没传就是 null
+List&lt;UploadedFile&gt; many = ctx.uploadedFiles("photos");
+
+file.filename()      // 客户端给的原始文件名 —— ⚠ 不可信
+file.extension()     // 从上面那个名字里切出来的 —— ⚠ 同样不可信
+file.contentType()   // 客户端声明的 —— ⚠ 还是不可信
+file.size()          // 客户端声明的长度 —— ⚠ 依然不可信
+file.content()       // InputStream ← 只有这个是真的
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 这五个方法里只有最后一个值得信</div>
+  <p>
+    上面四个全部来自 HTTP 请求体里的文本，<strong>是客户端写什么就是什么</strong>。
+    用 <code>curl -F "avatar=@shell.jsp;filename=x.png;type=image/png"</code>
+    就能让它们变成任何值。
+  </p>
+  <p>
+    所以本章后面所有的判断，都只基于 <code>content()</code> 读出来的真实字节。
+  </p>
+</div>
+
+<h3>表单那边：漏了 <code>enctype</code> 会静悄悄地失败</h3>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/edit_profile.jte">
+<pre>
+&lt;%-- enctype 不能漏！默认的 urlencoded 不会传文件，
+     服务端 ctx.uploadedFile() 会一直拿到 null，而且没有任何报错 --%&gt;
+&lt;form method="post" novalidate enctype="multipart/form-data"&gt;
+  @template.tag.csrf(token = layout.csrfToken())
+
+  &lt;input class="form-control" type="file" id="f-avatar" name="avatar"
+         accept="image/png,image/jpeg,image/gif,image/webp"&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 漏掉 <code>enctype</code> 是上传功能的头号坑</div>
+  <p>
+    表单默认的编码是 <code>application/x-www-form-urlencoded</code>，
+    它<strong>只会把文件名当成一个普通文本字段发过去</strong>，文件内容根本不发。
+  </p>
+  <p>
+    结果是：浏览器正常提交，服务器返回 200，一切看起来都对 ——
+    只有 <code>ctx.uploadedFile("avatar")</code> 永远是 <code>null</code>。
+    没有任何一方报错。
+  </p>
+  <p>
+    另外注意 <code>accept="image/png,..."</code> <strong>纯粹是个便利功能</strong>：
+    它只是让文件选择器默认过滤一下，一秒钟就能绕过。真正的校验必须在服务端。
+  </p>
+</div>
+
+<h2 id="detect">识别类型：看内容，不看名字</h2>
+
+<p>
+  这是本章的核心。判断「这是不是一张图」的唯一可靠办法是
+  <strong>读文件开头那几个字节</strong> —— 业内叫<strong>魔数</strong>（magic number）。
+  每种格式都有固定的开头，这是文件格式规范的一部分，改不了。
+</p>
+
+<div class="tw">
+<table>
+<tr><th>格式</th><th>开头的字节</th><th>可打印形式</th></tr>
+<tr><td>PNG</td><td><code>89 50 4E 47 0D 0A 1A 0A</code></td><td><code>.PNG....</code></td></tr>
+<tr><td>JPEG</td><td><code>FF D8 FF</code></td><td>—</td></tr>
+<tr><td>GIF</td><td><code>47 49 46 38</code></td><td><code>GIF8</code></td></tr>
+<tr><td>WebP</td><td><code>52 49 46 46</code> …… 第 8–11 字节 <code>WEBP</code></td><td><code>RIFF</code>…<code>WEBP</code></td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/util/ImageType.java">
+<pre>
+public enum ImageType {
+
+    PNG ("png",  "image/png",  new int[]{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}),
+    JPEG("jpg",  "image/jpeg", new int[]{0xFF, 0xD8, 0xFF}),
+    GIF ("gif",  "image/gif",  new int[]{'G', 'I', 'F', '8'}),
+    WEBP("webp", "image/webp", new int[]{'R', 'I', 'F', 'F'});   // 另需第 8..11 字节是 WEBP
+
+    /** 够判断上面所有格式了 */
+    public static final int MAGIC_BYTES = 12;
+
+    /**
+     * 认不出来就返回 null —— 调用方据此拒绝。
+     * 注意是「白名单」：不在列表里的一律不收，而不是「黑名单」挡掉已知的坏格式。
+     */
+    public static ImageType detect(byte[] head) {
+        for (ImageType type : values()) {
+            if (matches(head, type.magic) &amp;&amp; type.extraCheck(head)) return type;
+        }
+        return null;
+    }
+
+    private boolean extraCheck(byte[] head) {
+        // RIFF 容器不只有 webp，还要看第 8..11 字节
+        if (this != WEBP) return true;
+        return head.length &gt;= 12
+            &amp;&amp; head[8] == 'W' &amp;&amp; head[9] == 'E' &amp;&amp; head[10] == 'B' &amp;&amp; head[11] == 'P';
+    }
+
+    private static boolean matches(byte[] head, int[] magic) {
+        if (head.length &lt; magic.length) return false;
+        for (int i = 0; i &lt; magic.length; i++) {
+            if ((head[i] &amp; 0xFF) != magic[i]) return false;
+        }
+        return true;
+    }
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 白名单，不是黑名单</div>
+  <p>
+    一个常见的错误思路是「禁止 <code>.jsp</code>、<code>.php</code>、<code>.sh</code>……」。
+    这永远列不全：<code>.jspx</code>？<code>.phtml</code>？大写的 <code>.JSP</code>？
+    末尾带空格或点的 <code>.jsp.</code>？
+  </p>
+  <p>
+    <strong>白名单的逻辑是反的：认不出来就拒绝。</strong>
+    新出一种恶意格式，白名单天然就挡住了，不需要你更新任何东西。
+  </p>
+  <p>
+    <strong>凡是安全相关的判断，都要用白名单。</strong>
+    第 11 章的 HTML 清洗（owasp-sanitizer 的标签白名单）、
+    第 8 章登录后跳转的 URL 检查，用的都是同一个思路。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 为什么白名单里没有 SVG</div>
+  <p>
+    SVG 是图片，浏览器也能显示，但它<strong>是 XML，而且可以内嵌
+    <code>&lt;script&gt;</code></strong>。按 <code>image/svg+xml</code> 发出去的话，
+    浏览器会在<strong>你的域名下</strong>执行那段脚本 ——
+    这是一个标准的存储型 XSS，而且能拿到用户的会话 Cookie。
+  </p>
+  <p>
+    真要支持 SVG，有三条路：用 SVG 专用的清洗器（DOMPurify 之类）、
+    强制 <code>Content-Disposition: attachment</code> 让它只能下载，
+    或者把用户上传的内容放到<strong>另一个域名</strong>上
+    （这也是 GitHub 用 <code>githubusercontent.com</code> 的原因之一）。
+  </p>
+</div>
+
+<h2 id="store">存储：文件名和路径</h2>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/service/AvatarStore.java">
+<pre>
+public final class AvatarStore {
+
+    public static final long MAX_BYTES = 2 * 1024 * 1024;   // 2 MB
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private final Path root;
+
+    public AvatarStore(Path root) {
+        this.root = root.toAbsolutePath().normalize();
+    }
+
+    public Result store(InputStream in, long declaredSize) {
+        if (declaredSize &lt;= 0)        return new Result.Rejected(Rejection.EMPTY);
+        if (declaredSize &gt; MAX_BYTES) return new Result.Rejected(Rejection.TOO_LARGE);
+
+        try {
+            // 先落到临时文件：既能看头几个字节判类型，也能在真正写入前校验大小。
+            // 注意不要先 readAllBytes() —— 那等于让任何人都能用一个大文件把堆撑爆。
+            Files.createDirectories(root);
+            Path temp = Files.createTempFile(root, "upload-", ".part");
+            try {
+                long written = Files.copy(in, temp, StandardCopyOption.REPLACE_EXISTING);
+
+                // declaredSize 来自客户端，不能信。这里是真实落盘的字节数。
+                if (written == 0)        return new Result.Rejected(Rejection.EMPTY);
+                if (written &gt; MAX_BYTES) return new Result.Rejected(Rejection.TOO_LARGE);
+
+                ImageType type = ImageType.detect(readHead(temp));
+                if (type == null) return new Result.Rejected(Rejection.NOT_AN_IMAGE);
+
+                String filename = randomName() + "." + type.extension();
+                Files.move(temp, root.resolve(filename), StandardCopyOption.REPLACE_EXISTING);
+                return new Result.Stored(filename);
+            } finally {
+                Files.deleteIfExists(temp);    // move 成功的话这里是空操作
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("保存头像失败", e);
+        }
+    }
+
+    /**
+     * 按文件名取出路径。
+     * 这里再校验一次 —— 就算数据库里的值被人改成了
+     * "../../etc/passwd"，也出不了这个目录。
+     */
+    public Optional&lt;Path&gt; find(String filename) {
+        if (filename == null || filename.isBlank()) return Optional.empty();
+
+        Path candidate = root.resolve(filename).normalize();
+        if (!candidate.startsWith(root)) return Optional.empty();   // ← 目录穿越在这里被挡住
+        if (!Files.isRegularFile(candidate)) return Optional.empty();
+        return Optional.of(candidate);
+    }
+
+    private static String randomName() {
+        byte[] bytes = new byte[16];
+        RANDOM.nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
+    }
+}
+</pre>
+</div>
+
+<p>这段代码里有五个决定，逐个说。</p>
+
+<div class="box key">
+  <div class="t">&#9728; ① 文件名完全由服务端生成</div>
+  <p>
+    <code>randomName()</code> 给出 32 个十六进制字符，扩展名来自
+    <strong>识别出来的真实类型</strong>，而不是用户给的。
+    客户端那个 <code>filename()</code> 我们<strong>一个字都没用</strong>。
+  </p>
+  <p>
+    这一下解决了三个问题：目录穿越（名字里不可能有 <code>/</code>）、
+    互相覆盖（随机名撞不上）、以及「传一个叫 <code>.htaccess</code> 的文件」。
+  </p>
+  <p>
+    用 <code>SecureRandom</code> 而不是 <code>Random</code>：
+    后者可预测，有人能算出别人的头像文件名。虽然头像不算机密，
+    但<strong>养成习惯</strong> —— 凡是「不该被猜到」的标识，都用 <code>SecureRandom</code>。
+  </p>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; ② 先落临时文件，不要 <code>readAllBytes()</code></div>
+  <p>
+    最直观的写法是 <code>byte[] data = in.readAllBytes();</code>，然后随便处理。
+    问题是<strong>这等于把请求体整个读进堆内存</strong> ——
+    十个人同时传 100MB，你的应用就 OOM 了。
+  </p>
+  <p>
+    <code>Files.copy(in, temp)</code> 是流式的，内存占用恒定。
+    而且临时文件就在目标目录里（<code>Files.createTempFile(root, ...)</code>），
+    所以最后那一步 <code>Files.move</code> 是<strong>同一个文件系统上的原子重命名</strong>，
+    不会出现「写到一半被别人读到」的半截文件。
+  </p>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; ③ 大小校验做了两次，因为第一次不算数</div>
+  <p>
+    <code>declaredSize</code> 来自 <code>UploadedFile.size()</code>，
+    而那个值来自 HTTP 头 —— <strong>客户端说多少就是多少</strong>。
+    用它做早期拒绝是对的（省得白写一遍磁盘），但<strong>不能只有它</strong>。
+  </p>
+  <p>
+    <code>Files.copy</code> 的返回值是真实写入的字节数，那个才是事实。
+    配套测试里有一个专门的用例：声称 100 字节、实际发 2MB+，必须被拒。
+  </p>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; ④ <code>find()</code> 为什么还要再查一次路径</div>
+  <p>
+    文件名是我们自己生成的，理论上不可能有 <code>../</code>。
+    那为什么读的时候还要校验？
+  </p>
+  <p>
+    因为这叫<strong>纵深防御</strong>。那个文件名存在数据库里，
+    而数据库的值可能因为别的漏洞（SQL 注入、管理后台的疏忽、
+    一次手工改库）变成任何东西。<code>find()</code> 这三行
+    让「数据库被污染」不至于升级成「任意文件读取」。
+  </p>
+<div class="code" data-lang="java">
+<pre>
+Path candidate = root.resolve(filename).normalize();
+if (!candidate.startsWith(root)) return Optional.empty();
+</pre>
+</div>
+  <p>
+    关键是 <code>normalize()</code> —— 它把 <code>a/../../b</code> 这类
+    路径真正算出来，之后 <code>startsWith</code> 才有意义。
+    少了 <code>normalize()</code> 这个检查形同虚设。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; ⑤ 用 sealed interface 表达「成功或失败」</div>
+<div class="code" data-lang="java">
+<pre>
+public sealed interface Result {
+    record Stored(String filename) implements Result {}
+    record Rejected(Rejection reason) implements Result {}
+}
+</pre>
+</div>
+  <p>
+    比「返回 null 表示失败」好在：调用方<strong>拿不到失败原因</strong>就没法给用户
+    一句人话。比抛异常好在：被拒绝是<strong>正常的业务分支</strong>，不是异常情况。
+  </p>
+  <p>
+    <code>sealed</code> 的作用是告诉编译器「实现类只有这两个」，
+    于是 <code>switch</code> 模式匹配可以做穷尽检查 ——
+    以后加一种结果，所有处理它的地方都会编译失败。
+  </p>
+</div>
+
+<h2 id="limits">三层大小限制，各挡各的</h2>
+
+<div class="tw">
+<table>
+<tr><th>层</th><th>在哪配</th><th>挡住什么</th><th>到达这一层时</th></tr>
+<tr>
+  <td>① 反向代理</td>
+  <td>nginx <code>client_max_body_size 4m;</code></td>
+  <td>根本不让大请求到达应用</td>
+  <td>—</td>
+</tr>
+<tr>
+  <td>② 容器</td>
+  <td><code>javalin.jetty.multipartConfig.maxFileSize(...)</code></td>
+  <td>Jetty 解析时就中断，不占用你的代码</td>
+  <td>请求体没读完</td>
+</tr>
+<tr>
+  <td>③ 应用</td>
+  <td><code>AvatarStore</code> 里的两次检查</td>
+  <td>业务规则（2MB），并给出友好的错误信息</td>
+  <td>已经流式写到临时文件</td>
+</tr>
+</table>
+</div>
+
+<div class="code" data-lang="java" data-file="JavalinkyApp.java">
+<pre>
+// 第 20 章：multipart 的上限。这是比应用层校验更早的一道闸 ——
+// 超了之后 Jetty 直接拒收，请求体根本不会被读完。
+javalin.jetty.multipartConfig.maxFileSize(
+    AvatarStore.MAX_BYTES, io.javalin.config.SizeUnit.BYTES);
+javalin.jetty.multipartConfig.maxTotalRequestSize(
+    AvatarStore.MAX_BYTES + 1024 * 1024, io.javalin.config.SizeUnit.BYTES);
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么三层都要，不能只留最外面那层</div>
+  <p>
+    <strong>外层挡得早但说不清楚。</strong>nginx 拒绝时返回的是一个
+    裸的 413 页面，用户看到的是「Request Entity Too Large」，
+    不知道是头像太大了。
+  </p>
+  <p>
+    <strong>内层说得清楚但代价高。</strong>到了应用层，
+    请求体已经传完了，带宽和磁盘 I/O 都花掉了。
+  </p>
+  <p>
+    所以配成：<strong>外层留宽一点（4MB）兜底防滥用，
+    内层卡业务值（2MB）给用户一句人话。</strong>
+    另外别忘了第 17 章部署时 nginx 的 <code>client_max_body_size</code>
+    默认只有 <strong>1MB</strong> —— 不改的话 2MB 的头像永远传不上来，
+    而且报错完全看不出和这个配置有关。
+  </p>
+</div>
+
+<h2 id="serve">把文件发出去</h2>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+private void serveAvatar(Context ctx) {
+    String file = ctx.pathParam("file");
+
+    // AvatarStore.find 会再做一次路径校验
+    var path = services.avatars().find(file)
+        .orElseThrow(() -&gt; new NotFoundResponse("没有这个头像"));
+
+    String ext = file.substring(file.lastIndexOf('.') + 1);
+    var type = ImageType.byExtension(ext);
+    ctx.contentType(type == null ? "application/octet-stream" : type.contentType());
+
+    // 文件名是内容的随机标识，改了头像就是新文件名 —— 所以可以放心长期缓存
+    ctx.header("Cache-Control", "public, max-age=31536000, immutable");
+    ctx.result(Files.newInputStream(path));
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 两个细节</div>
+  <p>
+    <strong>一、<code>Content-Type</code> 必须自己设。</strong>
+    不设的话浏览器会「嗅探」内容来猜类型，而嗅探是可以被诱导的 ——
+    一个精心构造的文件可能被当成 HTML 执行。
+    认不出类型时回落到 <code>application/octet-stream</code>（= 下载，不渲染）。
+    生产环境还应该加一个 <code>X-Content-Type-Options: nosniff</code>，彻底关掉嗅探。
+  </p>
+  <p>
+    <strong>二、<code>immutable</code> 这个缓存头是靠文件名换来的。</strong>
+    因为文件名是随机生成的，<strong>内容变了文件名一定也变</strong>，
+    所以同一个 URL 的内容永远不会改 —— 这正是
+    <code>max-age=31536000, immutable</code> 成立的前提。
+    如果用的是 <code>/avatars/john.png</code> 这种按用户名的地址，
+    就<strong>绝对不能</strong>这么缓存，否则用户换了头像一年内都看不到。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么不用 <code>staticFiles</code></div>
+  <p>
+    Javalin 的 <code>config.staticFiles.add(...)</code> 支持
+    <code>Location.EXTERNAL</code>，指向磁盘目录也能用。没走它的原因有三个：
+  </p>
+  <ul>
+    <li>要自己控制 <code>Content-Type</code> 和缓存头</li>
+    <li>要走 <code>AvatarStore.find()</code> 的路径校验</li>
+    <li>以后要加权限（比如「只有登录用户能看」）时有地方加</li>
+  </ul>
+  <p>
+    真上了规模的话，这类文件应该交给对象存储（S3 / OSS）加 CDN，
+    应用只负责签发上传地址 —— 那时这个路由就不需要了。
+  </p>
+</div>
+
+<h2 id="replace">换头像时记得删旧的</h2>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+// 头像是可选的：没选文件就什么都不做
+var upload = ctx.uploadedFile("avatar");
+if (upload != null &amp;&amp; upload.size() &gt; 0) {
+    var result = services.avatars().store(upload.content(), upload.size());
+    if (result instanceof AvatarStore.Result.Rejected rejected) {
+        // 校验失败要把已填的文字一起带回去，别让用户重打一遍
+        View.render(ctx, "edit_profile.jte", "编辑资料",
+                    "form", new FormView(formValues(form),
+                        Map.of("avatar", List.of(rejected.reason().message))),
+                    "admin", false, "targetUser", null);
+        return;
+    }
+    String old = user.getAvatarFile();
+    user.setAvatarFile(((AvatarStore.Result.Stored) result).filename());
+    // 换了新的就把旧文件删掉，否则磁盘只增不减
+    if (old != null) services.avatars().delete(old);
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 文件和数据库是两套存储，它们会不一致</div>
+  <p>
+    上面这段有一个<strong>没有完美解法</strong>的问题：
+    <code>setAvatarFile()</code> 的效果要等事务提交才落库，
+    而 <code>delete()</code> 是立刻生效的。如果事务<strong>随后回滚了</strong>，
+    数据库里还指着旧文件，但旧文件已经被删了 —— 头像变成 404。
+  </p>
+  <p>
+    <strong>这类「数据库 + 外部存储」的不一致是分布式系统的常态</strong>，
+    文件系统、对象存储、第三方 API 都一样。常见的几种处理：
+  </p>
+  <ul>
+    <li><strong>容忍它</strong>（本章的选择）。头像丢了不是大事，回退到 Gravatar 即可</li>
+    <li><strong>只增不删</strong>，另开一个清理任务按数据库对账</li>
+    <li><strong>把删除推迟到事务提交之后</strong>（JPA 的 <code>@PostCommit</code> 之类的钩子）</li>
+  </ul>
+  <p>
+    重要的不是选哪个，而是<strong>知道这个问题存在</strong>并有意识地选。
+    悄悄写成上面那样然后没想过，才是问题。
+  </p>
+</div>
+
+<h2 id="test">测试：测恶意输入，不是测正常路径</h2>
+
+<p>
+  「上传一张图能不能成功」只值一个用例。
+  上传功能的测试价值全在<strong>剩下那些</strong>：
+</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/AvatarUploadTest.java">
+<pre>
+@Test
+void 改了扩展名的非图片会被识破() {
+    // 一个 JSP webshell，被改名叫 avatar.png
+    byte[] shell = "&lt;%@ page import=\"java.io.*\" %&gt;&lt;% Runtime.getRuntime().exec(...); %&gt;"
+        .getBytes();
+    assertThat(ImageType.detect(head(shell)))
+        .as("内容不是图片就必须认不出来")
+        .isNull();
+}
+
+@Test
+void 谎报大小也拦得住() {
+    var store = newStore();
+    byte[] big = new byte[(int) AvatarStore.MAX_BYTES + 1];
+    System.arraycopy(PNG, 0, big, 0, PNG.length);
+
+    // 客户端说自己只有 100 字节，实际发了 2MB+
+    var result = store.store(new ByteArrayInputStream(big), 100);
+
+    assertThat(result)
+        .as("declaredSize 来自客户端，必须按真实落盘字节数再判一次")
+        .isInstanceOf(AvatarStore.Result.Rejected.class);
+}
+
+@Test
+void 目录穿越的文件名取不到东西() throws Exception {
+    Path root = Path.of("target/test-avatars/" + UUID.randomUUID());
+    Files.createDirectories(root);
+    // 在目录外面放一个文件
+    Path secret = root.getParent().resolve("secret.txt");
+    Files.writeString(secret, "不该被读到");
+
+    var store = new AvatarStore(root);
+
+    assertThat(store.find("../secret.txt")).as("../ 必须被挡住").isEmpty();
+    assertThat(store.find("/etc/passwd")).as("绝对路径也要挡住").isEmpty();
+    assertThat(store.find("..%2Fsecret.txt")).isEmpty();
+    assertThat(store.find(null)).isEmpty();
+    assertThat(store.find("")).isEmpty();
+}
+
+@Test
+void RIFF容器不是webp就不认() {
+    // RIFF 开头的还有 wav、avi。只匹配前四字节会误判
+    byte[] wav = concat("RIFF".getBytes(), concat(new byte[4], "WAVE".getBytes()));
+    assertThat(ImageType.detect(head(wav))).isNull();
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 测试客户端怎么发 multipart</div>
+  <p>
+    <code>javalin-testtools</code> 只给了 <code>FormBody</code>（urlencoded），
+    没有 multipart 构造器。但 <code>Request.Builder.post()</code> 接受任意
+    <code>BodyPublisher</code>，所以自己拼字节就行 ——
+    multipart 的格式本身很简单：
+  </p>
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/TestHttp.java">
+<pre>
+static Response postMultipart(HttpClient client, String path,
+                              Map&lt;String, String&gt; fields, FilePart file) {
+    String boundary = "----JavalinkyTest" + System.nanoTime();
+    var out = new ByteArrayOutputStream();
+
+    for (var e : fields.entrySet()) {
+        write(out, "--" + boundary + "\r\n");
+        write(out, "Content-Disposition: form-data; name=\"" + e.getKey() + "\"\r\n\r\n");
+        write(out, e.getValue() + "\r\n");
+    }
+    if (file != null) {
+        write(out, "--" + boundary + "\r\n");
+        write(out, "Content-Disposition: form-data; name=\"" + file.field()
+                 + "\"; filename=\"" + file.filename() + "\"\r\n");
+        write(out, "Content-Type: " + file.contentType() + "\r\n\r\n");
+        out.write(file.bytes());
+        write(out, "\r\n");
+    }
+    write(out, "--" + boundary + "--\r\n");
+
+    byte[] body = out.toByteArray();
+    return client.request(path, req -&gt; req
+        .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+        .post(HttpRequest.BodyPublishers.ofByteArray(body)));
+}
+</pre>
+</div>
+  <p>
+    注意换行<strong>必须是 <code>\r\n</code></strong>，不是 <code>\n</code> ——
+    这是 RFC 规定的，用 <code>\n</code> 的话服务端解析不出任何字段，
+    而且同样是静悄悄地失败。
+  </p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书没有对应章节。<code>mvn test</code> 应该看到 66 个测试全绿，其中 12 个来自本章。</div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>
+      <strong>亲手绕过扩展名检查。</strong>随便找个文本文件，改名叫
+      <code>avatar.png</code>，用 <code>curl -F "avatar=@x.png;type=image/png"</code> 传上去。
+      确认被拒。然后把 <code>ImageType.detect</code> 的调用注释掉再试一次 ——
+      看看文件真的躺在了你的 <code>data/avatars/</code> 里。
+    </li>
+    <li>
+      把表单上的 <code>enctype="multipart/form-data"</code> 删掉，提交。
+      观察：没有任何报错，但 <code>ctx.uploadedFile()</code> 是 null。
+      这就是正文说的「静悄悄地失败」。
+    </li>
+    <li>
+      传一个 3MB 的图片。看你撞到的是哪一层限制，报错长什么样。
+      然后把 Jetty 的 <code>maxFileSize</code> 调大，再试一次 ——
+      这次应该撞到应用层，错误信息友好多了。
+    </li>
+    <li>
+      <strong>做一次缩略图。</strong>现在是原图存原图发，
+      一张 2MB 的照片当 40×40 的头像显示很浪费。
+      用 <code>javax.imageio.ImageIO</code> 在存储时生成 64 和 256 两个尺寸，
+      让 <code>Avatar.url(size)</code> 挑合适的那张。
+      <span class="sm">（提示：这还顺带解决了一个安全问题 ——
+      重新编码会丢掉原图里的一切非图像数据）</span>
+    </li>
+    <li>
+      <strong>想清楚「图片炸弹」。</strong>一张 10KB 的 PNG 可以解压成
+      50000×50000 的位图，吃掉 10GB 内存。
+      上一题的 <code>ImageIO</code> 会中招。查一下怎么<strong>在解码前</strong>
+      读出图片的宽高（提示：<code>ImageReader.getWidth()</code>），
+      超过阈值就直接拒绝。
+    </li>
+    <li>
+      给头像加<strong>删除</strong>功能的测试：上传一张，调
+      <code>POST /edit-profile/avatar/delete</code>，确认文件真的从磁盘上消失了、
+      而且页面回落到 Gravatar。
+    </li>
+    <li>
+      <strong>验证缓存头真的生效。</strong>上传头像，开浏览器开发者工具的
+      Network 面板刷新两次，确认第二次是 <code>(from disk cache)</code>。
+      然后换一张头像，确认立刻看到了新的 ——
+      想清楚为什么 <code>immutable</code> 在这里不会出问题。
+    </li>
+    <li>
+      （进阶）把存储换成 S3 兼容的对象存储（本地可以用 MinIO）。
+      <code>AvatarStore</code> 抽成接口，实现两份。
+      你会发现<strong>路径穿越的检查不需要了</strong>，
+      但多出来一个新问题：上传失败时怎么保证不留下孤儿对象。
+    </li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

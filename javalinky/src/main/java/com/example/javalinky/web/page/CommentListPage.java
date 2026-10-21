@@ -14,7 +14,7 @@ public record CommentListPage(long postId, Page<Item> page, boolean canModerate)
         String bodyHtml,
         Instant timestamp,
         String authorUsername,
-        String authorAvatarHash,
+        com.example.javalinky.util.Avatar authorAvatar,
         boolean disabled
     ) {}
 
@@ -27,7 +27,7 @@ public record CommentListPage(long postId, Page<Item> page, boolean canModerate)
                 c.getBodyHtml(),
                 c.getTimestamp(),
                 c.getAuthor().getUsername(),
-                c.getAuthor().avatarHash(),
+                com.example.javalinky.util.Avatar.of(c.getAuthor()),
                 c.isDisabled()))
             .toList();
 

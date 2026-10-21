@@ -18,7 +18,7 @@
     <li class="d-flex gap-3 align-items-center">
       <a href="${Routes.user(item.username())}">
         <img class="rounded" width="40" height="40" loading="lazy"
-             src="${Gravatar.url(item.avatarHash(), 40)}"
+             src="${item.avatar().url(40)}"
              alt="${item.username()} 的头像">
       </a>
       <div>

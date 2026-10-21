@@ -9,7 +9,7 @@
 @template.layout.base(layout = layout, content = @`
   <div class="d-flex gap-4 pb-4 mb-4 border-bottom flex-wrap">
 
-    <img class="rounded" src="${page.avatarUrl()}" width="128" height="128"
+    <img class="rounded" src="${page.avatar().url(256)}" width="128" height="128"
          alt="${page.username()} 的头像">
 
     <div class="flex-grow-1">

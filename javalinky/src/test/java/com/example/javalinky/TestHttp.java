@@ -6,6 +6,11 @@ import io.javalin.testtools.HttpClient;
 import io.javalin.testtools.Response;
 import jakarta.persistence.EntityManager;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.http.HttpRequest;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -104,6 +109,59 @@ final class TestHttp {
     static void switchUser(HttpClient client, String email) {
         logout(client);
         login(client, email);
+    }
+
+    // ---------- multipart（第 20 章）----------
+
+    /** 一个要上传的文件 */
+    record FilePart(String field, String filename, String contentType, byte[] bytes) {}
+
+    /**
+     * 手搓一个 multipart/form-data 请求体。
+     * javalin-testtools 没有提供构造器，但 Request.Builder 接受任意 BodyPublisher，
+     * 所以自己拼字节 + 设对 Content-Type 就行。
+     */
+    static Response postMultipart(HttpClient client, String path,
+                                  Map<String, String> fields, FilePart file) {
+        String boundary = "----JavalinkyTest" + System.nanoTime();
+        var out = new ByteArrayOutputStream();
+
+        try {
+            for (var e : fields.entrySet()) {
+                write(out, "--" + boundary + "\r\n");
+                write(out, "Content-Disposition: form-data; name=\"" + e.getKey() + "\"\r\n\r\n");
+                write(out, e.getValue() + "\r\n");
+            }
+            if (file != null) {
+                write(out, "--" + boundary + "\r\n");
+                write(out, "Content-Disposition: form-data; name=\"" + file.field()
+                         + "\"; filename=\"" + file.filename() + "\"\r\n");
+                write(out, "Content-Type: " + file.contentType() + "\r\n\r\n");
+                out.write(file.bytes());
+                write(out, "\r\n");
+            }
+            write(out, "--" + boundary + "--\r\n");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+
+        byte[] body = out.toByteArray();
+        return client.request(path, req -> req
+            .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+            .post(HttpRequest.BodyPublishers.ofByteArray(body)));
+    }
+
+    /** 带 _csrf 的 multipart POST */
+    static Response postMultipartWithCsrf(HttpClient client, String tokenPage, String path,
+                                          Map<String, String> fields, FilePart file) {
+        var all = new LinkedHashMap<String, String>();
+        all.put("_csrf", csrfTokenFrom(client.get(tokenPage).body().string()));
+        all.putAll(fields);
+        return postMultipart(client, path, all, file);
+    }
+
+    private static void write(ByteArrayOutputStream out, String s) {
+        out.writeBytes(s.getBytes(StandardCharsets.UTF_8));
     }
 
     private TestHttp() {}

@@ -20,7 +20,9 @@
       @endif
     </h1>
 
-    <form method="post" novalidate>
+    <%-- enctype 不能漏！默认的 urlencoded 不会传文件，
+         服务端 ctx.uploadedFile() 会一直拿到 null，而且没有任何报错 --%>
+    <form method="post" novalidate enctype="multipart/form-data">
       @template.tag.csrf(token = layout.csrfToken())
 
       @if(admin)
@@ -43,6 +45,25 @@
               </option>
             @endfor
           </select>
+        </div>
+      @endif
+
+      @if(!admin)
+        <div class="mb-3">
+          <label class="form-label" for="f-avatar">头像</label>
+          <div class="d-flex align-items-center gap-3">
+            @template.tag.avatar(user = layout.currentUser(), size = 64)
+            <div class="flex-grow-1">
+              <input class="form-control ${form.hasError("avatar") ? "is-invalid" : ""}"
+                     type="file" id="f-avatar" name="avatar"
+                     accept="image/png,image/jpeg,image/gif,image/webp">
+              @if(form.hasError("avatar"))
+                <div class="invalid-feedback">${form.error("avatar")}</div>
+              @else
+                <div class="form-text">PNG / JPEG / GIF / WebP，不超过 2 MB。不选就保持原样。</div>
+              @endif
+            </div>
+          </div>
         </div>
       @endif
 

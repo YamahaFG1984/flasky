@@ -11,7 +11,7 @@
 @for(var c : comments.page().items())
   <li class="d-flex gap-3 py-3 border-bottom ${c.disabled() ? "opacity-50" : ""}">
     <img class="rounded" width="32" height="32" loading="lazy"
-         src="${Gravatar.url(c.authorAvatarHash(), 32)}"
+         src="${c.authorAvatar().url(32)}"
          alt="${c.authorUsername()} 的头像">
 
     <div class="flex-grow-1">

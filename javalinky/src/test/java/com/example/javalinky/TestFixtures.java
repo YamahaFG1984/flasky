@@ -28,6 +28,7 @@ public final class TestFixtures {
             20, 50, 30,
             Long.MAX_VALUE,
             1000, 60,                           // 限流：测试里放得很宽
+            "target/test-avatars/" + UUID.randomUUID(),   // 每个测试一个独立目录
             false, false, true);
     }
 

@@ -15,7 +15,7 @@ public record PostListPage(Page<Item> page) {
         String bodyHtml,
         Instant timestamp,
         String authorUsername,
-        String authorAvatarHash,
+        com.example.javalinky.util.Avatar authorAvatar,
         long commentCount,
         boolean canEdit        // 当前访客能不能编辑这一篇
     ) {}
@@ -36,7 +36,7 @@ public record PostListPage(Page<Item> page) {
                 post.getBodyHtml(),
                 post.getTimestamp(),
                 post.getAuthor().getUsername(),
-                post.getAuthor().avatarHash(),
+                com.example.javalinky.util.Avatar.of(post.getAuthor()),
                 commentCounts.getOrDefault(post.getId(), 0L),
                 canEdit(viewer, post)))
             .toList();
