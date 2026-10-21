@@ -3,6 +3,9 @@ package com.example.javalinky;
 import com.example.javalinky.db.Db;
 import com.example.javalinky.db.UnitOfWork;
 import com.example.javalinky.db.UserRepository;
+import com.example.javalinky.mail.MailConfig;
+import com.example.javalinky.mail.MailService;
+import com.example.javalinky.mail.Mailer;
 import com.example.javalinky.model.User;
 import com.example.javalinky.web.*;
 import com.example.javalinky.web.form.LoginForm;
@@ -10,6 +13,7 @@ import com.example.javalinky.web.form.NameForm;
 import io.javalin.Javalin;
 import io.javalin.http.staticfiles.Location;
 import io.javalin.rendering.template.JavalinJte;
+import com.example.javalinky.web.Templates;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -25,11 +29,20 @@ public class App {
                 "jdbc:h2:./data/javalinky-dev;MODE=PostgreSQL"),
             System.getenv().getOrDefault("DATABASE_USER", "sa"),
             System.getenv().getOrDefault("DATABASE_PASSWORD", ""));
-        Runtime.getRuntime().addShutdownHook(new Thread(Db::close));
+        // 2. 邮件
+        var mailer = new Mailer(MailConfig.fromEnv());
+        var mail = new MailService(mailer,
+            System.getenv().getOrDefault("SITE_BASE_URL", "http://localhost:7070"));
 
-        // 2. Web
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            mailer.close();   // 等待排队中的邮件发完
+            Db.close();
+        }));
+
+        // 3. Web
         Javalin.create(config -> {
-            config.fileRenderer(new JavalinJte(JavalinJte.Companion.directoryTemplateEngine()));
+            // 第 6 章起共用 Templates.HTML：网页和 HTML 邮件是同一个引擎
+            config.fileRenderer(new JavalinJte(Templates.HTML));
             config.staticFiles.add(f -> {
                 f.directory = "/public";
                 f.location = Location.CLASSPATH;
@@ -77,6 +90,11 @@ public class App {
                 if (!known) {
                     users.save(new User(form.name() + "@example.com", form.name()));
                     // 不需要手动 commit —— UnitOfWork 的 after 过滤器会在请求结束时提交
+
+                    // 临时的试验路由，第 8 章会换成真正的注册流程
+                    mail.notifyAdminNewUser(
+                        System.getenv().getOrDefault("ADMIN_EMAIL", "admin@example.com"),
+                        form.name());
                 }
 
                 ctx.sessionAttribute("name", form.name());
