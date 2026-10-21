@@ -31,7 +31,19 @@ cd javalinky && mvn -q compile exec:exec
 | `jv-ch16` | 性能 | 查询计数、`Server-Timing`、N+1 回归测试 |
 | `jv-ch17` | 部署 | 预编译模板、日志、Docker、systemd、nginx |
 
-`master` 上就是第 18 章（也就是最终）的状态。
+进阶专题（第四部分，每一章都是一个独立的真实功能）：
+
+| 标签 | 章 | 加了什么 |
+|---|---|---|
+| `jv-ch19` | 并发与线程安全 | 令牌桶限流、`ConcurrentHashMap.compute`、并发测试 |
+| `jv-ch20` | 文件上传 | 头像上传、魔数识别、路径穿越防护 |
+| `jv-ch21` | 实时 | SSE 通知 + 心跳、WebSocket「正在输入」 |
+| `jv-ch22` | 登录增强 | OAuth2 + PKCE、TOTP 两步验证、恢复码 |
+| `jv-ch23` | 时区与国际化 | 用户时区/语言偏好、`ResourceBundle` |
+| `jv-ch24` | 依赖治理 | `maven-enforcer-plugin` 门槛，修掉 4 条真实冲突 |
+
+`master` 上就是最终（第 24 章）的状态。第 18 章「更多资源」和四份附录
+是纯文字，没有对应的代码标签。
 
 ## 跑起来
 
@@ -164,4 +176,4 @@ API 对不上、顺序不对、少了文件的地方。这些修正**已经全�
 完整清单在 [`TUTORIAL-DIFFS.md`](TUTORIAL-DIFFS.md)，当排错索引用：
 照着报错信息去里面搜，比重读一章快。
 
-每一章的标签都经过编译、测试和真实运行的验证。
+每一章的标签都经过编译、测试和真实运行的验证。目前共 **120 个测试**。

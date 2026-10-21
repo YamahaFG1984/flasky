@@ -247,6 +247,48 @@ mvn -q compile exec:exec                           # 启动
 <figcaption>图 18-1　Java Web 生态地图</figcaption>
 </figure>
 
+<h2 id="advanced">先别急着走：还有六个进阶专题</h2>
+
+<p>
+  主线到这里结束了，但<strong>第四部分还有六章</strong>。
+  它们不在原书的框架里，是 Java/Javalin 这边<strong>你迟早会撞上、
+  而主线里放不下</strong>的东西。每一章都往配套代码里加了一个真实功能，
+  有对应的 <code>jv-chNN</code> 标签。
+</p>
+
+<div class="tw">
+<table>
+<tr><th>章</th><th>讲什么</th><th>为什么值得读</th></tr>
+<tr><td><a href="ch19.html">19 · 并发与线程安全</a></td>
+    <td>竞态、可见性、原子操作、虚拟线程</td>
+    <td><strong>最推荐先读这一章。</strong>这是 Python/Node 程序员转 Java
+        最大的认知缺口 —— 不知道它，你会写出只在线上出现的 bug</td></tr>
+<tr><td><a href="ch20.html">20 · 文件上传</a></td>
+    <td>魔数识别、路径安全、三层大小限制</td>
+    <td>代码很少，但它是整个应用攻击面最大的入口</td></tr>
+<tr><td><a href="ch21.html">21 · 实时：SSE 与 WebSocket</a></td>
+    <td>服务器推送、连接回收、多实例</td>
+    <td>顺带回答「什么时候<em>不</em>该用 WebSocket」</td></tr>
+<tr><td><a href="ch22.html">22 · 第三方登录与两步验证</a></td>
+    <td>OAuth2 + PKCE、TOTP、恢复码</td>
+    <td>两个「照着抄容易、抄错了很难发现」的功能</td></tr>
+<tr><td><a href="ch23.html">23 · 时区与国际化</a></td>
+    <td>Instant vs 本地时间、夏令时、语言协商</td>
+    <td>平时看不出问题，到特定时刻集体出错</td></tr>
+<tr><td><a href="ch24.html">24 · 依赖治理</a></td>
+    <td>版本仲裁、enforcer、误报识别</td>
+    <td>第 8 章那个 <code>NoSuchMethodError</code> 的系统性解法</td></tr>
+</table>
+</div>
+
+<p>
+  另外还有<strong>四份附录</strong>，适合放在手边随时翻：
+  <a href="appendix-a.html">A · Flask → Javalin 对照</a>、
+  <a href="appendix-b.html">B · 速查表</a>、
+  <a href="appendix-c.html">C · 报错速查</a>（拿报错信息直接搜）、
+  <a href="appendix-d.html">D · TypeScript 对照</a>。
+</p>
+
 <h2 id="paths">接下来学什么</h2>
 
 <figure>
