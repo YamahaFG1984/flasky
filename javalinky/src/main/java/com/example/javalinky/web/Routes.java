@@ -32,6 +32,10 @@ public final class Routes {
         return "/edit/" + id;
     }
 
+    public static String adminEditProfile(long userId) {
+        return "/admin/edit-profile/" + userId;
+    }
+
     public static String follow(String username) {
         return "/follow/" + enc(username);
     }

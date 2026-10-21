@@ -7,10 +7,16 @@ import io.javalin.config.JavalinConfig;
 import io.javalin.http.Context;
 import io.javalin.http.UnauthorizedResponse;
 
+import java.time.Duration;
+import java.time.Instant;
+
 public final class CurrentUser {
 
     private static final String SESSION_KEY = "userId";
     private static final String CTX_KEY = "currentUser";
+
+    /** 最后活跃时间的最小更新间隔。每个请求都写一次库太浪费 */
+    private static final Duration PING_INTERVAL = Duration.ofMinutes(5);
 
     /** 装一个 before 过滤器，把当前用户加载进每个请求 */
     public static void install(JavalinConfig config) {
@@ -25,8 +31,16 @@ public final class CurrentUser {
                 return;
             }
             ctx.attribute(CTX_KEY, user);
-            // 第 10 章会在这里记录最后活跃时间
+            ping(user);
         });
+    }
+
+    private static void ping(User user) {
+        Instant now = Instant.now();
+        Instant last = user.getLastSeen();
+        if (last == null || Duration.between(last, now).compareTo(PING_INTERVAL) >= 0) {
+            user.setLastSeen(now);   // 托管对象，改字段 = 提交时 UPDATE
+        }
     }
 
     /** 当前用户，未登录返回 null */

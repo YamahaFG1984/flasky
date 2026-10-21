@@ -1,5 +1,6 @@
 package com.example.javalinky.model;
 
+import com.example.javalinky.util.Gravatar;
 import com.example.javalinky.util.Passwords;
 import jakarta.persistence.*;
 import java.time.Instant;
@@ -29,6 +30,22 @@ public class User {
 
     @Column(name = "member_since", nullable = false)
     private Instant memberSince = Instant.now();
+
+    @Column(length = 64)
+    private String name;            // 真名，可以不填
+
+    @Column(length = 64)
+    private String location;
+
+    @Column(name = "about_me", columnDefinition = "text")
+    private String aboutMe;
+
+    @Column(name = "last_seen")
+    private Instant lastSeen = Instant.now();
+
+    /** Gravatar 的邮箱哈希。缓存起来，避免每次渲染都算一遍 */
+    @Column(name = "avatar_hash", length = 32)
+    private String avatarHash;
 
     /** 关系的"多"这一侧：真正的外键列在这里 */
     @ManyToOne(fetch = FetchType.LAZY)
@@ -64,6 +81,30 @@ public class User {
     public Instant getMemberSince() { return memberSince; }
     public Role getRole() { return role; }
     public void setRole(Role role) { this.role = role; }
+
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public String getLocation() { return location; }
+    public void setLocation(String location) { this.location = location; }
+    public String getAboutMe() { return aboutMe; }
+    public void setAboutMe(String aboutMe) { this.aboutMe = aboutMe; }
+    public Instant getLastSeen() { return lastSeen; }
+    public void setLastSeen(Instant lastSeen) { this.lastSeen = lastSeen; }
+
+    /**
+     * 取 Gravatar 哈希。没有缓存就算一次并存下来。
+     * 第 8 章的“改邮箱”会把这个字段置 null，这里就会重算。
+     */
+    public String avatarHash() {
+        if (avatarHash == null || avatarHash.isBlank()) {
+            avatarHash = Gravatar.hash(email);
+        }
+        return avatarHash;
+    }
+
+    public void setAvatarHash(String hash) {
+        this.avatarHash = hash;
+    }
 
     /** 相当于原书的 user.can(permission) */
     public boolean can(Permission permission) {

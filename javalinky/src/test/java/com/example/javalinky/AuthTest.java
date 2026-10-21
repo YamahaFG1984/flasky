@@ -1,19 +1,14 @@
 package com.example.javalinky;
 
 import com.example.javalinky.config.AppConfig;
-import com.example.javalinky.db.Db;
-import com.example.javalinky.service.SeedService;
 import com.example.javalinky.util.Passwords;
-import io.javalin.testtools.FormBody;
-import io.javalin.testtools.HttpClient;
 import io.javalin.testtools.JavalinTest;
 import io.javalin.testtools.Response;
 import org.junit.jupiter.api.Test;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.regex.Pattern;
 
+import static com.example.javalinky.TestHttp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class AuthTest {
@@ -89,39 +84,4 @@ class AuthTest {
         });
     }
 
-    // ---------- 小工具（第 15 章会挪进 TestFixtures） ----------
-
-    private static final Pattern CSRF =
-        Pattern.compile("name=\"_csrf\" value=\"([^\"]+)\"");
-
-    static String csrfTokenFrom(String html) {
-        var m = CSRF.matcher(html);
-        assertThat(m.find()).as("页面里应该有 _csrf 隐藏域").isTrue();
-        return m.group(1);
-    }
-
-    static Map<String, String> form(String... pairs) {
-        var map = new LinkedHashMap<String, String>();
-        for (int i = 0; i < pairs.length; i += 2) map.put(pairs[i], pairs[i + 1]);
-        return map;
-    }
-
-    /** 灌入角色。相当于原书测试里的 Role.insert_roles()（第 15 章会挪进 TestFixtures） */
-    static void seedRoles() {
-        var em = Db.emf().createEntityManager();
-        try {
-            em.getTransaction().begin();
-            SeedService.use(em);
-            SeedService.insertRoles();
-            em.getTransaction().commit();
-        } finally {
-            em.close();
-        }
-    }
-
-    static Response postForm(HttpClient client, String path, Map<String, String> fields) {
-        var body = new FormBody.Builder();
-        fields.forEach(body::add);
-        return client.request(path, req -> req.post(body.build()));
-    }
 }

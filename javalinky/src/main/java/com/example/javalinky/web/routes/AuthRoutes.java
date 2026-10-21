@@ -392,7 +392,7 @@ public class AuthRoutes implements RouteModule {
         }
 
         user.setEmail(newEmail);
-        // 第 10 章：Gravatar 哈希是按邮箱算的，到时候要在这里重算
+        user.setAvatarHash(null);      // Gravatar 哈希是按邮箱算的，要重算
         Flash.success(ctx, "邮箱已更新。");
         ctx.redirect(Routes.INDEX);
     }
