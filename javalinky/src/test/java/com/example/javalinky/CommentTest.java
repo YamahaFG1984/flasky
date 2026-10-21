@@ -1,6 +1,5 @@
 package com.example.javalinky;
 
-import com.example.javalinky.config.AppConfig;
 import io.javalin.testtools.JavalinTest;
 import org.junit.jupiter.api.Test;
 
@@ -13,7 +12,7 @@ class CommentTest {
 
     @Test
     void 评论发布后出现在文章页() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -36,7 +35,7 @@ class CommentTest {
 
     @Test
     void 没有COMMENT权限的人看不到评论框() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
         createUserWithoutRole("noperm@example.com", "noperm");
@@ -58,7 +57,7 @@ class CommentTest {
 
     @Test
     void 协管员可以隐藏和恢复评论而普通读者看不到被隐藏的() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
         createUser("mod@example.com", "mod", "协管员");
@@ -104,7 +103,7 @@ class CommentTest {
 
     @Test
     void 文章列表的评论数只用一条聚合查询() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 

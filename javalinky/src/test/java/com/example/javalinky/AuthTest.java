@@ -1,6 +1,5 @@
 package com.example.javalinky;
 
-import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.util.Passwords;
 import io.javalin.testtools.JavalinTest;
 import io.javalin.testtools.Response;
@@ -25,7 +24,7 @@ class AuthTest {
 
     @Test
     void 未登录访问受保护页面会被挡住() {
-        JavalinTest.test(JavalinkyApp.create(AppConfig.load()), (server, client) -> {
+        JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -> {
             // 测试客户端默认不跟随重定向，所以能直接看到 302/401
             assertThat(client.get("/auth/change-password").code()).isIn(302, 401);
         });
@@ -33,7 +32,7 @@ class AuthTest {
 
     @Test
     void 没有CSRF令牌的POST会被拒绝() {
-        JavalinTest.test(JavalinkyApp.create(AppConfig.load()), (server, client) -> {
+        JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -> {
             Response r = postForm(client, "/auth/login", Map.of(
                 "email", "john@example.com", "password", "cat12345"));
             assertThat(r.code()).isEqualTo(403);
@@ -42,7 +41,7 @@ class AuthTest {
 
     @Test
     void 注册并登录的完整流程() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();          // 注册时要给新用户分配默认角色
 
         JavalinTest.test(app, (server, client) -> {
@@ -74,7 +73,7 @@ class AuthTest {
 
     @Test
     void 密码错误时不区分用户是否存在() {
-        JavalinTest.test(JavalinkyApp.create(AppConfig.load()), (server, client) -> {
+        JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -> {
             var r = postForm(client, "/auth/login", form(
                 "_csrf", csrfTokenFrom(client.get("/auth/login").body().string()),
                 "email", "nobody@example.com",

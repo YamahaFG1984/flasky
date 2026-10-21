@@ -1,6 +1,5 @@
 package com.example.javalinky;
 
-import com.example.javalinky.config.AppConfig;
 import io.javalin.testtools.JavalinTest;
 import org.junit.jupiter.api.Test;
 
@@ -11,7 +10,7 @@ class FollowTest {
 
     @Test
     void 关注与取消关注() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
         createUser("susan@example.com", "susan", "普通用户");
@@ -44,7 +43,7 @@ class FollowTest {
 
     @Test
     void 不能关注自己() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -57,7 +56,7 @@ class FollowTest {
 
     @Test
     void 自关注不计入对外显示的粉丝数() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
 
         JavalinTest.test(app, (server, client) -> {
@@ -76,7 +75,7 @@ class FollowTest {
 
     @Test
     void 只看关注的时间线一条SQL就能查出来() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
         createUser("susan@example.com", "susan", "普通用户");

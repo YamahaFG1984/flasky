@@ -1,0 +1,30 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven          # 缓存 ~/.m2，能省掉大部分下载时间
+
+      - name: 跑测试并生成覆盖率
+        run: mvn --batch-mode clean verify
+        working-directory: javalinky
+        env:
+          APP_PROFILE: test
+
+      - name: 上传覆盖率报告
+        if: always()            # 即使测试失败也上传，方便排查
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: javalinky/target/site/jacoco/

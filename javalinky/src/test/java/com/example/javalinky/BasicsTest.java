@@ -38,9 +38,8 @@ class BasicsTest {
         });
     }
 
+    /** 第 15 章起统一从 TestFixtures 拿配置：每次一个独立的内存库 */
     private static AppConfig testConfig() {
-        // 让 AppConfig.load() 走 TEST 分支。
-        // 第 15 章会用一个更干净的办法（直接暴露一个 AppConfig.forTest() 工厂）
-        return AppConfig.load();
+        return TestFixtures.config();
     }
 }

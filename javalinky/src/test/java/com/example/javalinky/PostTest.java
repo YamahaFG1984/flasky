@@ -1,6 +1,5 @@
 package com.example.javalinky;
 
-import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.util.Markdown;
 import io.javalin.testtools.JavalinTest;
 import org.junit.jupiter.api.Test;
@@ -39,7 +38,7 @@ class PostTest {
 
     @Test
     void 发文需要WRITE权限() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         // “测试角色”在 TestHttp 里会被造成拥有全部权限，所以这里直接用没有角色的用户
         createUserWithoutRole("noperm@example.com", "noperm");
@@ -53,7 +52,7 @@ class PostTest {
 
     @Test
     void 发文后首页能看到渲染好的HTML() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -73,7 +72,7 @@ class PostTest {
 
     @Test
     void 不能编辑别人的文章() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
         createUser("susan@example.com", "susan", "普通用户");

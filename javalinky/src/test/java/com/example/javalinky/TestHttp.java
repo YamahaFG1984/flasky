@@ -1,16 +1,11 @@
 package com.example.javalinky;
 
-import com.example.javalinky.db.Db;
-import com.example.javalinky.model.Permission;
-import com.example.javalinky.model.Role;
 import com.example.javalinky.model.User;
-import com.example.javalinky.service.SeedService;
 import io.javalin.testtools.FormBody;
 import io.javalin.testtools.HttpClient;
 import io.javalin.testtools.Response;
 import jakarta.persistence.EntityManager;
 
-import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -19,7 +14,7 @@ import java.util.regex.Pattern;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 测试里反复要用的几个动作。第 15 章会把它扩写成 TestFixtures。
+ * 测试里反复要用的 HTTP 动作。数据库夹具在 TestFixtures 里。
  *
  * 注意 javalin-testtools 的 client.post(path, body) 发的是 JSON，
  * 表单必须用 FormBody，否则服务端 ctx.formParam() 取不到值。
@@ -61,52 +56,31 @@ final class TestHttp {
         return client.get(path, req -> req.header("Accept", "text/html"));
     }
 
-    // ---------- 直接操作数据库的夹具 ----------
+    // ---------- 数据库夹具（转调 TestFixtures） ----------
 
     static void inTransaction(Consumer<EntityManager> work) {
-        var em = Db.emf().createEntityManager();
-        try {
-            em.getTransaction().begin();
-            work.accept(em);
-            em.getTransaction().commit();
-        } catch (RuntimeException e) {
-            if (em.getTransaction().isActive()) em.getTransaction().rollback();
-            throw e;
-        } finally {
-            em.close();
-        }
+        TestFixtures.withTransaction(work);
     }
 
-    /** 灌入角色。相当于原书测试里的 Role.insert_roles() */
     static void seedRoles() {
-        inTransaction(em -> {
-            SeedService.use(em);
-            SeedService.insertRoles();
-        });
+        TestFixtures.withTransaction(TestFixtures::seedRoles);
     }
 
     /** 造一个已确认的用户，密码统一是 cat12345 */
     static void createUser(String email, String username, String roleName) {
-        inTransaction(em -> {
-            Role role = em.createQuery("select r from Role r where r.name = :n", Role.class)
-                .setParameter("n", roleName)
-                .getResultStream().findFirst()
-                .orElseGet(() -> {
-                    Role fresh = new Role(roleName, EnumSet.allOf(Permission.class));
-                    em.persist(fresh);
-                    return fresh;
-                });
-            var user = new User(email.toLowerCase(), username);
-            user.setPassword("cat12345");
-            user.setConfirmed(true);
-            user.setRole(role);
-            em.persist(user);
+        TestFixtures.withTransaction(em -> {
+            User user = TestFixtures.user(em, username);
+            user.setEmail(email.toLowerCase());
+            if (!"普通用户".equals(roleName)) {
+                user.setRole(new com.example.javalinky.db.RoleRepository(em)
+                    .findByName(roleName).orElseThrow());
+            }
         });
     }
 
     /** 没有角色的用户：什么权限都没有 */
     static void createUserWithoutRole(String email, String username) {
-        inTransaction(em -> {
+        TestFixtures.withTransaction(em -> {
             var user = new User(email.toLowerCase(), username);
             user.setPassword("cat12345");
             user.setConfirmed(true);

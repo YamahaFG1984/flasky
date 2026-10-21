@@ -1,6 +1,5 @@
 package com.example.javalinky;
 
-import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.model.User;
 import io.javalin.testtools.JavalinTest;
 import org.junit.jupiter.api.Test;
@@ -12,7 +11,7 @@ class ProfileTest {
 
     @Test
     void 未登录访问编辑资料会被送去登录页() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         JavalinTest.test(app, (server, client) -> {
             var r = getAsBrowser(client, "/edit-profile");
             assertThat(r.code()).isEqualTo(302);
@@ -22,7 +21,7 @@ class ProfileTest {
 
     @Test
     void 本人可以编辑自己的资料() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -42,7 +41,7 @@ class ProfileTest {
 
     @Test
     void 超长的自我介绍会被挡下() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -57,7 +56,7 @@ class ProfileTest {
 
     @Test
     void 普通用户访问管理员页面返回403() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -70,7 +69,7 @@ class ProfileTest {
 
     @Test
     void 管理员可以改别人的角色和确认状态() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("admin@example.com", "root", "管理员");
         createUser("john@example.com", "john", "普通用户");

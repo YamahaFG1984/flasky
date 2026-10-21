@@ -18,6 +18,8 @@
     <javalin.version>7.2.3</javalin.version>
     <logback.version>1.5.20</logback.version>
     <jte.version>3.2.4</jte.version>
+    <!-- exec:exec@cli 的默认参数（不传就打印用法） -->
+    <cli.args></cli.args>
     <jackson.version>2.20.0</jackson.version>
     <junit.version>5.14.0</junit.version>
     <assertj.version>3.27.6</assertj.version>
@@ -209,6 +211,13 @@
       <version>${javalin.version}</version>
       <scope>test</scope>
     </dependency>
+    <!-- 端到端测试：真浏览器（默认不跑，见下面的 e2e profile） -->
+    <dependency>
+      <groupId>com.microsoft.playwright</groupId>
+      <artifactId>playwright</artifactId>
+      <version>1.57.0</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <!-- 4. 插件：告诉 Maven 用什么工具干活 -->
@@ -225,14 +234,20 @@
         <version>3.5.0</version>
         <configuration>
           <executable>java</executable>
-          <arguments>
-            <argument>-classpath</argument>
-            <classpath/>
-            <argument>com.example.javalinky.App</argument>
-          </arguments>
-          <!-- exec:java 用得到（第 1、2 章还没引入 JTE，两个都能跑） -->
-          <mainClass>com.example.javalinky.App</mainClass>
+          <!-- %classpath 由插件展开成完整的 classpath -->
+          <commandlineArgs>-classpath %classpath com.example.javalinky.App</commandlineArgs>
         </configuration>
+        <executions>
+          <!-- mvn compile exec:exec@cli -Dcli.args="seed-roles"
+               （fake 这类带参数的命令也一样：-Dcli.args="fake 30 60"） -->
+          <execution>
+            <id>cli</id>
+            <configuration>
+              <executable>java</executable>
+              <commandlineArgs>-classpath %classpath com.example.javalinky.Cli ${cli.args}</commandlineArgs>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
 
       <!-- 测试一律跑在 TEST 档位：内存库、不发邮件、随机端口 -->
@@ -244,6 +259,55 @@
           <environmentVariables>
             <APP_PROFILE>test</APP_PROFILE>
           </environmentVariables>
+          <!-- 端到端测试要下载 300 MB 浏览器，默认跳过：mvn -Pe2e test 才跑 -->
+          <excludes>
+            <exclude>**/e2e/**</exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+
+      <!-- 覆盖率 -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.8.13</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals><goal>prepare-agent</goal></goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>verify</phase>
+            <goals><goal>report</goal></goals>
+          </execution>
+          <execution>
+            <id>check</id>
+            <phase>verify</phase>
+            <goals><goal>check</goal></goals>
+            <configuration>
+              <rules>
+                <rule>
+                  <element>BUNDLE</element>
+                  <limits>
+                    <limit>
+                      <counter>LINE</counter>
+                      <value>COVEREDRATIO</value>
+                      <minimum>0.50</minimum>
+                    </limit>
+                  </limits>
+                </rule>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+        <configuration>
+          <excludes>
+            <!-- 生成的模板类、入口类不计入 -->
+            <exclude>gg/jte/generated/**</exclude>
+            <exclude>**/App.class</exclude>
+            <exclude>**/Cli.class</exclude>
+          </excludes>
         </configuration>
       </plugin>
 
@@ -273,4 +337,22 @@
       </plugin>
     </plugins>
   </build>
+  <profiles>
+    <!-- mvn -Pe2e test：连端到端测试一起跑（需要先装浏览器，见第 15 章） -->
+    <profile>
+      <id>e2e</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <excludes combine.self="override"/>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+
 </project>

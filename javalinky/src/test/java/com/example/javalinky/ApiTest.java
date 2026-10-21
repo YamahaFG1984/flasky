@@ -1,6 +1,5 @@
 package com.example.javalinky;
 
-import com.example.javalinky.config.AppConfig;
 import io.javalin.testtools.JavalinTest;
 import org.junit.jupiter.api.Test;
 
@@ -13,7 +12,7 @@ class ApiTest {
 
     @Test
     void 没有令牌一律401() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         JavalinTest.test(app, (server, client) -> {
             var r = client.get("/api/v1/posts");
             assertThat(r.code()).isEqualTo(401);
@@ -22,7 +21,7 @@ class ApiTest {
 
     @Test
     void 用Basic换令牌再用Bearer访问() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -39,7 +38,7 @@ class ApiTest {
 
     @Test
     void 密码错了换不到令牌() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -53,7 +52,7 @@ class ApiTest {
 
     @Test
     void 发文章返回201和Location头() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -79,7 +78,7 @@ class ApiTest {
 
     @Test
     void 实体字段不会泄漏到JSON里() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -100,7 +99,7 @@ class ApiTest {
 
     @Test
     void 不能改别人的文章() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
         createUser("susan@example.com", "susan", "普通用户");
@@ -124,7 +123,7 @@ class ApiTest {
 
     @Test
     void 校验失败返回400和字段明细() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
@@ -139,7 +138,7 @@ class ApiTest {
 
     @Test
     void API的404是JSON不是HTML页面() {
-        var app = JavalinkyApp.create(AppConfig.load());
+        var app = JavalinkyApp.create(TestFixtures.config());
         seedRoles();
         createUser("john@example.com", "john", "普通用户");
 
