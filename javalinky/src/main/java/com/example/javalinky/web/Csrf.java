@@ -29,6 +29,8 @@ public final class Csrf {
         // ② 不安全的方法：校验令牌
         config.routes.before(ctx -> {
             if (SAFE.contains(ctx.method().name())) return;
+            // API 不用 Cookie 会话，而是每次带 Bearer 令牌，天然不受 CSRF 影响
+            if (ctx.path().startsWith("/api/")) return;
 
             String sessionToken = ctx.sessionAttribute(SESSION_KEY);
             String submitted = ctx.formParam(FORM_FIELD);

@@ -7,7 +7,10 @@ import com.example.javalinky.mail.MailService;
 import com.example.javalinky.mail.Mailer;
 import com.example.javalinky.web.*;
 import com.example.javalinky.web.routes.*;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import gg.jte.TemplateEngine;
+import io.javalin.json.JavalinJackson;
 import io.javalin.Javalin;
 import io.javalin.http.staticfiles.Location;
 import io.javalin.rendering.template.JavalinJte;
@@ -39,6 +42,13 @@ public final class JavalinkyApp {
 
             javalin.fileRenderer(new JavalinJte(templates));
 
+            javalin.jsonMapper(new JavalinJackson().updateMapper(mapper -> {
+                mapper.registerModule(new JavaTimeModule());
+                // Instant 序列化成 ISO-8601 字符串（"2026-10-21T08:30:00Z"）
+                // 而不是 epoch 秒的小数
+                mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+            }));
+
             javalin.staticFiles.add(f -> {
                 f.directory = "/public";
                 f.location = Location.CLASSPATH;
@@ -64,9 +74,10 @@ public final class JavalinkyApp {
             // 错误页
             ErrorPages.install(javalin);
 
-            // 路由模块（相当于 Flask 的蓝本）。ApiRoutes 在第 14 章加入
+            // 路由模块（相当于 Flask 的蓝本）
             new MainRoutes(cfg, services).register(javalin);
             new AuthRoutes(cfg, services).register(javalin);
+            new ApiRoutes(cfg, services).register(javalin);
 
             // 优雅关闭
             javalin.events.serverStopping(() -> {

@@ -125,6 +125,17 @@
       <version>2.3.232</version>
     </dependency>
 
+    <!-- JSON（版本由上面的 jackson-bom 统一管理） -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <!-- 没有它，Instant 会被序列化成一个难看的对象 -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+    </dependency>
+
     <!-- Markdown 渲染 -->
     <dependency>
       <groupId>org.commonmark</groupId>
