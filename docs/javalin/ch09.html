@@ -1,0 +1,882 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 9 章 · 用户角色 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="9">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 9 章</span>
+<h1>用户角色</h1>
+<p class="lede">
+  上一章解决了“你是谁”（认证），这一章解决“你能干什么”（授权）。
+  我们会用位标志实现一套灵活的权限系统，然后接到 Javalin 的
+  <strong>路由角色</strong>机制上 —— 这是 Javalin 原生支持的功能，用起来比 Flask 的装饰器更清爽。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解为什么用“权限位”而不是“角色名字符串”做判断</li>
+    <li>会用位运算和 <code>EnumSet</code> 两种方式表达权限集合</li>
+    <li>写一个可重复执行的角色播种任务</li>
+    <li>用 Javalin 的 <code>RouteRole</code> + <code>beforeMatched</code> 实现声明式权限校验</li>
+    <li>处理好“匿名用户”这个边界情况</li>
+    <li>在模板里按权限显示/隐藏功能</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">为什么不是一个 <code>isAdmin</code> 布尔值</h2>
+
+<p>
+  最朴素的做法是给 <code>User</code> 加一个 <code>boolean admin</code>。
+  但很快就不够用了：我们需要“能发文章但不能协管评论”的普通用户、
+  “能协管评论但不能改别人资料”的协管员、以及“什么都能干”的管理员。
+</p>
+
+<p>
+  第二种做法是存角色名字符串，然后到处写 <code>if (user.getRole().equals("协管员"))</code>。
+  这个做法的问题是：<strong>判断的是身份，而不是能力</strong>。
+  等你想加一个"高级会员"角色（也能协管评论）时，
+  得去代码里把所有相关的 <code>if</code> 找出来改一遍。
+</p>
+
+<p>
+  原书的做法（也是业界通行做法）是分成两层：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="角色与权限的两层结构">
+  <rect class="bx-b" x="40" y="40" width="190" height="120" rx="10"/>
+  <text class="ttl on-b" x="135" y="62" text-anchor="middle">角色（Role）</text>
+  <text class="sm" x="135" y="82" text-anchor="middle">给人看的身份标签</text>
+  <rect class="bx" x="58" y="92" width="154" height="22" rx="4"/><text class="sm" x="135" y="107" text-anchor="middle">普通用户</text>
+  <rect class="bx" x="58" y="118" width="154" height="22" rx="4"/><text class="sm" x="135" y="133" text-anchor="middle">协管员</text>
+  <rect class="bx" x="58" y="144" width="154" height="10" rx="3"/>
+
+  <rect class="bx-a" x="300" y="40" width="190" height="120" rx="10"/>
+  <text class="ttl on-a" x="395" y="62" text-anchor="middle">权限（Permission）</text>
+  <text class="sm" x="395" y="82" text-anchor="middle">给代码判断的能力</text>
+  <rect class="bx" x="318" y="92" width="154" height="22" rx="4"/><text class="sm" x="395" y="107" text-anchor="middle">WRITE 发文章</text>
+  <rect class="bx" x="318" y="118" width="154" height="22" rx="4"/><text class="sm" x="395" y="133" text-anchor="middle">MODERATE 协管评论</text>
+  <rect class="bx" x="318" y="144" width="154" height="10" rx="3"/>
+
+  <rect class="bx-g" x="560" y="40" width="160" height="120" rx="10"/>
+  <text class="ttl on-g" x="640" y="62" text-anchor="middle">代码里只问权限</text>
+  <text class="mono" x="640" y="88" text-anchor="middle">user.can(WRITE)</text>
+  <text class="sm" x="640" y="112" text-anchor="middle">从不问</text>
+  <text class="mono on-r" x="640" y="130" text-anchor="middle">role == "协管员"</text>
+
+  <path class="ln-a" d="M232 100 H296" marker-end="url(#ar-a)"/>
+  <text class="sm" x="264" y="92" text-anchor="middle">拥有</text>
+  <path class="ln-g" d="M492 100 H556" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-d" x="60" y="182" width="640" height="48" rx="9"/>
+  <text class="lbl" x="80" y="204">好处：新增角色、调整某个角色的权限，<tspan class="on-g">完全不用改代码</tspan> —— 只改数据库里那一行。</text>
+  <text class="sm" x="80" y="222">这叫 RBAC（基于角色的访问控制），几乎所有需要权限的系统都是这个结构。</text>
+</svg>
+<figcaption>图 9-1　角色是给人看的，权限是给代码判断的</figcaption>
+</figure>
+
+<h2 id="bits">权限的表示：位标志</h2>
+
+<p>
+  一个角色拥有<strong>一组</strong>权限。怎么把“一组”存进数据库的一列？
+  原书的答案是位标志：给每个权限分配一个 2 的幂，整个集合就是它们的和。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="权限的位标志表示与角色权限矩阵">
+  <text class="ttl" x="20" y="20">每个权限占一个二进制位</text>
+  <rect class="bx" x="20" y="30" width="720" height="86" rx="9"/>
+  <text class="mono" x="40" y="52">FOLLOW   = 1  = 0b00001　关注别人</text>
+  <text class="mono" x="400" y="52">MODERATE = 8  = 0b01000　协管评论</text>
+  <text class="mono" x="40" y="74">COMMENT  = 2  = 0b00010　发表评论</text>
+  <text class="mono" x="400" y="74">ADMIN    = 16 = 0b10000　管理员</text>
+  <text class="mono" x="40" y="96">WRITE    = 4  = 0b00100　发布文章</text>
+  <text class="sm on-a" x="400" y="96">往后扩展就用 32、64、128……一个 int 够放 31 个权限</text>
+
+  <text class="ttl" x="20" y="146">三种角色对应的整数</text>
+  <rect class="bx-b" x="20" y="156" width="720" height="104" rx="9"/>
+
+  <text class="sm" x="40" y="178">角色</text>
+  <text class="sm" x="180" y="178">权限</text>
+  <text class="sm" x="520" y="178">二进制</text>
+  <text class="sm" x="650" y="178">存进库的值</text>
+  <line class="ln" x1="36" y1="184" x2="724" y2="184"/>
+
+  <text class="lbl" x="40" y="206">普通用户</text>
+  <text class="sm" x="180" y="206">FOLLOW + COMMENT + WRITE</text>
+  <text class="mono on-a" x="520" y="206">0b00111</text>
+  <text class="mono on-a" x="660" y="206">7</text>
+
+  <text class="lbl" x="40" y="228">协管员</text>
+  <text class="sm" x="180" y="228">上面三个 + MODERATE</text>
+  <text class="mono on-a" x="520" y="228">0b01111</text>
+  <text class="mono on-a" x="660" y="228">15</text>
+
+  <text class="lbl" x="40" y="250">管理员</text>
+  <text class="sm" x="180" y="250">全部五个</text>
+  <text class="mono on-a" x="520" y="250">0b11111</text>
+  <text class="mono on-a" x="660" y="250">31</text>
+
+  <rect class="bx-g" x="20" y="274" width="720" height="40" rx="9"/>
+  <text class="lbl on-g" x="40" y="294">判断"有没有某个权限"就是一次按位与：</text>
+  <text class="mono" x="330" y="294">(permissions &amp; WRITE) == WRITE</text>
+  <text class="sm" x="40" y="309">例：协管员 15 &amp; MODERATE 8 = 8 → 有。普通用户 7 &amp; 8 = 0 → 没有。一次 CPU 指令的事。</text>
+</svg>
+<figcaption>图 9-2　位标志：一个整数存一组权限</figcaption>
+</figure>
+
+<h3>Java 版：枚举 + EnumSet</h3>
+
+<p>
+  原书用一组 <code>int</code> 常量。Java 可以做得更好：用<strong>枚举</strong>表达权限，
+  用 <code>EnumSet</code> 表达集合，只在存数据库时转成整数。
+  这样代码里拿到的是类型安全的枚举，不会把 <code>8</code> 和 <code>16</code> 写混。
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/model/Permission.java">
+<pre>
+package com.example.javalinky.model;
+
+import io.javalin.security.RouteRole;
+import java.util.EnumSet;
+import java.util.Set;
+
+/**
+ * 一项权限。
+ * 实现 Javalin 的 RouteRole 接口，这样可以直接写在路由声明上 —— 见本章后面。
+ */
+public enum Permission implements RouteRole {
+
+    FOLLOW(1),      // 关注别人
+    COMMENT(2),     // 发表评论
+    WRITE(4),       // 发布文章
+    MODERATE(8),    // 协管别人的评论
+    ADMIN(16);      // 管理员
+
+    private final int bit;
+
+    Permission(int bit) {
+        this.bit = bit;
+    }
+
+    public int bit() {
+        return bit;
+    }
+
+    // ---------- 整数 ↔ 集合 ----------
+
+    /** 把数据库里的整数解析成权限集合 */
+    public static EnumSet&lt;Permission&gt; fromBits(int bits) {
+        EnumSet&lt;Permission&gt; set = EnumSet.noneOf(Permission.class);
+        for (Permission p : values()) {
+            if ((bits &amp; p.bit) == p.bit) set.add(p);
+        }
+        return set;
+    }
+
+    /** 把权限集合打包成一个整数 */
+    public static int toBits(Set&lt;Permission&gt; permissions) {
+        int bits = 0;
+        for (Permission p : permissions) bits |= p.bit;
+        return bits;
+    }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么不直接用 <code>@ElementCollection</code> 存一张权限表</div>
+  <p>
+    JPA 确实支持把集合映射成独立的表（<code>role_permissions</code>）。那样做更"范式化"，
+    而且加新权限不受 31 个的限制。
+  </p>
+  <p>
+    但位标志有一个决定性优势：<strong>判断权限不需要查数据库</strong>。
+    <code>permissions</code> 就是 <code>roles</code> 表里的一个 int 列，
+    随角色一起被加载，之后的每次判断都是纯内存的位运算。
+    权限判断在每个请求里都要做好几次，这个差别很实在。
+  </p>
+</div>
+
+<h3>Role 实体</h3>
+
+<div class="code" data-lang="java" data-file="model/Role.java（更新）">
+<pre>
+package com.example.javalinky.model;
+
+import jakarta.persistence.*;
+import java.util.EnumSet;
+import java.util.Set;
+
+@Entity
+@Table(name = "roles")
+public class Role {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(length = 64, unique = true, nullable = false)
+    private String name;
+
+    @Column(name = "is_default", nullable = false)
+    private boolean defaultRole;
+
+    /** 权限位。数据库里是一个 int，代码里尽量别直接碰它 */
+    @Column(nullable = false)
+    private int permissions;
+
+    @OneToMany(mappedBy = "role", fetch = FetchType.LAZY)
+    private java.util.List&lt;User&gt; users = new java.util.ArrayList&lt;&gt;();
+
+    protected Role() {}
+
+    public Role(String name, Set&lt;Permission&gt; permissions) {
+        this.name = name;
+        this.permissions = Permission.toBits(permissions);
+    }
+
+    // ---------- 权限操作 ----------
+
+    public EnumSet&lt;Permission&gt; permissions() {
+        return Permission.fromBits(permissions);
+    }
+
+    public void setPermissions(Set&lt;Permission&gt; permissions) {
+        this.permissions = Permission.toBits(permissions);
+    }
+
+    public boolean has(Permission permission) {
+        return (permissions &amp; permission.bit()) == permission.bit();
+    }
+
+    public void add(Permission permission) {
+        permissions |= permission.bit();
+    }
+
+    public void remove(Permission permission) {
+        permissions &amp;= ~permission.bit();
+    }
+
+    public void resetPermissions() {
+        permissions = 0;
+    }
+
+    // ---------- 普通访问器 ----------
+    public Long getId() { return id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public boolean isDefaultRole() { return defaultRole; }
+    public void setDefaultRole(boolean v) { this.defaultRole = v; }
+    public int getPermissionBits() { return permissions; }
+
+    @Override
+    public String toString() { return "Role[" + name + "]"; }
+}
+</pre>
+</div>
+
+<h3>User 上的权限查询</h3>
+
+<div class="code" data-lang="java" data-file="model/User.java（新增方法）">
+<pre>
+/** 相当于原书的 user.can(permission) */
+public boolean can(Permission permission) {
+    return role != null &amp;&amp; role.has(permission);
+}
+
+public boolean isAdministrator() {
+    return can(Permission.ADMIN);
+}
+</pre>
+</div>
+
+<h2 id="seed">角色播种</h2>
+
+<p>
+  角色数据是“系统配置”而不是“用户数据”，所以应该由代码保证它存在。
+  原书用一个 <code>Role.insert_roles()</code> 静态方法，关键特性是
+  <strong>可以重复执行，每次都把角色调整到代码声明的状态</strong>
+  （这叫幂等）—— 这样部署新版本时直接跑一遍就行。
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/service/SeedService.java">
+<pre>
+package com.example.javalinky.service;
+
+import com.example.javalinky.model.Permission;
+import com.example.javalinky.model.Role;
+import jakarta.persistence.EntityManager;
+
+import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+
+public class SeedService {
+
+    /** 角色的唯一定义处。要改权限，改这里然后重新跑 seed-roles。 */
+    private static final Map&lt;String, Set&lt;Permission&gt;&gt; ROLES = new LinkedHashMap&lt;&gt;();
+    private static final String DEFAULT_ROLE = "普通用户";
+
+    static {
+        ROLES.put("普通用户", EnumSet.of(
+            Permission.FOLLOW, Permission.COMMENT, Permission.WRITE));
+        ROLES.put("协管员", EnumSet.of(
+            Permission.FOLLOW, Permission.COMMENT, Permission.WRITE,
+            Permission.MODERATE));
+        ROLES.put("管理员", EnumSet.allOf(Permission.class));
+    }
+
+    private static EntityManager em;
+
+    public static void use(EntityManager entityManager) {
+        em = entityManager;
+    }
+
+    /**
+     * 创建或更新全部角色。幂等：跑一次和跑一百次结果一样。
+     * 相当于原书的 Role.insert_roles()。
+     */
+    public static void insertRoles() {
+        ROLES.forEach((name, permissions) -&gt; {
+            Role role = em.createQuery("select r from Role r where r.name = :n", Role.class)
+                .setParameter("n", name)
+                .getResultStream().findFirst()
+                .orElseGet(() -&gt; {
+                    Role fresh = new Role(name, Set.of());
+                    em.persist(fresh);
+                    return fresh;
+                });
+
+            // 每次都按代码里的定义重设，这样调整权限后重跑即可生效
+            role.setPermissions(permissions);
+            role.setDefaultRole(name.equals(DEFAULT_ROLE));
+        });
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn -q compile exec:java -Dexec.mainClass=com.example.javalinky.Cli -Dexec.args="seed-roles"
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; “幂等”为什么这么重要</div>
+  <p>
+    第 17 章部署时，<code>Cli deploy</code> 会在<strong>每次发版</strong>时执行这个方法。
+    如果它不幂等（比如无脑 <code>persist</code> 新角色），
+    第二次部署就会因为唯一约束失败，或者产生重复数据。
+  </p>
+  <p>
+    判断一个任务是否幂等的方法很简单：<strong>连着跑两次，结果应该完全一样。</strong>
+    所有部署脚本都该满足这一条。
+  </p>
+</div>
+
+<h3>角色分配</h3>
+
+<div class="code" data-lang="java" data-file="db/RoleRepository.java">
+<pre>
+package com.example.javalinky.db;
+
+import com.example.javalinky.model.Role;
+import jakarta.persistence.EntityManager;
+import java.util.List;
+import java.util.Optional;
+
+public class RoleRepository {
+
+    private final EntityManager em;
+
+    public RoleRepository(EntityManager em) {
+        this.em = em;
+    }
+
+    /** 新用户的默认角色 */
+    public Role defaultRole() {
+        return em.createQuery(
+                "select r from Role r where r.defaultRole = true", Role.class)
+            .getResultStream().findFirst()
+            .orElseThrow(() -&gt; new IllegalStateException(
+                "没有默认角色，请先执行 Cli seed-roles"));
+    }
+
+    public Optional&lt;Role&gt; findByName(String name) {
+        return em.createQuery("select r from Role r where r.name = :n", Role.class)
+            .setParameter("n", name)
+            .getResultStream().findFirst();
+    }
+
+    public Optional&lt;Role&gt; findById(long id) {
+        return Optional.ofNullable(em.find(Role.class, id));
+    }
+
+    /** 管理员后台的角色下拉框要用（第 10 章） */
+    public List&lt;Role&gt; findAll() {
+        return em.createQuery("select r from Role r order by r.name", Role.class)
+            .getResultList();
+    }
+}
+</pre>
+</div>
+
+<p>
+  注册时分配角色。原书有个贴心设计：<strong>配置里指定的管理员邮箱自动获得管理员角色</strong>，
+  这样不用手动改数据库就能有第一个管理员：
+</p>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java（register 里的一段）">
+<pre>
+var roles = services.roles(ctx);
+Role role = email.equalsIgnoreCase(cfg.adminEmail())
+    ? roles.findByName("管理员").orElseGet(roles::defaultRole)
+    : roles.defaultRole();
+
+var user = new User(email, form.username());
+user.setPassword(form.password());
+user.setRole(role);
+users.save(user);
+</pre>
+</div>
+
+<h2 id="routerole">Javalin 的路由角色</h2>
+
+<p>
+  原书用两个自定义装饰器做权限校验：
+</p>
+
+<div class="code" data-lang="python">
+<pre>
+@main.route('/moderate')
+@login_required
+@permission_required(Permission.MODERATE)
+def moderate():
+    ...
+</pre>
+</div>
+
+<p>
+  Javalin 内置了这个概念，叫 <strong>路由角色（RouteRole）</strong>：
+  声明路由时把需要的角色<strong>作为最后一个参数</strong>传进去，
+  然后在一个统一的 <code>beforeMatched</code> 过滤器里检查。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 310" role="img" aria-label="Javalin 路由角色的声明与校验流程">
+  <text class="ttl" x="20" y="20">① 声明路由时写上需要的角色</text>
+  <rect class="bx-b" x="20" y="30" width="720" height="76" rx="9"/>
+  <text class="mono" x="40" y="54">get("/",            this::index);                        <tspan class="on-g">// 不写 = 公开</tspan></text>
+  <text class="mono" x="40" y="74">get("/edit-profile", this::editProfile, Access.AUTHENTICATED);  <tspan class="on-b">// 要登录</tspan></text>
+  <text class="mono" x="40" y="94">get("/moderate",    this::moderate,   Permission.MODERATE);     <tspan class="on-a">// 要权限</tspan></text>
+
+  <path class="ln-a" d="M380 108 V128" marker-end="url(#ar-a)"/>
+
+  <text class="ttl" x="20" y="146">② beforeMatched 统一检查</text>
+  <rect class="bx-a" x="20" y="156" width="720" height="48" rx="9"/>
+  <text class="mono" x="40" y="180">Set&lt;RouteRole&gt; required = ctx.routeRoles();   <tspan class="sm">// 这条路由声明了什么</tspan></text>
+  <text class="mono" x="40" y="198">User user = CurrentUser.get(ctx);             <tspan class="sm">// 当前是谁</tspan></text>
+
+  <path class="ln-a" d="M190 206 V226" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M380 206 V226" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M570 206 V226" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="30" y="228" width="300" height="34" rx="7"/>
+  <text class="sm on-g" x="180" y="250" text-anchor="middle">无需求，或者权限够 → 放过</text>
+
+  <rect class="bx-b" x="340" y="228" width="180" height="34" rx="7"/>
+  <text class="sm on-b" x="430" y="250" text-anchor="middle">没登录 → 跳登录页</text>
+
+  <rect class="bx-r" x="530" y="228" width="200" height="34" rx="7"/>
+  <text class="sm on-r" x="630" y="250" text-anchor="middle">登录了但权限不够 → 403</text>
+
+  <rect class="bx-d" x="60" y="276" width="640" height="28" rx="7"/>
+  <text class="sm" x="380" y="295" text-anchor="middle">好处：权限需求<tspan class="on-a">写在路由表上</tspan>，一眼能看完全站的权限布局；校验逻辑只有一处</text>
+</svg>
+<figcaption>图 9-3　路由角色：声明在路由上，校验在一处</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; Javalin 6 的一个重要变更</div>
+  <p>
+    Javalin 5 及以前有一个 <code>AccessManager</code> 接口专门做这件事。
+    它在 <strong>Javalin 6 被移除</strong>了，官方推荐改用 <code>beforeMatched</code> +
+    <code>ctx.routeRoles()</code>——也就是本章的做法。
+    如果你在网上看到 <code>config.accessManager(...)</code> 的代码，那是旧版本的写法。
+  </p>
+</div>
+
+<h3>定义两组角色</h3>
+
+<p>
+  <code>Permission</code> 已经实现了 <code>RouteRole</code>，但我们还需要表达
+  “只要登录就行，不关心具体权限”，所以再加一个枚举：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Access.java">
+<pre>
+package com.example.javalinky.web;
+
+import io.javalin.security.RouteRole;
+
+public enum Access implements RouteRole {
+    /** 任何人都能访问（不写角色时的默认行为，写出来是为了可读性） */
+    PUBLIC,
+    /** 必须登录，但不要求任何具体权限 */
+    AUTHENTICATED
+}
+</pre>
+</div>
+
+<h3>校验过滤器</h3>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Authorization.java">
+<pre>
+package com.example.javalinky.web;
+
+import com.example.javalinky.model.Permission;
+import com.example.javalinky.model.User;
+import io.javalin.config.JavalinConfig;
+import io.javalin.http.Context;
+import io.javalin.http.ForbiddenResponse;
+import io.javalin.http.UnauthorizedResponse;
+import io.javalin.security.RouteRole;
+
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Set;
+
+public final class Authorization {
+
+    public static void install(JavalinConfig config) {
+        config.routes.beforeMatched(Authorization::check);
+    }
+
+    private static void check(Context ctx) {
+        Set&lt;? extends RouteRole&gt; required = ctx.routeRoles();
+
+        // 1. 没声明角色，或者显式声明公开 → 放过
+        if (required.isEmpty() || required.contains(Access.PUBLIC)) return;
+
+        User user = CurrentUser.get(ctx);
+
+        // 2. 需要身份但没登录
+        if (user == null) {
+            denyAnonymous(ctx);
+            return;
+        }
+
+        // 3. 逐个检查权限要求（声明了多个就必须全部满足）
+        for (RouteRole role : required) {
+            if (role instanceof Permission permission &amp;&amp; !user.can(permission)) {
+                throw new ForbiddenResponse("你没有执行这个操作的权限");
+            }
+        }
+        // Access.AUTHENTICATED 到这里已经满足了（user != null）
+    }
+
+    /**
+     * 未登录时的处理要分两种客户端：
+     *   浏览器 → 跳到登录页，并记住他原本想去哪
+     *   API    → 返回 401，让客户端自己处理
+     */
+    private static void denyAnonymous(Context ctx) {
+        boolean wantsHtml = ctx.header("Accept") != null
+            &amp;&amp; ctx.header("Accept").contains("text/html");
+
+        if (!wantsHtml || ctx.path().startsWith("/api/")) {
+            throw new UnauthorizedResponse("请先登录");
+        }
+
+        Flash.warning(ctx, "请先登录。");
+        String next = URLEncoder.encode(ctx.fullUrl(), StandardCharsets.UTF_8);
+        ctx.redirect(Routes.LOGIN + "?next=" + next);
+        ctx.skipRemainingHandlers();
+    }
+
+    private Authorization() {}
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 注册顺序：Authorization 必须在 CurrentUser 之后</div>
+  <p>
+    <code>Authorization</code> 要用 <code>CurrentUser.get(ctx)</code>，
+    所以加载用户的那个 <code>before</code> 过滤器必须先跑。
+    在 <code>JavalinkyApp.create()</code> 里的顺序是：
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+UnitOfWork.install(javalin);     // ① 开事务（后面都要用数据库）
+Csrf.install(javalin);           // ② 校验 CSRF 令牌
+CurrentUser.install(javalin);    // ③ 加载当前用户（before）
+Authorization.install(javalin);  // ④ 检查权限（beforeMatched）
+</pre>
+  </div>
+  <p>
+    注意 ③ 用的是 <code>before</code>、④ 用的是 <code>beforeMatched</code>——
+    即使注册顺序写反了，Javalin 也保证所有 <code>before</code> 在所有
+    <code>beforeMatched</code> 之前执行。但写成符合逻辑的顺序更不容易出错。
+  </p>
+</div>
+
+<h3>用起来</h3>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+@Override
+public void register(JavalinConfig config) {
+    config.routes.apiBuilder(() -&gt; {
+
+        // 公开页面
+        get("/",               this::index);
+        get("/user/{username}", this::userProfile);
+        get("/post/{id}",       this::post);
+
+        // 必须登录
+        get("/edit-profile",   this::editProfileForm, Access.AUTHENTICATED);
+        post("/edit-profile",  this::editProfile,     Access.AUTHENTICATED);
+
+        // 需要 FOLLOW 权限
+        post("/follow/{username}",   this::follow,   Permission.FOLLOW);
+        post("/unfollow/{username}", this::unfollow, Permission.FOLLOW);
+
+        // 需要 WRITE 权限
+        post("/post",      this::createPost, Permission.WRITE);
+        get("/edit/{id}",  this::editPostForm, Permission.WRITE);
+        post("/edit/{id}", this::editPost,     Permission.WRITE);
+
+        // 整个前缀都需要 MODERATE 权限 —— path 块可以挂角色
+        path("/moderate", List.of(Permission.MODERATE), () -&gt; {
+            get("",                     this::moderate);
+            post("/enable/{id}",        this::enableComment);
+            post("/disable/{id}",       this::disableComment);
+        });
+
+        // 管理员专属
+        path("/admin", List.of(Permission.ADMIN), () -&gt; {
+            get("/edit-profile/{id}",  this::adminEditProfileForm);
+            post("/edit-profile/{id}", this::adminEditProfile);
+        });
+    });
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; <code>path()</code> 上挂角色的两个好处</div>
+  <ol>
+    <li><strong>不会漏。</strong>往 <code>/moderate</code> 块里加新路由时，
+        权限自动继承 —— 不会出现"新加的那个接口忘了加装饰器"这种经典漏洞。</li>
+    <li><strong>可叠加。</strong>外层 <code>path</code> 的角色会和内层的合并，
+        所以可以做"整个 <code>/admin</code> 要登录，其中删除操作还要额外权限"这种分层。</li>
+  </ol>
+</div>
+
+<h2 id="anonymous">匿名用户</h2>
+
+<p>
+  模板里写 <code>layout.currentUser().can(Permission.WRITE)</code>，
+  如果没登录就会 <code>NullPointerException</code>。
+  原书的解法是定义一个 <code>AnonymousUser</code> 类，它的 <code>can()</code> 永远返回 false，
+  这样模板里不用判空。
+</p>
+
+<p>Java 里更简单：在 <code>Layout</code> 上加一个方法，把判空收在一处。</p>
+
+<div class="code" data-lang="java" data-file="web/Layout.java（新增）">
+<pre>
+/** 当前用户是否有某权限。未登录一律返回 false —— 相当于原书的 AnonymousUser */
+public boolean can(Permission permission) {
+    return currentUser != null &amp;&amp; currentUser.can(permission);
+}
+
+public boolean isAdmin() {
+    return can(Permission.ADMIN);
+}
+
+/** 当前用户是否就是这个人（判断"编辑自己的资料"用） */
+public boolean is(User other) {
+    return currentUser != null &amp;&amp; other != null
+        &amp;&amp; currentUser.getId().equals(other.getId());
+}
+</pre>
+</div>
+
+<div class="code" data-lang="jte">
+<pre>
+@import com.example.javalinky.model.Permission
+
+&lt;%-- 不用判断是否登录，can() 自己处理了 --%&gt;
+@if(layout.can(Permission.WRITE))
+  &lt;form method="post" action="/post"&gt;
+    @template.tag.csrf(token = layout.csrfToken())
+    @template.tag.textarea(form = form, name = "body", label = "想说点什么？")
+    &lt;button class="btn btn-primary" type="submit"&gt;发布&lt;/button&gt;
+  &lt;/form&gt;
+@endif
+
+@if(layout.can(Permission.MODERATE))
+  &lt;a class="nav-link" href="/moderate"&gt;协管评论&lt;/a&gt;
+@endif
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 模板里隐藏按钮<strong>不是</strong>权限控制</div>
+  <p>
+    藏起按钮只是为了界面干净。任何人都可以直接
+    <code>curl -X POST https://你的站/moderate/disable/5</code>。
+  </p>
+  <p>
+    <strong>真正的防线是路由上声明的 <code>RouteRole</code></strong>，服务端强制执行。
+    模板判断和路由声明必须<strong>同时</strong>存在：
+    前者是体验，后者是安全。
+  </p>
+</div>
+
+<h2 id="migration">别忘了迁移</h2>
+
+<p>
+  <code>roles</code> 表在第 5 章的 <code>V1</code> 里已经有 <code>permissions</code> 列了，
+  所以本章不需要新迁移。但如果你当时没加，现在补一个：
+</p>
+
+<div class="code" data-lang="sql" data-file="src/main/resources/db/migration/V3__role_permissions.sql">
+<pre>
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS permissions INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_default  BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS ix_roles_is_default ON roles (is_default);
+</pre>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本章对应原书 <b>git checkout 9a</b>（角色与权限）。</div>
+</div>
+
+<h2 id="tests">测试权限</h2>
+
+<p>
+  权限逻辑是纯内存计算，不依赖 HTTP 也不依赖数据库 ——
+  这正是最值得写单元测试的那一类代码。
+</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/PermissionTest.java">
+<pre>
+package com.example.javalinky;
+
+import com.example.javalinky.model.Permission;
+import com.example.javalinky.model.Role;
+import com.example.javalinky.model.User;
+import org.junit.jupiter.api.Test;
+
+import java.util.EnumSet;
+import java.util.Set;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class PermissionTest {
+
+    @Test
+    void 位标志能正确往返转换() {
+        var set = EnumSet.of(Permission.FOLLOW, Permission.WRITE);
+        int bits = Permission.toBits(set);
+
+        assertThat(bits).isEqualTo(1 + 4);
+        assertThat(Permission.fromBits(bits)).isEqualTo(set);
+    }
+
+    @Test
+    void 普通用户不能协管评论() {
+        var role = new Role("普通用户", EnumSet.of(
+            Permission.FOLLOW, Permission.COMMENT, Permission.WRITE));
+        var user = new User("u@example.com", "u");
+        user.setRole(role);
+
+        assertThat(user.can(Permission.WRITE)).isTrue();
+        assertThat(user.can(Permission.MODERATE)).isFalse();
+        assertThat(user.isAdministrator()).isFalse();
+    }
+
+    @Test
+    void 管理员拥有全部权限() {
+        var role = new Role("管理员", EnumSet.allOf(Permission.class));
+        var user = new User("a@example.com", "a");
+        user.setRole(role);
+
+        for (Permission p : Permission.values()) {
+            assertThat(user.can(p)).as("管理员应该有 %s", p).isTrue();
+        }
+    }
+
+    @Test
+    void 没有角色的用户什么都不能干() {
+        var user = new User("x@example.com", "x");    // role 为 null
+        for (Permission p : Permission.values()) {
+            assertThat(user.can(p)).isFalse();
+        }
+    }
+
+    @Test
+    void 增删权限() {
+        var role = new Role("测试", Set.of());
+        assertThat(role.has(Permission.WRITE)).isFalse();
+
+        role.add(Permission.WRITE);
+        role.add(Permission.WRITE);       // 加两次应该等于加一次
+        assertThat(role.has(Permission.WRITE)).isTrue();
+        assertThat(role.getPermissionBits()).isEqualTo(Permission.WRITE.bit());
+
+        role.remove(Permission.WRITE);
+        assertThat(role.has(Permission.WRITE)).isFalse();
+    }
+}
+</pre>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>跑一遍 <code>Cli seed-roles</code>，然后用 JShell 或数据库客户端查看 <code>roles</code> 表，
+        确认 <code>permissions</code> 列的值是 7 / 15 / 31。</li>
+    <li>把 <code>SeedService</code> 里"协管员"的权限去掉 <code>WRITE</code>，
+        重新跑 <code>seed-roles</code>，确认那一行的整数变了。<strong>这验证了幂等更新。</strong></li>
+    <li>用一个普通用户登录，然后直接在地址栏访问 <code>/moderate</code>。
+        确认看到 403 页面。再把那个用户的角色改成协管员，刷新，确认能进去了。</li>
+    <li>给 <code>Permission</code> 加一个新权限 <code>UPLOAD(32)</code>，加进"管理员"角色，
+        重新播种。然后写一条需要 <code>Permission.UPLOAD</code> 的路由，验证只有管理员能访问。</li>
+    <li>在模板里<strong>不加</strong><code>@if(layout.can(...))</code>，
+        但路由上保留 <code>Permission.MODERATE</code>。
+        用普通用户登录，点那个本不该看到的按钮，确认请求被服务端拒绝 ——
+        这就是"模板判断是体验、路由声明是安全"的实证。</li>
+    <li>反过来做一次：模板里加了 <code>@if</code>，但路由上<strong>忘了</strong>写角色。
+        用 <code>curl</code> 直接 POST，看看会发生什么。
+        （这个练习的目的是让你记住这种漏洞长什么样。）</li>
+    <li>把 <code>Authorization.check()</code> 改成“声明了多个 Permission 时只要满足其中一个即可”
+        （OR 而不是 AND），思考哪种语义更符合你的直觉，以及哪种更安全。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

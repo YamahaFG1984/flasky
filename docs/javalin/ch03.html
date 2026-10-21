@@ -1,0 +1,1196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 3 章 · 模板 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="3">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 3 章</span>
+<h1>模板</h1>
+<p class="lede">
+  上一章我们把 HTML 字符串拼在 Java 代码里，这显然不是长久之计 —— 而且还留了个 XSS 漏洞。
+  这一章引入模板引擎 <strong>JTE</strong>，把“页面长什么样”从“业务怎么跑”里拆出去；
+  顺便把 Bootstrap、自定义错误页、静态文件和时间本地化都搞定。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解“业务逻辑”和“表现逻辑”为什么要分开</li>
+    <li>会用 JTE：<code>@param</code>、<code>${}</code>、<code>@if</code>、<code>@for</code>、模板调用</li>
+    <li>理解 JTE 的自动转义如何挡住 XSS，以及 <code>$unsafe{}</code> 为什么危险</li>
+    <li>用 <code>gg.jte.Content</code> 实现“模板继承”，建出全站统一的布局</li>
+    <li>配好 Bootstrap、静态文件和自定义 404 / 500 页面</li>
+    <li>知道服务端为什么只存 UTC，以及怎么让浏览器显示本地时间</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">为什么需要模板</h2>
+
+<p>
+  原书这一章开头说得很清楚：视图函数其实背着两个完全独立的职责。
+  以“用户注册”为例：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="业务逻辑与表现逻辑的分离">
+  <rect class="bx-r" x="20" y="24" width="300" height="190" rx="10"/>
+  <text class="ttl on-r" x="170" y="48" text-anchor="middle">混在一起（上一章的写法）</text>
+  <rect class="bx" x="40" y="62" width="260" height="134" rx="7"/>
+  <text class="mono" x="54" y="84">handler(ctx) {</text>
+  <text class="mono on-r" x="66" y="104">查数据库、建用户　&#8592; 业务</text>
+  <text class="mono on-b" x="66" y="124">"&lt;h1&gt;" + name + "&lt;/h1&gt;"</text>
+  <text class="mono on-b" x="66" y="142">　　　　　　　&#8592; 表现</text>
+  <text class="mono on-r" x="66" y="162">发邮件　　　　　&#8592; 业务</text>
+  <text class="mono" x="54" y="184">}</text>
+
+  <rect class="bx-g" x="440" y="24" width="300" height="190" rx="10"/>
+  <text class="ttl on-g" x="590" y="48" text-anchor="middle">分开之后</text>
+  <rect class="bx" x="460" y="62" width="260" height="62" rx="7"/>
+  <text class="mono" x="474" y="84">handler(ctx) {</text>
+  <text class="mono on-r" x="486" y="102">业务：建用户、发邮件</text>
+  <text class="mono on-a" x="486" y="118">ctx.render("ok.jte", 数据)</text>
+
+  <rect class="bx-b" x="460" y="134" width="260" height="62" rx="7"/>
+  <text class="mono on-b" x="474" y="156">ok.jte</text>
+  <text class="sm" x="474" y="174">&lt;h1&gt;Hello, ${name}!&lt;/h1&gt;</text>
+  <text class="sm" x="474" y="190">只管页面长什么样</text>
+
+  <path class="ln-a" d="M590 124 V132" marker-end="url(#ar-a)"/>
+  <path class="ln" d="M324 120 H436" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 3-1　模板把“表现逻辑”从处理器里拿出去</figcaption>
+</figure>
+
+<p>
+  <strong>模板</strong>就是一个带占位符的响应文本；把占位符换成真实数据、得到最终字符串的过程叫<strong>渲染</strong>。
+  Flask 用 Jinja2 渲染模板，本教程用 <strong>JTE</strong>（Java Template Engine）。
+</p>
+
+<h2 id="jte">为什么是 JTE：编译期检查</h2>
+
+<p>
+  Java 有一堆模板引擎：Thymeleaf、FreeMarker、Velocity、Mustache、Pebble……
+  Javalin 的 <code>javalin-rendering-*</code> 系列都支持。
+  （顺便说一句，<strong>Pebble</strong> 的语法几乎就是 Jinja2 的 Java 版，
+  如果你想要和原书一模一样的 <code>{% if %}</code> / <code>{{ }}</code> 写法，它是最省心的选择。）
+</p>
+
+<p>
+  但本教程选 <strong>JTE</strong>，因为它干了一件别的引擎不做的事：
+  <strong>把每个模板编译成一个真正的 Java 类</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="Jinja2 的运行时解释与 JTE 的编译期生成对比">
+  <text class="ttl" x="20" y="20">Jinja2 / Thymeleaf：运行时解释</text>
+  <rect class="bx-d" x="20" y="32" width="330" height="106" rx="9"/>
+  <rect class="bx-b" x="36" y="46" width="130" height="34" rx="6"/>
+  <text class="mono on-b" x="101" y="67" text-anchor="middle">index.html</text>
+  <path class="ln-b" d="M168 63 H200" marker-end="url(#ar-b)"/>
+  <rect class="bx" x="204" y="46" width="130" height="34" rx="6"/>
+  <text class="sm" x="269" y="67" text-anchor="middle">运行时解析 + 反射取值</text>
+  <rect class="bx-r" x="36" y="90" width="298" height="36" rx="6"/>
+  <text class="sm on-r" x="185" y="106" text-anchor="middle">模板里把 user.nmae 写错？</text>
+  <text class="sm on-r" x="185" y="121" text-anchor="middle">要等用户访问这个页面时才报错</text>
+
+  <text class="ttl" x="410" y="20">JTE：编译成 Java 类</text>
+  <rect class="bx-d" x="410" y="32" width="330" height="106" rx="9"/>
+  <rect class="bx-b" x="426" y="46" width="94" height="34" rx="6"/>
+  <text class="mono on-b" x="473" y="67" text-anchor="middle">index.jte</text>
+  <path class="ln-a" d="M522 63 H548" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="552" y="46" width="172" height="34" rx="6"/>
+  <text class="sm on-a" x="638" y="62" text-anchor="middle">生成 JteindexGenerated.java</text>
+  <text class="sm" x="638" y="76" text-anchor="middle">再交给 javac 编译</text>
+  <rect class="bx-g" x="426" y="90" width="298" height="36" rx="6"/>
+  <text class="sm on-g" x="575" y="106" text-anchor="middle">写错 user.nmae？</text>
+  <text class="sm on-g" x="575" y="121" text-anchor="middle">mvn compile 当场失败，附带模板行号</text>
+
+  <rect class="bx" x="20" y="158" width="720" height="118" rx="10"/>
+  <text class="ttl" x="36" y="180">这带来三个实际好处</text>
+  <text class="lbl" x="36" y="204">① <tspan class="on-a">重构安全</tspan>　给 Java 字段改名，IDE 会连模板里的引用一起改（装 JTE 插件后）</text>
+  <text class="lbl" x="36" y="228">② <tspan class="on-a">速度</tspan>　渲染就是执行一个普通 Java 方法，没有解析、没有反射</text>
+  <text class="lbl" x="36" y="252">③ <tspan class="on-a">转义更准</tspan>　编译期就知道 ${} 落在 HTML 正文、属性里还是 onclick 里，按位置选转义规则</text>
+  <text class="sm" x="36" y="270">代价：加一个字段要重启应用（改模板内容不用）。这个取舍对长期维护的项目很值。</text>
+</svg>
+<figcaption>图 3-2　运行时解释 vs 编译期生成</figcaption>
+</figure>
+
+<h3>加依赖</h3>
+
+<div class="code" data-lang="xml" data-file="pom.xml（新增片段）">
+<pre>
+&lt;properties&gt;
+  &lt;!-- ... --&gt;
+  &lt;jte.version&gt;3.2.4&lt;/jte.version&gt;
+&lt;/properties&gt;
+
+&lt;dependencies&gt;
+  &lt;!-- ... --&gt;
+
+  &lt;!-- Javalin 与 JTE 的胶水层：提供 JavalinJte --&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;io.javalin&lt;/groupId&gt;
+    &lt;artifactId&gt;javalin-rendering-jte&lt;/artifactId&gt;
+    &lt;version&gt;${javalin.version}&lt;/version&gt;
+  &lt;/dependency&gt;
+
+  &lt;!-- JTE 本体（含运行时编译器，开发期热加载需要它） --&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;gg.jte&lt;/groupId&gt;
+    &lt;artifactId&gt;jte&lt;/artifactId&gt;
+    &lt;version&gt;${jte.version}&lt;/version&gt;
+  &lt;/dependency&gt;
+&lt;/dependencies&gt;
+</pre>
+</div>
+
+<h3>注册模板引擎</h3>
+
+<div class="code" data-lang="java" data-file="App.java">
+<pre>
+import io.javalin.Javalin;
+import io.javalin.rendering.template.JavalinJte;
+
+Javalin.create(config -&gt; {
+    // directoryTemplateEngine() 从 src/main/jte 目录读模板：
+    // 改 .jte 文件，刷新浏览器就生效，不用重启应用
+    config.fileRenderer(new JavalinJte(JavalinJte.directoryTemplateEngine()));
+
+    // ...
+}).start(7070);
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 开发模式 vs 生产模式</div>
+  <p>
+    <code>new JavalinJte()</code>（不传参）从 <strong>classpath</strong> 加载<strong>已经预编译好</strong>的模板类，
+    启动快、没有运行时编译器开销 —— 这是生产环境该用的。
+    预编译由 <code>jte-maven-plugin</code> 在 <code>mvn package</code> 时完成，第 17 章会配。
+  </p>
+  <p>
+    <code>JavalinJte.directoryTemplateEngine()</code> 从目录读源文件、运行时编译，支持热加载 —— 开发时用这个。
+    第 7 章我们会按环境自动切换。
+  </p>
+</div>
+
+<h2 id="first">第一个模板</h2>
+
+<p>
+  模板放在 <code>src/main/jte/</code>，扩展名 <code>.jte</code>。先把上一章的两个页面搬过去：
+</p>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/index.jte">
+<pre>
+&lt;h1&gt;Hello World!&lt;/h1&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/user.jte">
+<pre>
+@param String name
+
+&lt;h1&gt;Hello, ${name}!&lt;/h1&gt;
+</pre>
+</div>
+
+<p>
+  <code>@param String name</code> 是 JTE 和 Jinja2 最大的不同：
+  <strong>模板必须声明它需要什么数据，以及类型</strong>。
+  这行声明会变成生成类的方法参数 —— 所以少传、多传、传错类型都会编译失败。
+</p>
+
+<div class="code" data-lang="java" data-file="App.java">
+<pre>
+import java.util.Map;
+
+config.routes.get("/", ctx -&gt; ctx.render("index.jte"));
+
+config.routes.get("/user/{name}", ctx -&gt;
+    ctx.render("user.jte", Map.of("name", ctx.pathParam("name"))));
+</pre>
+</div>
+
+<p>
+  <code>ctx.render(模板路径, 模型)</code> 里的“模型”是一个 <code>Map&lt;String, Object&gt;</code>，
+  <strong>键名必须和模板里 <code>@param</code> 的参数名对上</strong>。
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python">
+<pre>
+@app.route('/user/&lt;name&gt;')
+def user(name):
+    return render_template('user.html', name=name)
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Javalin</div>
+    <div class="code" data-lang="java">
+<pre>
+config.routes.get("/user/{name}", ctx -&gt;
+    ctx.render("user.jte",
+        Map.of("name", ctx.pathParam("name"))));
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 3a</b>。</div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>Map.of()</code> 不允许 null 值</div>
+  <p>
+    <code>Map.of("name", null)</code> 会抛 <code>NullPointerException</code>。
+    模型里可能有 null 的时候用 <code>HashMap</code>，或者更好的办法 ——
+    <strong>定义一个页面记录类</strong>（下一节马上讲），这是本教程推荐的做法。
+  </p>
+</div>
+
+<h2 id="pagerecord">用 record 当“页面模型”</h2>
+
+<p>
+  <code>Map</code> 能用，但它丢掉了 JTE 最大的优势：类型安全。
+  一旦页面需要五六个变量，推荐换成 Java 21 的 <code>record</code>：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/UserPage.java">
+<pre>
+package com.example.javalinky.web;
+
+public record UserPage(String name, int visits) {}
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/user.jte">
+<pre>
+@import com.example.javalinky.web.UserPage
+@param UserPage page
+
+&lt;h1&gt;Hello, ${page.name()}!&lt;/h1&gt;
+&lt;p&gt;你是第 ${page.visits()} 次来了。&lt;/p&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java">
+<pre>
+config.routes.get("/user/{name}", ctx -&gt;
+    ctx.render("user.jte", Map.of("page", new UserPage(ctx.pathParam("name"), 3))));
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么这样更好</div>
+  <ul>
+    <li>模板里写 <code>page.nmae()</code> &rarr; <strong>编译失败</strong>，而不是页面上出现空白。</li>
+    <li>给 record 加字段，IDE 会提示所有用到它的模板。</li>
+    <li>处理器的返回数据有了明确的“契约”，看代码就知道这个页面需要什么。</li>
+  </ul>
+  <p>后面章节的所有页面都用这个模式。<code>record</code> 一行就能定义，成本极低。</p>
+</div>
+
+<h2 id="syntax">JTE 语法速查</h2>
+
+<p>对照原书的 Jinja2 语法表，下面是一一对应的清单：</p>
+
+<div class="tw">
+<table>
+<tr><th>要做的事</th><th>Jinja2</th><th>JTE</th></tr>
+<tr><td>输出变量</td><td><code>{{ name }}</code></td><td><code>${name}</code></td></tr>
+<tr><td>输出不转义的 HTML</td><td><code>{{ html|safe }}</code></td><td><code>$unsafe{html}</code></td></tr>
+<tr><td>条件</td><td><code>{% if x %}…{% else %}…{% endif %}</code></td><td><code>@if(x)…@else…@endif</code></td></tr>
+<tr><td>多分支</td><td><code>{% elif x %}</code></td><td><code>@elseif(x)</code></td></tr>
+<tr><td>循环</td><td><code>{% for p in posts %}…{% endfor %}</code></td><td><code>@for(Post p : posts)…@endfor</code></td></tr>
+<tr><td>空列表时的内容</td><td>需要额外 <code>{% if %}</code></td><td><code>@for(…)…@else…@endfor</code></td></tr>
+<tr><td>注释</td><td><code>{# … #}</code></td><td><code>&lt;%-- … --%&gt;</code></td></tr>
+<tr><td>局部变量</td><td><code>{% set x = … %}</code></td><td><code>!{var x = …;}</code></td></tr>
+<tr><td>引入其他模板</td><td><code>{% include 'x.html' %}</code></td><td><code>@template.x()</code></td></tr>
+<tr><td>宏 / 可复用片段</td><td><code>{% macro %}</code> + <code>{% import %}</code></td><td>就是一个普通模板 + <code>@template.路径.名字(参数)</code></td></tr>
+<tr><td>模板继承</td><td><code>{% extends %}</code> + <code>{% block %}</code></td><td><code>@param Content content</code> + <code>@`…`</code>（下一节）</td></tr>
+<tr><td>过滤器</td><td><code>{{ s|upper }}</code></td><td>直接调 Java 方法：<code>${s.toUpperCase()}</code></td></tr>
+</table>
+</div>
+
+<p>
+  注意最后一行：JTE 没有“过滤器”这个概念，因为<strong>你可以直接在模板里写 Java 表达式</strong>。
+  这既是优点（不用学一套新的过滤器名字）也是风险（容易把业务逻辑写进模板）。
+  规矩是：模板里只做格式化，任何需要判断“业务上该不该”的事都放回 Java。
+</p>
+
+<h3>循环与索引</h3>
+
+<div class="code" data-lang="jte">
+<pre>
+@import gg.jte.support.ForSupport
+@import java.util.List
+
+@param List&lt;String&gt; comments
+
+&lt;ul&gt;
+@for(var loop : ForSupport.of(comments))
+    &lt;li class="${loop.getIndex() % 2 == 0 ? "even" : "odd"}"&gt;
+        ${loop.getIndex() + 1}. ${loop.get()}
+    &lt;/li&gt;
+@else
+    &lt;li class="text-muted"&gt;还没有人评论&lt;/li&gt;
+@endfor
+&lt;/ul&gt;
+</pre>
+</div>
+
+<h2 id="xss">自动转义：上一章那个漏洞</h2>
+
+<p>
+  上一章我们留了个 XSS 漏洞。现在用模板重写之后，试着访问：
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+http://localhost:7070/user/&lt;script&gt;alert('xss')&lt;/script&gt;
+</pre>
+</div>
+
+<p>页面上会老老实实显示这串文字，<strong>没有弹窗</strong>。查看网页源码会发现 JTE 输出的是：</p>
+
+<div class="code" data-lang="html">
+<pre>
+&lt;h1&gt;Hello, &amp;lt;script&amp;gt;alert('xss')&amp;lt;/script&amp;gt;!&lt;/h1&gt;
+</pre>
+</div>
+
+<p>
+  JTE 的转义比“统一替换几个字符”更聪明：它在编译模板时<strong>看得懂 HTML 结构</strong>，
+  所以能根据 <code>${}</code> 所在的位置选择正确的转义规则：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="JTE 按 HTML 上下文选择转义策略">
+  <rect class="bx-a" x="250" y="16" width="260" height="40" rx="9"/>
+  <text class="ttl on-a" x="380" y="41" text-anchor="middle">编译期分析模板的 HTML 结构</text>
+
+  <rect class="bx-b" x="20" y="96" width="220" height="80" rx="9"/>
+  <text class="sm on-b" x="30" y="116">① 在标签正文里</text>
+  <text class="mono" x="30" y="136">&lt;p&gt;${x}&lt;/p&gt;</text>
+  <text class="sm" x="30" y="156">用 HTML 正文转义</text>
+  <text class="sm" x="30" y="170">&lt; &gt; &amp; 变成实体</text>
+
+  <rect class="bx-g" x="270" y="96" width="220" height="80" rx="9"/>
+  <text class="sm on-g" x="280" y="116">② 在属性值里</text>
+  <text class="mono" x="280" y="136">&lt;a href="${x}"&gt;</text>
+  <text class="sm" x="280" y="156">用 HTML 属性转义</text>
+  <text class="sm" x="280" y="170">引号也要处理，否则能逃出属性</text>
+
+  <rect class="bx-p" x="520" y="96" width="220" height="80" rx="9"/>
+  <text class="sm on-p" x="530" y="116">③ 在 on* 事件属性里</text>
+  <text class="mono" x="530" y="136">&lt;div onclick="${x}"&gt;</text>
+  <text class="sm" x="530" y="156">用 JavaScript 转义</text>
+  <text class="sm" x="530" y="170">规则又不一样</text>
+
+  <path class="ln-a" d="M300 58 L160 92" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M380 58 V92" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M460 58 L600 92" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-r" x="130" y="196" width="500" height="34" rx="8"/>
+  <text class="lbl on-r" x="380" y="218" text-anchor="middle">$unsafe{x} 跳过全部转义 &mdash; 只在你 100% 确定内容安全时用</text>
+</svg>
+<figcaption>图 3-3　同一个变量，在不同位置需要不同的转义规则</figcaption>
+</figure>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>$unsafe{}</code> 的使用纪律</div>
+  <p>
+    第 11 章我们会让用户用 Markdown 写文章，渲染出来的 HTML 必须用 <code>$unsafe{}</code> 输出
+    （否则用户看到的是 <code>&amp;lt;p&amp;gt;</code> 这种东西）。
+  </p>
+  <p>
+    那时的安全保证<strong>不来自模板</strong>，而来自“写入数据库之前已经用
+    OWASP HTML Sanitizer 清洗过标签白名单”。
+    规矩是：<strong><code>$unsafe{}</code> 输出的内容，必须是服务端自己清洗过的。</strong>
+    用户直接输入的字符串永远不要用 <code>$unsafe{}</code>。
+  </p>
+</div>
+
+<h2 id="layout">布局：JTE 版的“模板继承”</h2>
+
+<p>
+  原书用 Jinja2 的 <code>{% extends %}</code> + <code>{% block %}</code> 做模板继承：
+  父模板定义骨架，留出几个“洞”，子模板填洞。
+</p>
+
+<p>
+  JTE 把这件事<strong>反过来</strong>：没有“继承”，只有“函数调用”。
+  布局是一个接收 <code>Content</code> 参数的普通模板，页面调用它并把自己的内容作为参数传进去。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="Jinja2 的继承与 JTE 的内容块参数对比">
+  <text class="ttl" x="20" y="20">Jinja2：子模板“继承”父模板</text>
+  <rect class="bx-d" x="20" y="32" width="330" height="200" rx="9"/>
+  <rect class="bx-b" x="38" y="46" width="294" height="76" rx="6"/>
+  <text class="mono on-b" x="50" y="66">base.html</text>
+  <text class="sm" x="50" y="84">&lt;html&gt; … {% block content %}</text>
+  <text class="sm" x="50" y="100">　　　　　{% endblock %} … &lt;/html&gt;</text>
+  <text class="sm" x="50" y="116">定义骨架，留洞</text>
+
+  <rect class="bx" x="38" y="140" width="294" height="76" rx="6"/>
+  <text class="mono" x="50" y="160">index.html</text>
+  <text class="sm" x="50" y="178">{% extends "base.html" %}</text>
+  <text class="sm" x="50" y="194">{% block content %}&lt;h1&gt;…{% endblock %}</text>
+  <text class="sm" x="50" y="210">声明“我是 base 的子模板”，填洞</text>
+
+  <path class="ln-b" d="M185 138 V126" marker-end="url(#ar-b)"/>
+
+  <text class="ttl" x="410" y="20">JTE：页面“调用”布局并传入内容</text>
+  <rect class="bx-d" x="410" y="32" width="330" height="200" rx="9"/>
+  <rect class="bx" x="428" y="46" width="294" height="76" rx="6"/>
+  <text class="mono" x="440" y="66">index.jte</text>
+  <text class="sm" x="440" y="84">@template.layout.base(</text>
+  <text class="sm" x="440" y="100">　content = @`&lt;h1&gt;…&lt;/h1&gt;`)</text>
+  <text class="sm" x="440" y="116">主动调用布局，把自己当参数传进去</text>
+
+  <rect class="bx-a" x="428" y="140" width="294" height="76" rx="6"/>
+  <text class="mono on-a" x="440" y="160">layout/base.jte</text>
+  <text class="sm" x="440" y="178">@param Content content</text>
+  <text class="sm" x="440" y="194">&lt;html&gt; … ${content} … &lt;/html&gt;</text>
+  <text class="sm" x="440" y="210">就是一个接收 Content 参数的普通模板</text>
+
+  <path class="ln-a" d="M575 124 V136" marker-end="url(#ar-a)"/>
+</svg>
+<figcaption>图 3-4　两种复用方式：继承（Jinja2）与组合（JTE）</figcaption>
+</figure>
+
+<p>
+  组合的好处是：<strong>一个页面可以往布局里塞多个块</strong>（内容、侧栏、页脚额外脚本），
+  而且可以嵌套调用，没有“单继承”限制。
+</p>
+
+<h3>Javalinky 的基础布局</h3>
+
+<p>
+  这是我们一路用到第 17 章的布局模板。它包含了 Bootstrap、导航栏、Flash 消息区（第 4 章填内容）：
+</p>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/layout/base.jte">
+<pre>
+@import gg.jte.Content
+@import com.example.javalinky.web.Layout
+
+@param Layout layout
+@param Content content
+@param Content extraScripts = null
+
+&lt;!DOCTYPE html&gt;
+&lt;html lang="zh-CN"&gt;
+&lt;head&gt;
+  &lt;meta charset="utf-8"&gt;
+  &lt;meta name="viewport" content="width=device-width, initial-scale=1"&gt;
+  &lt;title&gt;${layout.title()} - Javalinky&lt;/title&gt;
+  &lt;link rel="icon" href="/favicon.ico"&gt;
+  &lt;link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"&gt;
+  &lt;link rel="stylesheet" href="/css/app.css"&gt;
+&lt;/head&gt;
+&lt;body&gt;
+
+&lt;nav class="navbar navbar-expand-lg navbar-dark bg-dark"&gt;
+  &lt;div class="container"&gt;
+    &lt;a class="navbar-brand" href="/"&gt;Javalinky&lt;/a&gt;
+    &lt;button class="navbar-toggler" type="button"
+            data-bs-toggle="collapse" data-bs-target="#nav"&gt;
+      &lt;span class="navbar-toggler-icon"&gt;&lt;/span&gt;
+    &lt;/button&gt;
+    &lt;div class="collapse navbar-collapse" id="nav"&gt;
+      &lt;ul class="navbar-nav me-auto"&gt;
+        &lt;li class="nav-item"&gt;&lt;a class="nav-link" href="/"&gt;首页&lt;/a&gt;&lt;/li&gt;
+      &lt;/ul&gt;
+      &lt;ul class="navbar-nav"&gt;
+        &lt;%-- 第 8 章在这里放登录/账户菜单 --%&gt;
+      &lt;/ul&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/nav&gt;
+
+&lt;div class="container py-4"&gt;
+  &lt;%-- 第 4 章在这里渲染 Flash 消息 --%&gt;
+  ${content}
+&lt;/div&gt;
+
+&lt;script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"&gt;&lt;/script&gt;
+&lt;script src="/js/app.js"&gt;&lt;/script&gt;
+@if(extraScripts != null)
+  ${extraScripts}
+@endif
+
+&lt;/body&gt;
+&lt;/html&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Layout.java">
+<pre>
+package com.example.javalinky.web;
+
+/** 所有页面都需要的、和布局有关的数据。第 8 章会往里加 currentUser。 */
+public record Layout(String title) {
+
+    public static Layout of(String title) {
+        return new Layout(title);
+    }
+}
+</pre>
+</div>
+
+<p>页面模板现在变成这样：</p>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/index.jte">
+<pre>
+@import com.example.javalinky.web.Layout
+
+@param Layout layout
+
+@template.layout.base(layout = layout, content = @`
+    &lt;div class="p-4 mb-4 bg-body-tertiary rounded-3"&gt;
+        &lt;h1 class="display-5"&gt;Hello World!&lt;/h1&gt;
+        &lt;p class="lead text-secondary"&gt;欢迎来到 Javalinky。&lt;/p&gt;
+    &lt;/div&gt;
+`)
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/user.jte">
+<pre>
+@import com.example.javalinky.web.Layout
+@import com.example.javalinky.web.UserPage
+
+@param Layout layout
+@param UserPage page
+
+@template.layout.base(layout = layout, content = @`
+    &lt;div class="pb-3 mb-4 border-bottom"&gt;
+        &lt;h1&gt;Hello, ${page.name()}!&lt;/h1&gt;
+    &lt;/div&gt;
+    &lt;p&gt;你是第 ${page.visits()} 次来了。&lt;/p&gt;
+`)
+</pre>
+</div>
+
+<div class="code" data-lang="java">
+<pre>
+config.routes.get("/", ctx -&gt;
+    ctx.render("index.jte", Map.of("layout", Layout.of("首页"))));
+
+config.routes.get("/user/{name}", ctx -&gt; {
+    String name = ctx.pathParam("name");
+    ctx.render("user.jte", Map.of(
+        "layout", Layout.of(name),
+        "page", new UserPage(name, 3)
+    ));
+});
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 少写点样板：一个 render 小助手</div>
+  <p>
+    每个处理器都手写 <code>Map.of("layout", ...)</code> 很啰嗦。
+    加一个工具方法，后面所有章节都用它：
+  </p>
+  <div class="code" data-lang="java" data-file="web/View.java">
+<pre>
+package com.example.javalinky.web;
+
+import io.javalin.http.Context;
+import java.util.HashMap;
+import java.util.Map;
+
+public final class View {
+
+    /** 渲染页面，自动补上 layout。pairs 是 "键", 值, "键", 值 … */
+    public static void render(Context ctx, String template, String title, Object... pairs) {
+        Map&lt;String, Object&gt; model = new HashMap&lt;&gt;();
+        model.put("layout", Layout.of(title));
+        for (int i = 0; i &lt; pairs.length; i += 2) {
+            model.put((String) pairs[i], pairs[i + 1]);   // HashMap 允许 null 值
+        }
+        ctx.render(template, model);
+    }
+
+    private View() {}
+}
+</pre>
+  </div>
+  <div class="code" data-lang="java">
+<pre>
+config.routes.get("/user/{name}", ctx -&gt; {
+    String name = ctx.pathParam("name");
+    View.render(ctx, "user.jte", name, "page", new UserPage(name, 3));
+});
+</pre>
+  </div>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 3b / 3c</b>（Bootstrap 集成 + 二级基础模板）。</div>
+</div>
+
+<h2 id="bootstrap">Bootstrap：客户端的事，服务端只管引用</h2>
+
+<p>
+  原书用 Flask-Bootstrap 扩展，它提供一个 <code>bootstrap/base.html</code> 让你继承。
+  Javalin 没有对应扩展，<strong>也不需要</strong> ——
+  如原书所说，Bootstrap 是纯客户端框架，服务端要做的只是在 HTML 里引用它的 CSS 和 JS。
+  上面那个布局模板已经做完了这件事。
+</p>
+
+<p>两种引用方式：</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">CDN（最简单，本教程用这个）</div>
+    <div class="code" data-lang="html">
+<pre>
+&lt;link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/
+  bootstrap@5.3.3/dist/css/bootstrap.min.css"&gt;
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">WebJars（打进 jar，离线可用）</div>
+    <div class="code" data-lang="xml">
+<pre>
+&lt;dependency&gt;
+  &lt;groupId&gt;org.webjars.npm&lt;/groupId&gt;
+  &lt;artifactId&gt;bootstrap&lt;/artifactId&gt;
+  &lt;version&gt;5.3.3&lt;/version&gt;
+&lt;/dependency&gt;
+</pre>
+    </div>
+  </div>
+</div>
+
+<p>用 WebJars 的话还要在配置里打开它，之后文件就能从 <code>/webjars/...</code> 访问：</p>
+
+<div class="code" data-lang="java">
+<pre>
+config.staticFiles.enableWebjars();
+// &lt;link rel="stylesheet" href="/webjars/bootstrap/5.3.3/dist/css/bootstrap.min.css"&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; WebJars 是什么</div>
+  <p>
+    就是把 npm 上的前端包重新打成 Maven 依赖。好处：前端资源跟着后端一起版本化、一起打包，
+    内网部署不依赖外网 CDN。缺点：版本常常落后 npm 几天。
+    本教程为了让代码片段短一点用 CDN，生产项目建议用 WebJars。
+  </p>
+</div>
+
+<h2 id="static">静态文件</h2>
+
+<p>
+  CSS、JS、图片这些不需要渲染的文件叫静态文件。
+  Flask 自动把 <code>static/</code> 目录映射到 <code>/static/&lt;filename&gt;</code>；
+  Javalin 要你显式声明（但更灵活）：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+import io.javalin.http.staticfiles.Location;
+
+Javalin.create(config -&gt; {
+    config.staticFiles.add(staticFiles -&gt; {
+        staticFiles.directory = "/public";          // classpath 里的目录
+        staticFiles.location = Location.CLASSPATH;  // 从 jar 里读（部署友好）
+        staticFiles.hostedPath = "/";               // 对外的 URL 前缀
+    });
+    // ...
+});
+</pre>
+</div>
+
+<p>对应的文件放在 <code>src/main/resources/public/</code>：</p>
+
+<div class="code" data-lang="text">
+<pre>
+src/main/resources/public/
+├── favicon.ico
+├── css/
+│   └── app.css
+└── js/
+    └── app.js
+</pre>
+</div>
+
+<p>于是 <code>src/main/resources/public/css/app.css</code> 的访问路径就是 <code>/css/app.css</code>。</p>
+
+<div class="code" data-lang="java">
+<pre>
+// 也可以挂到子路径下，更接近 Flask 的 /static/ 习惯
+config.staticFiles.add(f -&gt; {
+    f.directory = "/public";
+    f.location = Location.CLASSPATH;
+    f.hostedPath = "/static";
+});
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 静态文件的匹配时机</div>
+  <p>
+    Javalin 的查找顺序是：<strong>先 before 钩子 &rarr; 再你注册的路由 &rarr; 都没匹配上才找静态文件 &rarr; 最后 404</strong>。
+    所以你自己的 <code>get("/css/app.css", ...)</code> 会优先于同名静态文件 —— 一般不会冲突，但知道这个顺序有助于排查问题。
+  </p>
+</div>
+
+<p>给应用加一点自定义样式（原书也有 <code>styles.css</code>）：</p>
+
+<div class="code" data-lang="text" data-file="src/main/resources/public/css/app.css">
+<pre>
+.profile-thumbnail { width: 48px; height: 48px; }
+.post-body { word-break: break-word; }
+.post-list { list-style: none; padding-left: 0; }
+.post-list &gt; li { border-bottom: 1px solid var(--bs-border-color); padding: 14px 0; }
+</pre>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 3d</b>（favicon 与静态文件）。</div>
+</div>
+
+<h2 id="errorpages">自定义错误页</h2>
+
+<p>
+  默认的 404 现在看起来和应用其他页面完全不搭。
+  Javalin 用 <code>config.routes.error(状态码, ...)</code> 来定制，
+  而且可以<strong>按内容类型分别处理</strong> —— 这一点比 Flask 方便，
+  原书为此在错误处理函数里手写了 <code>request.accept_mimetypes</code> 的判断（第 14 章才解决）。
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+Javalin.create(config -&gt; {
+    // 浏览器来的请求 → 渲染好看的 HTML 页面
+    config.routes.error(404, "html", ctx -&gt;
+        View.render(ctx, "error/404.jte", "页面不存在"));
+    config.routes.error(500, "html", ctx -&gt;
+        View.render(ctx, "error/500.jte", "服务器错误"));
+    config.routes.error(403, "html", ctx -&gt;
+        View.render(ctx, "error/403.jte", "没有权限"));
+
+    // API 客户端（Accept: application/json）→ 走 Javalin 默认的 JSON 错误体
+    // 不用写任何代码，第 2 章的 NotFoundResponse 已经处理好了
+});
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/error/404.jte">
+<pre>
+@import com.example.javalinky.web.Layout
+
+@param Layout layout
+
+@template.layout.base(layout = layout, content = @`
+    &lt;div class="text-center py-5"&gt;
+        &lt;h1 class="display-1 text-secondary"&gt;404&lt;/h1&gt;
+        &lt;p class="lead"&gt;这个页面不存在。&lt;/p&gt;
+        &lt;a class="btn btn-primary" href="/"&gt;回首页&lt;/a&gt;
+    &lt;/div&gt;
+`)
+</pre>
+</div>
+
+<p>
+  <code>error/500.jte</code> 和 <code>error/403.jte</code> 照着改文字即可。
+  注意 <code>error/404.jte</code> 这个路径 —— JTE 用<strong>目录当包名</strong>，
+  所以模板调用写成 <code>@template.error.somePart()</code>（如果需要的话）。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 500 页面本身不能出错</div>
+  <p>
+    500 错误页在“应用已经出问题”的情况下渲染。如果这个模板依赖数据库查询（比如显示当前用户），
+    它很可能跟着一起失败，用户会看到一片空白。
+    <strong>错误页模板应该只用最简单、不会失败的数据。</strong>
+  </p>
+</div>
+
+<h2 id="links">链接：没有 <code>url_for</code> 怎么办</h2>
+
+<p>
+  原书强调不要在模板里硬写 URL，要用 <code>url_for('main.user', username=u)</code>，
+  这样改路由时链接不会断。
+</p>
+
+<p>
+  Javalin 没有 <code>url_for</code> ——
+  因为 Javalin 的路由没有“端点名”，路由就是路径本身。
+  但原书想解决的问题是真的，Java 的解法是<strong>把路径集中到一个类里，用常量和静态方法</strong>。
+  好处是：改路径时编译器会帮你找出所有引用点，这比 Flask 的运行时解析更安全。
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Routes.java">
+<pre>
+package com.example.javalinky.web;
+
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
+/** 全站 URL 的唯一来源。相当于 Flask 的 url_for。 */
+public final class Routes {
+
+    public static final String INDEX = "/";
+    public static final String LOGIN = "/auth/login";
+    public static final String LOGOUT = "/auth/logout";
+    public static final String REGISTER = "/auth/register";
+    public static final String EDIT_PROFILE = "/edit-profile";
+
+    public static String user(String username) {
+        return "/user/" + enc(username);
+    }
+
+    public static String post(long id) {
+        return "/post/" + id;
+    }
+
+    public static String post(long id, int page) {
+        return "/post/" + id + "?page=" + page;
+    }
+
+    public static String editPost(long id) {
+        return "/edit/" + id;
+    }
+
+    public static String follow(String username) {
+        return "/follow/" + enc(username);
+    }
+
+    /** 绝对 URL：邮件里的链接必须用这个（第 6 章） */
+    public static String absolute(String base, String path) {
+        return base + path;
+    }
+
+    private static String enc(String s) {
+        return URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
+    private Routes() {}
+}
+</pre>
+</div>
+
+<div class="code" data-lang="jte">
+<pre>
+@import com.example.javalinky.web.Routes
+
+&lt;a href="${Routes.user(post.authorUsername())}"&gt;${post.authorUsername()}&lt;/a&gt;
+&lt;a href="${Routes.LOGIN}"&gt;登录&lt;/a&gt;
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 相对 URL 还是绝对 URL</div>
+  <p>
+    和原书的结论一样：<strong>站内链接用相对路径</strong>（<code>/user/dave</code>），
+    <strong>要离开浏览器的链接用绝对 URL</strong>（<code>https://example.com/auth/confirm/xxx</code>）。
+    后者只有一个场景 —— 邮件。第 6 章会把站点基地址放进配置，由 <code>Routes.absolute()</code> 拼接。
+  </p>
+</div>
+
+<h2 id="time">日期和时间的本地化</h2>
+
+<p>
+  原书用 Flask-Moment（Moment.js 的封装）解决这个问题，思路是：
+  <strong>服务端只存 UTC，把时间戳发给浏览器，让浏览器用用户本地时区和语言来显示。</strong>
+  这个思路完全正确，但今天不再需要 Moment.js —— 浏览器原生就能干。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="时间从数据库到用户屏幕的完整链路">
+  <rect class="bx-g" x="20" y="36" width="150" height="62" rx="9"/>
+  <text class="ttl on-g" x="95" y="58" text-anchor="middle">数据库</text>
+  <text class="sm" x="95" y="76" text-anchor="middle">timestamptz</text>
+  <text class="sm" x="95" y="91" text-anchor="middle">永远存 UTC</text>
+
+  <rect class="bx-a" x="210" y="36" width="170" height="62" rx="9"/>
+  <text class="ttl on-a" x="295" y="58" text-anchor="middle">Java 服务端</text>
+  <text class="mono" x="295" y="76" text-anchor="middle">Instant</text>
+  <text class="sm" x="295" y="91" text-anchor="middle">没有时区概念的时刻</text>
+
+  <rect class="bx-b" x="420" y="36" width="170" height="62" rx="9"/>
+  <text class="ttl on-b" x="505" y="58" text-anchor="middle">HTML</text>
+  <text class="mono" x="505" y="76" text-anchor="middle">&lt;time datetime="…Z"&gt;</text>
+  <text class="sm" x="505" y="91" text-anchor="middle">ISO 8601 字符串</text>
+
+  <rect class="bx-p" x="630" y="36" width="110" height="62" rx="9"/>
+  <text class="ttl on-p" x="685" y="58" text-anchor="middle">浏览器</text>
+  <text class="sm" x="685" y="76" text-anchor="middle">知道用户时区</text>
+  <text class="sm" x="685" y="91" text-anchor="middle">和语言偏好</text>
+
+  <path class="ln-a" d="M172 67 H206" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M382 67 H416" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M592 67 H626" marker-end="url(#ar-a)"/>
+
+  <rect class="bx" x="120" y="138" width="520" height="92" rx="10"/>
+  <text class="ttl" x="136" y="160">为什么必须这样做</text>
+  <text class="lbl" x="136" y="184">· 服务器在哪个机房、用户在哪个国家，服务端都不知道也不该猜</text>
+  <text class="lbl" x="136" y="204">· 只有浏览器同时知道“用户的时区”和“用户的语言”</text>
+  <text class="lbl" x="136" y="222">· 存 UTC 还让“跨时区排序、算时间差”变成简单的数字比较</text>
+</svg>
+<figcaption>图 3-5　时间处理的标准链路</figcaption>
+</figure>
+
+<h3>服务端：永远用 <code>Instant</code></h3>
+
+<div class="code" data-lang="java">
+<pre>
+import java.time.Instant;
+
+Instant now = Instant.now();            // 当前时刻，UTC，没有时区
+String iso = now.toString();            // "2026-10-21T08:30:00.123Z"
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; Java 时间类型怎么选</div>
+  <div class="tw">
+  <table>
+  <tr><th>类型</th><th>含义</th><th>用在哪</th></tr>
+  <tr><td><code>Instant</code></td><td>时间轴上的一个点（UTC 纪元毫秒）</td><td><strong>本教程全部时间戳都用它</strong></td></tr>
+  <tr><td><code>LocalDate</code></td><td>只有年月日，没有时刻</td><td>生日、账单周期</td></tr>
+  <tr><td><code>LocalDateTime</code></td><td>有日期有时刻，<strong>但没有时区 —— 含义模糊</strong></td><td>尽量别用来存时间戳</td></tr>
+  <tr><td><code>ZonedDateTime</code></td><td>带时区的时刻</td><td>“每天北京时间 9 点发送”这类业务规则</td></tr>
+  </table>
+  </div>
+  <p>
+    一句话：<strong>“某件事发生的时刻”用 <code>Instant</code></strong>，
+    其他类型只在业务真的关心日历和时区时才出现。
+  </p>
+</div>
+
+<h3>模板：输出一个可被脚本接管的 <code>&lt;time&gt;</code></h3>
+
+<p>做一个可复用的模板片段（相当于 Jinja2 的 macro）：</p>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/tag/timeago.jte">
+<pre>
+@import java.time.Instant
+
+@param Instant at
+@param boolean relative = true
+
+&lt;time datetime="${at.toString()}"
+      data-style="${relative ? "relative" : "absolute"}"&gt;
+    ${at.toString()}
+&lt;/time&gt;
+</pre>
+</div>
+
+<p>
+  <code>&lt;time&gt;</code> 标签里先放 ISO 字符串作为<strong>兜底</strong> ——
+  即使用户禁用了 JavaScript，也能看到一个（不好看但正确的）时间。
+  这是渐进增强的做法。
+</p>
+
+<div class="code" data-lang="jte">
+<pre>
+&lt;%-- 在任何页面里这样用 --%&gt;
+&lt;div class="text-muted small"&gt;
+    发布于 @template.tag.timeago(at = post.timestamp())
+&lt;/div&gt;
+
+&lt;%-- 要绝对时间就传 relative = false --%&gt;
+注册于 @template.tag.timeago(at = user.memberSince(), relative = false)
+</pre>
+</div>
+
+<h3>浏览器：用 <code>Intl</code> 把它换成人话</h3>
+
+<div class="code" data-lang="java" data-file="src/main/resources/public/js/app.js">
+<pre>
+// 把所有 &lt;time datetime="..."&gt; 换成本地化的显示
+(function () {
+  const rtf = new Intl.RelativeTimeFormat(navigator.language, { numeric: 'auto' });
+  const abs = new Intl.DateTimeFormat(navigator.language, {
+    dateStyle: 'long', timeStyle: 'short'
+  });
+
+  const UNITS = [
+    ['year',   31536000],
+    ['month',  2592000],
+    ['week',   604800],
+    ['day',    86400],
+    ['hour',   3600],
+    ['minute', 60],
+    ['second', 1]
+  ];
+
+  function relative(date) {
+    const diffSec = (date - Date.now()) / 1000;          // 过去是负数
+    for (const [unit, secs] of UNITS) {
+      if (Math.abs(diffSec) &gt;= secs || unit === 'second') {
+        return rtf.format(Math.round(diffSec / secs), unit);
+      }
+    }
+  }
+
+  function upgrade(el) {
+    const date = new Date(el.getAttribute('datetime'));
+    if (isNaN(date)) return;
+    el.title = abs.format(date);                          // 鼠标悬停看精确时间
+    el.textContent = el.dataset.style === 'absolute'
+      ? abs.format(date)
+      : relative(date);
+  }
+
+  document.querySelectorAll('time[datetime]').forEach(upgrade);
+
+  // 每分钟刷新一次相对时间（“3 分钟前” → “4 分钟前”）
+  setInterval(function () {
+    document.querySelectorAll('time[datetime][data-style="relative"]').forEach(upgrade);
+  }, 60000);
+})();
+</pre>
+</div>
+
+<p>
+  这段 30 行的脚本替代了原书的 Flask-Moment + Moment.js + jQuery
+  （加起来约 70 KB 的下载量）。
+  <code>Intl.RelativeTimeFormat</code> 会自动按浏览器语言输出“3 分钟前”/“3 minutes ago”/“hace 3 minutos”。
+</p>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 3e</b>（Flask-Moment 时间本地化）。</div>
+</div>
+
+<h2 id="full">本章完整的 App.java</h2>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/App.java">
+<pre>
+package com.example.javalinky;
+
+import com.example.javalinky.web.UserPage;
+import com.example.javalinky.web.View;
+import io.javalin.Javalin;
+import io.javalin.http.staticfiles.Location;
+import io.javalin.rendering.template.JavalinJte;
+
+public class App {
+
+    public static void main(String[] args) {
+        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "7070"));
+
+        Javalin.create(config -&gt; {
+
+            // --- 模板引擎 ---
+            config.fileRenderer(new JavalinJte(JavalinJte.directoryTemplateEngine()));
+
+            // --- 静态文件 ---
+            config.staticFiles.add(f -&gt; {
+                f.directory = "/public";
+                f.location = Location.CLASSPATH;
+                f.hostedPath = "/";
+            });
+
+            // --- 开发期辅助 ---
+            config.bundledPlugins.enableDevLogging();
+            config.bundledPlugins.enableRouteOverview("/routes");
+
+            // --- 自定义错误页 ---
+            config.routes.error(404, "html", ctx -&gt;
+                View.render(ctx, "error/404.jte", "页面不存在"));
+            config.routes.error(403, "html", ctx -&gt;
+                View.render(ctx, "error/403.jte", "没有权限"));
+            config.routes.error(500, "html", ctx -&gt;
+                View.render(ctx, "error/500.jte", "服务器错误"));
+
+            // --- 路由 ---
+            config.routes.get("/", ctx -&gt;
+                View.render(ctx, "index.jte", "首页"));
+
+            config.routes.get("/user/{name}", ctx -&gt; {
+                String name = ctx.pathParam("name");
+                View.render(ctx, "user.jte", name, "page", new UserPage(name, 3));
+            });
+
+        }).start(port);
+    }
+}
+</pre>
+</div>
+
+<p>目录结构现在长这样：</p>
+
+<div class="code" data-lang="text">
+<pre>
+javalinky/
+├── pom.xml
+└── src/main/
+    ├── java/com/example/javalinky/
+    │   ├── App.java
+    │   └── web/
+    │       ├── Layout.java      ← 布局数据
+    │       ├── Routes.java      ← URL 常量（代替 url_for）
+    │       ├── UserPage.java    ← 页面模型
+    │       └── View.java        ← render 小助手
+    ├── jte/
+    │   ├── layout/base.jte      ← 全站布局
+    │   ├── tag/timeago.jte      ← 可复用片段
+    │   ├── error/{403,404,500}.jte
+    │   ├── index.jte
+    │   └── user.jte
+    └── resources/public/
+        ├── favicon.ico
+        ├── css/app.css
+        └── js/app.js
+</pre>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在 <code>user.jte</code> 里故意把 <code>page.name()</code> 写成 <code>page.nmae()</code>，
+        然后 <code>mvn compile</code>。读一下报错信息 —— 它会告诉你模板的哪一行。
+        这就是“编译期模板检查”的价值。</li>
+    <li>访问 <code>/user/&lt;b&gt;粗体&lt;/b&gt;</code>，确认标签被转义成文字显示。
+        然后把模板里的 <code>${page.name()}</code> 改成 <code>$unsafe{page.name()}</code>，再访问一次，
+        观察差别。<strong>改完记得改回去。</strong></li>
+    <li>做一个 <code>tag/alert.jte</code> 片段，参数是 <code>String level</code>（info/warning/danger）和
+        <code>Content body</code>，渲染成 Bootstrap 的 <code>&lt;div class="alert alert-xxx"&gt;</code>。
+        然后在首页调用它两次，传不同的 level。
+        <em>（提示：内容块参数写成 <code>body = @`…`</code>）</em></li>
+    <li>给布局加一个可选的 <code>Content sidebar = null</code> 参数：
+        传了就渲染成右侧 4 栏，不传就让主内容占满 12 栏。在 <code>user.jte</code> 里用上它。</li>
+    <li>访问一个不存在的路径，确认看到的是你的 404 页面。
+        然后用 <code>curl -H "Accept: application/json" localhost:7070/nope</code>，
+        确认 API 客户端拿到的是 JSON。</li>
+    <li>把 <code>timeago.jte</code> 用在首页：显示“服务器启动于 ⟨相对时间⟩”。
+        把浏览器语言切成英文再刷新，看看文字是否跟着变。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

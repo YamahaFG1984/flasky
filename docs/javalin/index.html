@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Javalin 社交博客实战 · 用 Javalin + Hibernate 重写《Flask Web 开发》</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="0">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<div class="hero">
+  <span class="chapter-eyebrow">面向初学者的 18 章教程</span>
+  <h1>Javalin 社交博客实战</h1>
+  <p class="sub">
+    这套教程改编自 O'Reilly 的经典教材《Flask Web Development》（第 2 版，Miguel Grinberg 著）。
+    原书用 Python 的 Flask 一步步搭出一个叫 <strong>Flasky</strong> 的社交博客；
+    这里保留原书全部的知识骨架和章节顺序 —— 路由、模板、表单、数据库、邮件、认证、权限、分页、关注、评论、API、测试、性能、部署 ——
+    但把所有代码换成了 <strong>Javalin</strong> 和它的 Java 生态：JTE 模板、Hibernate ORM、Flyway、JUnit 5……
+  </p>
+  <p style="margin-top:14px">
+    <span class="pill">Javalin 7</span><span class="pill">Java 21</span><span class="pill">Maven</span>
+    <span class="pill">JTE 模板</span><span class="pill">Hibernate ORM 7</span><span class="pill">HikariCP</span>
+    <span class="pill">Flyway</span><span class="pill">PostgreSQL / H2</span><span class="pill">Jakarta Mail</span>
+    <span class="pill">JUnit 5</span><span class="pill">Playwright</span><span class="pill">Docker</span>
+  </p>
+</div>
+
+<h2 id="why">为什么要“换框架重学一遍”？</h2>
+
+<p>
+  原书讲的东西 —— HTTP 请求怎么变成响应、表单为什么要重定向、密码为什么不能明文存、
+  会话 Cookie 为什么要签名、REST API 为什么要无状态 —— <strong>和语言、框架都没有关系</strong>。
+  Flask 只是承载这些知识的一个容器。
+</p>
+
+<p>
+  <strong>Javalin</strong> 是一个很“轻”的 Java / Kotlin Web 框架：核心只有一个 jar，
+  没有注解扫描、没有 IoC 容器、没有自动配置的魔法。
+  你写的每一行代码都在你能看见的地方执行 —— 这一点和 Flask 的气质几乎一模一样。
+  正因为它薄，它特别适合用来<strong>学习 Web 开发本身</strong>：
+  你不会把框架的约定误当成 Web 的规律。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="Javalin 应用的本质：一张路由表加一串处理器，跑在内嵌的 Jetty 上">
+  <rect class="bx-a" x="250" y="86" width="260" height="88" rx="12"/>
+  <text class="ttl on-a" x="380" y="116" text-anchor="middle">你的 Javalin 应用</text>
+  <text class="mono" x="380" y="144" text-anchor="middle">ctx -&gt; { ... }</text>
+
+  <rect class="bx-b" x="20" y="104" width="150" height="52" rx="10"/>
+  <text class="mono on-b" x="95" y="135" text-anchor="middle">HTTP 请求</text>
+  <path class="ln-b" d="M172 130 H245" marker-end="url(#ar-b)"/>
+
+  <rect class="bx-g" x="590" y="104" width="150" height="52" rx="10"/>
+  <text class="mono on-g" x="665" y="135" text-anchor="middle">HTTP 响应</text>
+  <path class="ln-g" d="M513 130 H586" marker-end="url(#ar-g)"/>
+
+  <text class="sm" x="380" y="28" text-anchor="middle">内嵌 Jetty 12 服务器（Javalin 自带，不需要装 Tomcat）</text>
+  <rect class="bx-d" x="150" y="40" width="460" height="30" rx="7"/>
+  <text class="lbl" x="380" y="60" text-anchor="middle">线程池 / 虚拟线程 · Servlet 容器 · WebSocket · 静态文件</text>
+  <path class="ln-d" d="M380 72 V82" marker-end="url(#ar)"/>
+
+  <rect class="bx" x="150" y="196" width="460" height="40" rx="8"/>
+  <text class="lbl" x="380" y="221" text-anchor="middle">before / beforeMatched 过滤器 · 路由表 · Context · 异常映射 · 模板渲染</text>
+  <path class="ln-d" d="M380 176 V194" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 0-1　Javalin 的核心抽象：一张路由表，每个路由是一个接收 <code>Context</code> 的处理器</figcaption>
+</figure>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#129513;</span><h4>小</h4><p>核心只依赖 Jetty 和 SLF4J。整个框架的源码一个周末能读完。</p></div>
+  <div class="card"><span class="ic">&#128290;</span><h4>类型安全</h4><p>JTE 模板在编译期检查：模板里写错字段名，<code>mvn compile</code> 就报错。</p></div>
+  <div class="card"><span class="ic">&#9889;</span><h4>没有魔法</h4><p>没有注解扫描、没有依赖注入容器。路由是你亲手注册的，调用栈是直的。</p></div>
+  <div class="card"><span class="ic">&#128230;</span><h4>一个 JAR 上线</h4><p><code>mvn package</code> 产出可执行 JAR，<code>java -jar</code> 就是生产环境。</p></div>
+</div>
+
+<h2 id="who">这套教程写给谁</h2>
+
+<ul>
+  <li><strong>会一点 Java，但没写过 Web 服务端</strong>的人。每一章都从“为什么需要这个东西”讲起，而不是直接甩 API。</li>
+  <li><strong>用过 Spring Boot，但觉得“不知道它背后干了什么”</strong>的人。
+      Javalin 把 Spring 自动配置替你做掉的事全部摊在明面上：会话是怎么存的、拦截器什么时候跑、事务边界在哪里。
+      看懂这些，再回去用 Spring 会完全不一样。</li>
+  <li><strong>读过原书（或 Flask 系列教程），想把这套知识迁到 Java 技术栈</strong>的人。
+      大量章节里有「Flask 这样写 / Javalin 这样写」的左右对照卡片。</li>
+</ul>
+
+<div class="box note">
+  <div class="t">&#9432; 需要什么前置知识</div>
+  <p>
+    会写类、方法、接口、<code>List</code>/<code>Map</code>，知道 lambda <code>x -&gt; x + 1</code> 是什么就够了。
+    <strong>不需要</strong>会 Spring、不需要会 Maven（第 1 章从零讲）、不需要懂 SQL（第 5 章从零讲）。
+    命令行只需要会 <code>cd</code> 和敲命令。
+  </p>
+</div>
+
+<h2 id="stack">技术选型：每一个 Flask 扩展对应什么</h2>
+
+<p>
+  Flask 的哲学是“核心很小，功能靠扩展”，Javalin 也是。
+  下面这张表是整本教程的选型总览 —— 现在不用记，遇到了再回来查：
+</p>
+
+<div class="tw">
+<table class="terms">
+<tr><th>原书用的（Python）</th><th>本教程用的（Java）</th><th>出现章节</th></tr>
+<tr><td>Flask</td><td><strong>Javalin 7</strong>（内嵌 Jetty 12）</td><td>第 1–2 章</td></tr>
+<tr><td>venv + pip</td><td><strong>Maven</strong> + <code>~/.m2</code> 本地仓库</td><td>第 1 章</td></tr>
+<tr><td>Jinja2 模板</td><td><strong>JTE</strong>（类型安全、编译期检查）</td><td>第 3 章</td></tr>
+<tr><td>Flask-Bootstrap</td><td>Bootstrap 5（WebJars 或 CDN）+ 自己写的布局模板</td><td>第 3 章</td></tr>
+<tr><td>Flask-Moment / Moment.js</td><td>浏览器原生 <code>Intl.RelativeTimeFormat</code></td><td>第 3 章</td></tr>
+<tr><td>Flask-WTF + WTForms</td><td>Javalin <code>Validator</code> + Jakarta Bean Validation</td><td>第 4 章</td></tr>
+<tr><td>Flask session（签名 Cookie）</td><td>Jetty <code>SessionHandler</code> + <code>ctx.sessionAttribute()</code></td><td>第 4 章</td></tr>
+<tr><td>Flask-SQLAlchemy</td><td><strong>Hibernate ORM 7</strong>（Jakarta Persistence）+ HikariCP</td><td>第 5 章</td></tr>
+<tr><td>Flask-Migrate / Alembic</td><td><strong>Flyway</strong>（版本化 SQL 迁移）</td><td>第 5 章</td></tr>
+<tr><td>Flask-Mail / smtplib</td><td>Jakarta Mail（Angus Mail 实现）</td><td>第 6 章</td></tr>
+<tr><td>Blueprint（蓝本）</td><td><code>apiBuilder</code> + <code>path()</code> 路由分组</td><td>第 7 章</td></tr>
+<tr><td>Werkzeug <code>generate_password_hash</code></td><td><strong>bcrypt</strong>（<code>at.favre.lib:bcrypt</code>）</td><td>第 8 章</td></tr>
+<tr><td>itsdangerous 签名令牌</td><td><strong>JWT</strong>（<code>com.auth0:java-jwt</code>，HMAC-SHA256）</td><td>第 8、14 章</td></tr>
+<tr><td>Flask-Login</td><td>会话 + <code>before</code> 过滤器 + Javalin <code>RouteRole</code></td><td>第 8–9 章</td></tr>
+<tr><td>Markdown + Bleach</td><td><strong>commonmark-java</strong> + OWASP HTML Sanitizer</td><td>第 11 章</td></tr>
+<tr><td>Faker</td><td><strong>Datafaker</strong></td><td>第 11 章</td></tr>
+<tr><td>Flask-HTTPAuth</td><td><code>ctx.basicAuthCredentials()</code> + 令牌中间件</td><td>第 14 章</td></tr>
+<tr><td>unittest + Flask test client</td><td><strong>JUnit 5</strong> + <code>JavalinTest</code> + AssertJ</td><td>第 15 章</td></tr>
+<tr><td>coverage.py</td><td><strong>JaCoCo</strong></td><td>第 15 章</td></tr>
+<tr><td>Selenium</td><td><strong>Playwright for Java</strong>（也讲 Selenium）</td><td>第 15 章</td></tr>
+<tr><td>cProfile / ProfilerMiddleware</td><td><strong>JFR</strong>（Java Flight Recorder）+ JDK Mission Control</td><td>第 16 章</td></tr>
+<tr><td>Gunicorn + Procfile</td><td>可执行 JAR（<code>java -jar</code>），内嵌 Jetty 就是生产服务器</td><td>第 17 章</td></tr>
+<tr><td>Python logging + SMTPHandler</td><td>SLF4J + <strong>Logback</strong>（含 SMTPAppender）</td><td>第 17 章</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 一个关键差异，提前说</div>
+  <p>
+    Flask 里 <code>request</code>、<code>session</code>、<code>current_user</code> 是<strong>看起来像全局变量</strong>的东西
+    （底层是线程局部存储 + 上下文栈）。Javalin 不玩这一套：
+    每个处理器都显式接收一个 <code>Context ctx</code> 参数，请求、响应、会话全从它上面取。
+  </p>
+  <p>
+    一开始你会觉得“怎么到处都要传 ctx”，但很快会发现这让调用关系变得特别清楚 ——
+    没有“为什么这里报 working outside of request context”这种困惑。
+  </p>
+</div>
+
+<h2 id="example">贯穿全书的例子：Javalinky</h2>
+
+<p>
+  和原书一样，我们会一路建设同一个应用：<strong>Javalinky</strong>，一个带用户系统的社交博客。
+  从第 2 章的一行 “Hello World” 开始，到第 17 章部署上线，
+  中途它会长出模板、表单、数据库、邮件、登录、权限、头像、Markdown 编辑器、关注关系、评论、REST API……
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="Javalinky 应用在各章中逐步长大的过程">
+  <text class="sm" x="20" y="22">第 2 章</text>
+  <rect class="bx" x="20" y="32" width="128" height="48" rx="8"/>
+  <text class="lbl" x="84" y="53" text-anchor="middle">Hello World</text>
+  <text class="sm" x="84" y="69" text-anchor="middle">路由 + Context</text>
+
+  <text class="sm" x="178" y="22">第 3–4 章</text>
+  <rect class="bx" x="178" y="32" width="128" height="48" rx="8"/>
+  <text class="lbl" x="242" y="53" text-anchor="middle">JTE 页面 + 表单</text>
+  <text class="sm" x="242" y="69" text-anchor="middle">校验、CSRF、会话</text>
+
+  <text class="sm" x="336" y="22">第 5–6 章</text>
+  <rect class="bx" x="336" y="32" width="128" height="48" rx="8"/>
+  <text class="lbl" x="400" y="53" text-anchor="middle">数据库 + 邮件</text>
+  <text class="sm" x="400" y="69" text-anchor="middle">Hibernate、Flyway</text>
+
+  <text class="sm" x="494" y="22">第 7 章</text>
+  <rect class="bx" x="494" y="32" width="128" height="48" rx="8"/>
+  <text class="lbl" x="558" y="53" text-anchor="middle">工程化重构</text>
+  <text class="sm" x="558" y="69" text-anchor="middle">应用工厂、配置</text>
+
+  <text class="sm" x="652" y="22">第 8 章</text>
+  <rect class="bx-b" x="652" y="32" width="88" height="48" rx="8"/>
+  <text class="lbl on-b" x="696" y="53" text-anchor="middle">登录注册</text>
+  <text class="sm" x="696" y="69" text-anchor="middle">bcrypt</text>
+
+  <path class="ln-d" d="M150 56 H176" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M308 56 H334" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M466 56 H492" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M624 56 H650" marker-end="url(#ar)"/>
+
+  <path class="ln-a" d="M696 82 V112 H84 V150" marker-end="url(#ar-a)"/>
+
+  <text class="sm" x="20" y="172">第 9–10 章</text>
+  <rect class="bx-b" x="20" y="182" width="140" height="48" rx="8"/>
+  <text class="lbl on-b" x="90" y="203" text-anchor="middle">角色与资料页</text>
+  <text class="sm" x="90" y="219" text-anchor="middle">权限位、Gravatar</text>
+
+  <text class="sm" x="190" y="172">第 11 章</text>
+  <rect class="bx-b" x="190" y="182" width="140" height="48" rx="8"/>
+  <text class="lbl on-b" x="260" y="203" text-anchor="middle">博客文章</text>
+  <text class="sm" x="260" y="219" text-anchor="middle">分页、Markdown</text>
+
+  <text class="sm" x="360" y="172">第 12–13 章</text>
+  <rect class="bx-b" x="360" y="182" width="140" height="48" rx="8"/>
+  <text class="lbl on-b" x="430" y="203" text-anchor="middle">关注与评论</text>
+  <text class="sm" x="430" y="219" text-anchor="middle">多对多、JOIN</text>
+
+  <text class="sm" x="530" y="172">第 14 章</text>
+  <rect class="bx-b" x="530" y="182" width="140" height="48" rx="8"/>
+  <text class="lbl on-b" x="600" y="203" text-anchor="middle">REST API</text>
+  <text class="sm" x="600" y="219" text-anchor="middle">令牌、JSON</text>
+
+  <path class="ln-d" d="M162 206 H188" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M332 206 H358" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M502 206 H528" marker-end="url(#ar)"/>
+  <path class="ln-a" d="M600 232 V256 H380 V272" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-a" x="110" y="272" width="540" height="40" rx="8"/>
+  <text class="lbl on-a" x="380" y="297" text-anchor="middle">第 15 章 测试　·　第 16 章 性能　·　第 17 章 部署上线 &#127881;　·　第 18 章 继续深入</text>
+</svg>
+<figcaption>图 0-2　Javalinky 在各章中逐步长大</figcaption>
+</figure>
+
+<h2 id="how">怎么用这套教程</h2>
+
+<ul>
+  <li><strong>按顺序读。</strong>后面的章节会用到前面建立的项目。第 1 章是环境准备，急的话可以扫一眼就跳到第 2 章开始动手。</li>
+  <li><strong>亲手敲代码。</strong>每章末尾都有「动手练习」。看懂和写出来之间的差距，比你想象的大。</li>
+  <li><strong>遇到 <span class="pill" style="margin:0">对照</span> 卡片时留意左边。</strong>左边是 Flask / Python 的写法，右边是 Javalin / Java 的写法。如果你没用过 Flask，忽略左边即可。</li>
+  <li><strong>看到虚线框的「原书检查点」</strong>，那是告诉你这一节对应原书 GitHub 仓库的哪个标签（例如 <code>git checkout 5b</code>），方便你对着原版 Python 代码比较。</li>
+</ul>
+
+<div class="box warn">
+  <div class="t">&#9888; 关于版本号</div>
+  <p>
+    教程里的依赖版本（Javalin 7.2.3、Hibernate 7.4、JTE 3.2.4……）是写作时的稳定版。
+    Java 生态升级很快，你照抄这些版本一定能跑通；想用新版本的话，在项目目录下执行
+    <code>mvn versions:display-dependency-updates</code> 就能看到有哪些更新。
+  </p>
+</div>
+
+<h2 id="toc">全部章节</h2>
+<div id="toc-grid"></div>
+
+<div class="box tip" style="margin-top:32px">
+  <div class="t">&#128161; 一句话总结</div>
+  <p>
+    如果你只记住一件事：<strong>Javalin 应用就是“一张路由表 + 一串 <code>ctx -&gt; {}</code> 处理器”，
+    过滤器（before / after）是包在处理器外面的一层层洋葱皮。</strong>
+    这套教程剩下的 18 章，都是在解释这句话的各种展开。
+  </p>
+</div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

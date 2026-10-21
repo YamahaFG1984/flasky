@@ -1,0 +1,738 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 16 章 · 性能 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="16">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 16 章</span>
+<h1>性能</h1>
+<p class="lede">
+  前面十五章我们好几次提到“第 16 章会讲怎么发现这个问题”。
+  现在就是那一章：怎么<strong>测量</strong>而不是猜，怎么找到慢查询、怎么发现 N+1、
+  怎么用 Java 自带的飞行记录器找出吃 CPU 的代码。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>建立“先测量”的纪律</li>
+    <li>给应用装上慢查询日志</li>
+    <li>用 <code>Server-Timing</code> 响应头在浏览器里直接看服务端耗时</li>
+    <li>做一个 N+1 自动检测器</li>
+    <li>会读 <code>EXPLAIN ANALYZE</code> 的输出，知道该加什么索引</li>
+    <li>用 JFR 做 CPU 剖析</li>
+    <li>知道该暴露哪些指标</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="discipline">第一条纪律：先测量</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="性能优化的正确流程与常见错误">
+  <text class="ttl on-r" x="20" y="20">✗ 凭感觉优化</text>
+  <rect class="bx-r" x="20" y="30" width="330" height="106" rx="9"/>
+  <text class="sm" x="40" y="54">"这个循环看着挺慢的，改成并行流吧"</text>
+  <text class="sm" x="40" y="74">"加个缓存肯定快"</text>
+  <text class="sm on-r" x="40" y="100">结果：代码变复杂了，</text>
+  <text class="sm on-r" x="40" y="118">性能没变（因为瓶颈在别处），</text>
+  <text class="sm on-r" x="40" y="130">还引入了缓存一致性 bug</text>
+
+  <text class="ttl on-g" x="410" y="20">✓ 测量驱动</text>
+  <rect class="bx-g" x="410" y="30" width="330" height="106" rx="9"/>
+  <text class="sm" x="430" y="54">① 定一个目标（P95 响应时间 &lt; 200ms）</text>
+  <text class="sm" x="430" y="74">② 测出现状，找到最慢的那个环节</text>
+  <text class="sm" x="430" y="94">③ 只改那一个地方</text>
+  <text class="sm" x="430" y="114">④ 再测一次，确认真的变快了</text>
+  <text class="sm on-g" x="430" y="130">⑤ 不够就回到 ②</text>
+
+  <rect class="bx-a" x="60" y="164" width="640" height="116" rx="10"/>
+  <text class="ttl on-a" x="80" y="186">为什么"凭感觉"几乎总是错的</text>
+  <text class="lbl" x="80" y="210">Web 应用的耗时分布极度不均匀。一个典型的慢请求：</text>
+  <text class="mono" x="80" y="234">数据库查询 185ms  ·  模板渲染 4ms  ·  JSON 序列化 1ms  ·  业务逻辑 0.3ms</text>
+  <text class="sm" x="80" y="256">你花一天把业务逻辑优化快 10 倍，总耗时从 190.3ms 变成 190.0ms —— 用户感觉不到任何变化。</text>
+  <text class="sm on-a" x="80" y="274">而给那条查询加一个索引，可能从 185ms 降到 2ms。<tspan class="on-a">优化的关键是选对地方，而不是优化得多狠。</tspan></text>
+</svg>
+<figcaption>图 16-1　测量驱动的优化流程</figcaption>
+</figure>
+
+<h2 id="slowquery">慢查询日志</h2>
+
+<p>
+  原书用 Flask-SQLAlchemy 的 <code>get_debug_queries()</code> 在
+  <code>after_app_request</code> 里检查每条查询的耗时。
+  Hibernate 自带这个功能，一个配置项就能开：
+</p>
+
+<div class="code" data-lang="xml" data-file="persistence.xml（新增属性）">
+<pre>
+&lt;!-- 超过这个毫秒数的查询会被记录。Hibernate 6+ 的属性名 --&gt;
+&lt;property name="hibernate.log_slow_query" value="500"/&gt;
+
+&lt;!-- 老版本（5.4.5+）的属性名，两个都写上更保险 --&gt;
+&lt;property name="hibernate.session.events.log.LOG_QUERIES_SLOWER_THAN_MS"
+          value="500"/&gt;
+
+&lt;!-- 顺便打开统计，后面的 N+1 检测器要用 --&gt;
+&lt;property name="hibernate.generate_statistics" value="true"/&gt;
+</pre>
+</div>
+
+<p>然后让对应的 logger 输出到日志（第 17 章会完整配 Logback）：</p>
+
+<div class="code" data-lang="xml" data-file="src/main/resources/logback.xml">
+<pre>
+&lt;configuration&gt;
+  &lt;appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender"&gt;
+    &lt;encoder&gt;
+      &lt;pattern&gt;%d{HH:mm:ss.SSS} %-5level %logger{20} - %msg%n&lt;/pattern&gt;
+    &lt;/encoder&gt;
+  &lt;/appender&gt;
+
+  &lt;!-- 慢查询单独一个 logger，方便在生产环境只开这一个 --&gt;
+  &lt;logger name="org.hibernate.SQL_SLOW" level="INFO"/&gt;
+
+  &lt;!-- 开发时想看全部 SQL 就把这个打开（生产千万别开，日志量巨大） --&gt;
+  &lt;!-- &lt;logger name="org.hibernate.SQL" level="DEBUG"/&gt; --&gt;
+
+  &lt;root level="INFO"&gt;
+    &lt;appender-ref ref="CONSOLE"/&gt;
+  &lt;/root&gt;
+&lt;/configuration&gt;
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 原书指出了一个很重要的点：慢查询监控要开在<strong>生产环境</strong></div>
+  <p>
+    “数据库性能问题很少在开发时出现，因为开发用的数据库小得多。
+    正因为如此，在生产模式下开启这个选项要有用得多。”
+  </p>
+  <p>
+    第 7 章我们把阈值放进了 <code>AppConfig.slowQueryMillis</code>：
+    开发环境设得宽松（或者直接看全部 SQL），生产环境设 500ms 并<strong>当成告警来处理</strong>。
+  </p>
+  <p>
+    用 10 条测试数据永远发现不了"这个查询缺索引"——
+    它在 100 万行的表上才会暴露。
+  </p>
+</div>
+
+<h2 id="servertiming">请求耗时：Server-Timing</h2>
+
+<p>
+  Javalin 有一个 <code>requestLogger</code> 回调，带着请求耗时。
+  我们可以把它写进日志，<strong>更有用的是写进 <code>Server-Timing</code> 响应头</strong>——
+  浏览器开发者工具会直接把它画出来：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="Server-Timing 在浏览器开发者工具里的呈现">
+  <rect class="bx" x="20" y="24" width="720" height="92" rx="9"/>
+  <text class="sm" x="40" y="46">服务端返回的响应头：</text>
+  <text class="mono" x="40" y="70">Server-Timing: total;dur=187.4, db;dur=171.2, render;dur=4.1, queries;desc="23"</text>
+  <text class="sm" x="40" y="94">浏览器的 Network 面板 → 某个请求 → Timing 标签页，会把这些画成一条时间轴</text>
+
+  <rect class="bx-d" x="20" y="132" width="720" height="96" rx="9"/>
+  <text class="sm" x="40" y="154">看起来大概是这样：</text>
+
+  <text class="mono" x="40" y="178">total</text>
+  <rect class="bx-a" x="140" y="166" width="560" height="16" rx="3"/>
+  <text class="sm" x="708" y="179">187ms</text>
+
+  <text class="mono" x="40" y="200">db</text>
+  <rect class="bx-r" x="140" y="188" width="512" height="16" rx="3"/>
+  <text class="sm" x="660" y="201">171ms &#8592; 瓶颈在这</text>
+
+  <text class="mono" x="40" y="222">render</text>
+  <rect class="bx-g" x="140" y="210" width="13" height="16" rx="3"/>
+  <text class="sm" x="162" y="223">4ms</text>
+</svg>
+<figcaption>图 16-2　<code>Server-Timing</code> 让服务端耗时在浏览器里可见</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/db/QueryStats.java">
+<pre>
+package com.example.javalinky.db;
+
+import org.hibernate.resource.jdbc.spi.StatementInspector;
+
+/**
+ * 统计"当前请求发了多少条 SQL、一共花了多久"。
+ * 原理：Hibernate 每次要执行 SQL 都会先调用 inspect()，
+ * 我们在这里数一下（并不修改 SQL，原样返回）。
+ */
+public class QueryStats implements StatementInspector {
+
+    /** 用 ThreadLocal 是因为每个请求在自己的线程里（虚拟线程同样适用） */
+    private static final ThreadLocal&lt;Counter&gt; CURRENT = new ThreadLocal&lt;&gt;();
+
+    public static class Counter {
+        public int count;
+        public long nanos;
+        public String slowest;
+        public long slowestNanos;
+    }
+
+    public static void start() {
+        CURRENT.set(new Counter());
+    }
+
+    public static Counter stop() {
+        Counter counter = CURRENT.get();
+        CURRENT.remove();
+        return counter == null ? new Counter() : counter;
+    }
+
+    public static Counter current() {
+        return CURRENT.get();
+    }
+
+    @Override
+    public String inspect(String sql) {
+        Counter counter = CURRENT.get();
+        if (counter != null) counter.count++;
+        return sql;         // 必须原样返回，否则就改了 SQL
+    }
+
+    /** 记录单条查询的耗时（由下面的计时包装调用） */
+    public static void record(String sql, long nanos) {
+        Counter counter = CURRENT.get();
+        if (counter == null) return;
+        counter.nanos += nanos;
+        if (nanos &gt; counter.slowestNanos) {
+            counter.slowestNanos = nanos;
+            counter.slowest = sql;
+        }
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="xml" data-file="persistence.xml（注册它）">
+<pre>
+&lt;property name="hibernate.session_factory.statement_inspector"
+          value="com.example.javalinky.db.QueryStats"/&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Timing.java">
+<pre>
+package com.example.javalinky.web;
+
+import com.example.javalinky.config.AppConfig;
+import com.example.javalinky.db.QueryStats;
+import io.javalin.config.JavalinConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public final class Timing {
+
+    private static final Logger log = LoggerFactory.getLogger(Timing.class);
+    private static final String START = "requestStartNanos";
+
+    public static void install(JavalinConfig config, AppConfig cfg) {
+
+        config.routes.before(ctx -&gt; {
+            ctx.attribute(START, System.nanoTime());
+            QueryStats.start();
+        });
+
+        config.routes.after(ctx -&gt; {
+            Long start = ctx.attribute(START);
+            if (start == null) return;
+
+            long totalMs = (System.nanoTime() - start) / 1_000_000;
+            var stats = QueryStats.stop();
+            long dbMs = stats.nanos / 1_000_000;
+
+            // ① 写进响应头，开发者工具能直接看到
+            ctx.header("Server-Timing", String.format(
+                "total;dur=%d, db;dur=%d, queries;desc=\"%d\"",
+                totalMs, dbMs, stats.count));
+
+            // ② 慢请求写日志
+            if (totalMs &gt;= cfg.slowQueryMillis()) {
+                log.warn("慢请求 {} {} 共 {}ms，其中数据库 {}ms（{} 条查询）。最慢的一条：{}",
+                    ctx.method(), ctx.path(), totalMs, dbMs, stats.count, stats.slowest);
+            }
+
+            // ③ 查询条数异常多 → 很可能是 N+1
+            if (stats.count &gt; 20) {
+                log.warn("疑似 N+1：{} {} 发了 {} 条 SQL",
+                    ctx.method(), ctx.path(), stats.count);
+            }
+        });
+    }
+
+    private Timing() {}
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; Javalin 自带的 requestLogger 也能用</div>
+  <div class="code" data-lang="java">
+<pre>
+config.requestLogger.http((ctx, ms) -&gt; {
+    log.info("{} {} → {} ({}ms)", ctx.method(), ctx.path(), ctx.status(), ms.longValue());
+});
+</pre>
+  </div>
+  <p>
+    区别是：<code>requestLogger</code> 在<strong>响应写完之后</strong>才跑，
+    所以它的耗时包含了网络写出的时间，更接近"用户感受到的"；
+    但那时已经不能再改响应头了，所以 <code>Server-Timing</code> 必须在
+    <code>after</code> 里设置。两者可以同时用。
+  </p>
+</div>
+
+<h2 id="nplusone">自动发现 N+1</h2>
+
+<p>
+  第 11、12 章我们两次提到 N+1 问题，并说"第 16 章会讲怎么自动发现"。
+  上面的 <code>Timing</code> 里那段"查询条数 &gt; 20 就告警"已经是一个朴素的检测器了。
+  更严格的做法是在<strong>测试里</strong>断言查询条数：
+</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/NPlusOneTest.java">
+<pre>
+package com.example.javalinky;
+
+import com.example.javalinky.db.QueryStats;
+import io.javalin.testtools.JavalinTest;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class NPlusOneTest {
+
+    @Test
+    void 首页列20篇文章时查询条数必须是常数() {
+        var app = JavalinkyApp.create(TestFixtures.config());
+
+        JavalinTest.test(app, (server, client) -&gt; {
+            // 准备 20 篇文章，作者各不相同
+            TestFixtures.withTransaction(em -&gt; {
+                TestFixtures.seedRoles(em);
+                for (int i = 0; i &lt; 20; i++) {
+                    var user = TestFixtures.user(em, "user" + i);
+                    em.persist(new com.example.javalinky.model.Post("文章 " + i, user));
+                }
+            });
+
+            client.get("/");      // 请求期间 QueryStats 在数
+
+            // 这个上限是人工定的：count 查询 + 主查询 + 评论数聚合 + 当前用户
+            // 如果有人不小心引入了 N+1，这个数字会变成 20+，测试立刻变红
+            assertThat(lastQueryCount()).isLessThanOrEqualTo(6);
+        });
+    }
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 这类测试叫“性能回归测试”，很值得写</div>
+  <p>
+    它不测"快不快"（那依赖机器性能，在 CI 上不稳定），而是测
+    <strong>"查询条数是不是常数"</strong>——这是个确定性的、可断言的性质。
+  </p>
+  <p>
+    价值在于：半年后有人在模板里加了一行
+    <code>${post.author.role.name}</code>，
+    N+1 就悄悄回来了。人眼 review 很难发现，但这个测试会当场变红。
+  </p>
+  <p>
+    Java 生态还有现成的工具：<strong>Hypersistence Utils</strong> 和
+    <strong>db-util</strong> 都提供了"断言某段代码只发了 N 条 SQL"的工具类。
+  </p>
+</div>
+
+<h2 id="explain">读执行计划，加对索引</h2>
+
+<p>
+  找到慢查询之后，下一步是搞清楚"它为什么慢"。
+  所有关系数据库都有 <code>EXPLAIN</code> 命令，PostgreSQL 的 <code>EXPLAIN ANALYZE</code>
+  还会真的执行一次并报告实际耗时：
+</p>
+
+<div class="code" data-lang="sql">
+<pre>
+EXPLAIN ANALYZE
+SELECT p.* FROM posts p
+  JOIN follows f ON f.followed_id = p.author_id
+ WHERE f.follower_id = 42
+ ORDER BY p.timestamp DESC
+ LIMIT 20;
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+Limit  (cost=18453.21..18453.26 rows=20 width=312)
+       (actual time=184.332..184.339 rows=20 loops=1)
+  -&gt;  Sort  (cost=18453.21..18520.44 rows=26892 width=312)
+            (actual time=184.330..184.333 rows=20 loops=1)
+        Sort Key: p.timestamp DESC
+        Sort Method: top-N heapsort  Memory: 41kB
+        -&gt;  Hash Join  (cost=312.44..17689.12 rows=26892 width=312)
+                       (actual time=2.112..170.884 rows=26350 loops=1)
+              Hash Cond: (p.author_id = f.followed_id)
+              -&gt;  Seq Scan on posts p  &#8592;&#8592;&#8592; 全表扫描！
+                    (cost=0.00..16204.00 rows=412000 width=312)
+                    (actual time=0.011..88.421 rows=412000 loops=1)
+              -&gt;  Hash  (cost=301.00..301.00 rows=915 width=8) ...
+Planning Time: 0.412 ms
+Execution Time: 184.401 ms
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="执行计划里的关键信号">
+  <rect class="bx" x="20" y="24" width="720" height="152" rx="9"/>
+  <text class="ttl" x="40" y="46">执行计划里要找的几个关键词</text>
+
+  <text class="mono on-r" x="40" y="74">Seq Scan</text>
+  <text class="sm" x="190" y="74">顺序扫描（全表扫）。小表上没问题，大表上<tspan class="on-r">几乎总是要加索引</tspan></text>
+
+  <text class="mono on-g" x="40" y="98">Index Scan</text>
+  <text class="sm" x="190" y="98">用上索引了，好</text>
+
+  <text class="mono on-g" x="40" y="122">Index Only Scan</text>
+  <text class="sm" x="190" y="122">最好的情况：需要的列全在索引里，连表都不用读</text>
+
+  <text class="mono on-a" x="40" y="146">rows=412000</text>
+  <text class="sm" x="190" y="146">这一步处理了多少行。和 <tspan class="mono">actual rows</tspan> 差太多说明统计信息过期了（跑 ANALYZE）</text>
+
+  <text class="mono on-r" x="40" y="168">Sort Method: external merge</text>
+  <text class="sm" x="280" y="168">排序用到了磁盘 —— 考虑加索引让它不用排序</text>
+
+  <rect class="bx-g" x="20" y="192" width="720" height="98" rx="9"/>
+  <text class="ttl on-g" x="40" y="214">针对上面那个计划，加这个索引</text>
+  <text class="mono" x="40" y="240">CREATE INDEX ix_posts_author_timestamp ON posts (author_id, timestamp DESC);</text>
+  <text class="sm" x="40" y="264">为什么这个顺序？因为 JOIN 条件用 author_id 定位，ORDER BY 用 timestamp 排序。</text>
+  <text class="sm on-g" x="40" y="282">复合索引的列顺序必须是：<tspan class="on-g">先等值条件的列，再排序的列</tspan>。反过来就用不上了。</text>
+</svg>
+<figcaption>图 16-3　执行计划里的关键信号</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 索引的几条实用规则</div>
+  <ol>
+    <li><strong>WHERE 和 JOIN 用到的列要有索引。</strong>这是 80% 的性能问题的答案。</li>
+    <li><strong>复合索引遵循"最左前缀"。</strong>
+        <code>(a, b, c)</code> 这个索引能加速 <code>where a=?</code>、
+        <code>where a=? and b=?</code>，但<strong>不能</strong>加速 <code>where b=?</code>。</li>
+    <li><strong>索引不是免费的。</strong>每个索引都会让 INSERT / UPDATE 变慢，并占磁盘。
+        不要给每一列都建索引。</li>
+    <li><strong>对函数的查询用不上普通索引。</strong>
+        <code>where lower(email) = ?</code> 需要一个表达式索引：
+        <code>CREATE INDEX ... ON users (lower(email))</code>。
+        （我们第 5 章的 <code>findByEmail</code> 就是这种情况！）</li>
+    <li><strong>索引也要进迁移文件。</strong>千万不要手工在生产库上加索引 ——
+        下次部署一个新环境时就没有了。</li>
+  </ol>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 加索引时别锁住生产库</div>
+  <p>
+    在 PostgreSQL 上，普通的 <code>CREATE INDEX</code> 会<strong>锁住整张表的写入</strong>，
+    几百万行的表可能锁好几分钟 —— 这段时间你的网站等于挂了。
+  </p>
+  <div class="code" data-lang="sql">
+<pre>
+-- 生产环境加索引要用这个（不阻塞写入，代价是慢一些）
+CREATE INDEX CONCURRENTLY ix_posts_author_timestamp
+    ON posts (author_id, timestamp DESC);
+</pre>
+  </div>
+  <p>
+    注意 <code>CONCURRENTLY</code> <strong>不能在事务里执行</strong>，
+    所以 Flyway 的迁移脚本要加一行标记：
+  </p>
+  <div class="code" data-lang="sql">
+<pre>
+-- V8__add_post_index.sql
+-- flyway:executeInTransaction=false
+CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_posts_author_timestamp
+    ON posts (author_id, timestamp DESC);
+</pre>
+  </div>
+</div>
+
+<h2 id="profiling">CPU 剖析：JFR</h2>
+
+<p>
+  数据库之外的另一类性能问题是 CPU 消耗：某个方法在疯狂计算。
+  原书用 Python 的 cProfile，并提醒"剖析器会让应用显著变慢，不建议在生产环境用"。
+</p>
+
+<p>
+  Java 这边的情况好得多：<strong>JFR（Java Flight Recorder）</strong>是 JDK 自带的，
+  开销只有百分之一到几个百分点，<strong>设计上就是可以在生产环境常开的</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="JFR 的使用流程">
+  <rect class="bx-b" x="20" y="30" width="170" height="70" rx="9"/>
+  <text class="ttl on-b" x="105" y="52" text-anchor="middle">① 开始记录</text>
+  <text class="sm" x="105" y="72" text-anchor="middle">启动时加参数</text>
+  <text class="sm" x="105" y="88" text-anchor="middle">或运行中用 jcmd</text>
+
+  <path class="ln-a" d="M192 65 H226" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-a" x="230" y="30" width="170" height="70" rx="9"/>
+  <text class="ttl on-a" x="315" y="52" text-anchor="middle">② 复现问题</text>
+  <text class="sm" x="315" y="72" text-anchor="middle">压测，或者等生产</text>
+  <text class="sm" x="315" y="88" text-anchor="middle">环境自然出现慢</text>
+
+  <path class="ln-a" d="M402 65 H436" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="440" y="30" width="150" height="70" rx="9"/>
+  <text class="ttl on-g" x="515" y="52" text-anchor="middle">③ 导出 .jfr</text>
+  <text class="mono" x="515" y="72" text-anchor="middle">JFR.dump</text>
+  <text class="sm" x="515" y="88" text-anchor="middle">一个二进制文件</text>
+
+  <path class="ln-a" d="M592 65 H626" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-p" x="630" y="30" width="110" height="70" rx="9"/>
+  <text class="ttl on-p" x="685" y="52" text-anchor="middle">④ 分析</text>
+  <text class="sm" x="685" y="72" text-anchor="middle">JDK Mission</text>
+  <text class="sm" x="685" y="88" text-anchor="middle">Control</text>
+
+  <rect class="bx" x="20" y="124" width="720" height="156" rx="9"/>
+  <text class="ttl" x="40" y="146">JFR 能回答的问题（都是从同一个文件里看）</text>
+
+  <text class="lbl on-a" x="40" y="172">CPU 热点</text>
+  <text class="sm" x="180" y="172">哪些方法占用了最多 CPU 时间（带完整调用栈）</text>
+
+  <text class="lbl on-a" x="40" y="194">内存分配</text>
+  <text class="sm" x="180" y="194">哪些地方在疯狂创建对象 —— 常常是性能问题的真正原因</text>
+
+  <text class="lbl on-a" x="40" y="216">GC 行为</text>
+  <text class="sm" x="180" y="216">垃圾回收停顿多久、多频繁</text>
+
+  <text class="lbl on-a" x="40" y="238">锁竞争</text>
+  <text class="sm" x="180" y="238">线程在等哪个锁（synchronized 块的争抢）</text>
+
+  <text class="lbl on-a" x="40" y="260">IO 与 JDBC</text>
+  <text class="sm" x="180" y="260">文件读写、socket、以及每条 JDBC 语句的耗时</text>
+  <text class="sm on-g" x="520" y="260">&#8592; 这一项让 JFR 也能查慢查询</text>
+</svg>
+<figcaption>图 16-4　JFR 的使用流程</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+# 方式一：启动时就开始记录 60 秒
+java -XX:StartFlightRecording=duration=60s,filename=app.jfr,settings=profile \
+     -jar target/javalinky.jar
+
+# 方式二（更常用）：对一个已经在跑的进程动态开启
+jps -l                                   # 找出进程号
+jcmd &lt;pid&gt; JFR.start name=debug settings=profile
+# ... 这时候去复现慢的操作 ...
+jcmd &lt;pid&gt; JFR.dump name=debug filename=app.jfr
+jcmd &lt;pid&gt; JFR.stop name=debug
+
+# 不装 GUI 也能看个大概
+jfr summary app.jfr
+jfr print --events jdk.ExecutionSample app.jfr | head -50
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>settings=profile</code> 和 <code>settings=default</code></div>
+  <div class="tw">
+  <table>
+  <tr><th>设置</th><th>开销</th><th>用在</th></tr>
+  <tr><td><code>default</code></td><td>约 1%</td><td><strong>生产环境常开</strong>，出问题时直接 dump 看历史</td></tr>
+  <tr><td><code>profile</code></td><td>约 2–5%</td><td>排查问题时临时开，采样频率高得多</td></tr>
+  </table>
+  </div>
+  <p>
+    一个很实用的生产配置：常开 <code>default</code> 并设置
+    <code>disk=true,maxage=1h</code>，这样问题发生后你还能 dump 出<strong>刚刚过去那一小时</strong>的数据。
+    这在排查"偶发的卡顿"时是救命的 —— 不需要复现。
+  </p>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 火焰图：async-profiler</div>
+  <p>
+    JFR 的 GUI 不是每个人都喜欢。<strong>async-profiler</strong> 能直接生成
+    <strong>火焰图</strong>（一张 SVG，横轴是占用时间比例，纵轴是调用栈深度），
+    看一眼就知道时间花在哪：
+  </p>
+  <div class="code" data-lang="bash">
+<pre>
+# 采样 30 秒，生成火焰图
+./asprof -d 30 -f flame.html &lt;pid&gt;
+</pre>
+  </div>
+  <p>
+    火焰图的读法：<strong>找最宽的那个"平台"</strong>——
+    宽度代表占用的时间比例，所以最宽的格子就是热点。
+  </p>
+</div>
+
+<h2 id="metrics">指标：看趋势而不是看瞬间</h2>
+
+<p>
+  日志回答"刚才那个请求怎么了"，指标回答"最近一小时整体怎么样"。
+  两者都需要。Javalin 有一个 Micrometer 模块：
+</p>
+
+<div class="code" data-lang="xml">
+<pre>
+&lt;dependency&gt;
+  &lt;groupId&gt;io.javalin&lt;/groupId&gt;
+  &lt;artifactId&gt;javalin-micrometer&lt;/artifactId&gt;
+  &lt;version&gt;${javalin.version}&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;io.micrometer&lt;/groupId&gt;
+  &lt;artifactId&gt;micrometer-registry-prometheus&lt;/artifactId&gt;
+  &lt;version&gt;1.15.4&lt;/version&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java">
+<pre>
+var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+
+// JVM 层面的内置指标
+new JvmMemoryMetrics().bindTo(registry);
+new JvmGcMetrics().bindTo(registry);
+new JvmThreadMetrics().bindTo(registry);
+new ProcessorMetrics().bindTo(registry);
+
+Javalin.create(config -&gt; {
+    config.registerPlugin(new MicrometerPlugin(cfg -&gt; cfg.registry = registry));
+
+    // 暴露给 Prometheus 抓取。注意要加访问控制！
+    config.routes.get("/internal/metrics", ctx -&gt; ctx.result(registry.scrape()));
+});
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 最该先监控的四个指标</div>
+  <p>Google SRE 把它们叫“四个黄金信号”：</p>
+  <div class="tw">
+  <table>
+  <tr><th>信号</th><th>具体指标</th><th>告警线的例子</th></tr>
+  <tr><td><strong>延迟</strong></td><td>响应时间的 P50 / P95 / P99</td><td>P95 &gt; 500ms 持续 5 分钟</td></tr>
+  <tr><td><strong>流量</strong></td><td>每秒请求数</td><td>（通常不告警，用来理解其他指标）</td></tr>
+  <tr><td><strong>错误</strong></td><td>5xx 响应的比例</td><td>&gt; 1% 持续 2 分钟</td></tr>
+  <tr><td><strong>饱和度</strong></td><td>数据库连接池使用率、线程池、堆内存</td><td>连接池使用率 &gt; 90%</td></tr>
+  </table>
+  </div>
+  <p>
+    注意延迟要看<strong>百分位</strong>而不是平均值。
+    平均 100ms 可能意味着"99% 的人 50ms，1% 的人 5 秒"——
+    而那 1% 正是会投诉的人。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>/internal/metrics</code> 不能公开</div>
+  <p>
+    指标端点会暴露你的接口列表、流量规模、错误率、甚至堆内存布局。
+    必须做访问控制，至少三种选择：
+  </p>
+  <ul>
+    <li>绑在另一个只对内网开放的端口上（<code>config.jetty.addConnector</code>）；</li>
+    <li>加 Basic 认证（<code>config.bundledPlugins.enableBasicAuth</code>）；</li>
+    <li>在 nginx 层按来源 IP 限制（第 17 章）。</li>
+  </ul>
+</div>
+
+<h2 id="cache">最后：关于缓存</h2>
+
+<p>
+  缓存是最诱人也最危险的优化手段。它能让某些操作快 100 倍，
+  同时引入"数据不一致"这类最难排查的 bug。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="缓存的几个层次">
+  <text class="ttl" x="20" y="20">从离用户最近的地方开始考虑（越靠上效果越好、成本越低）</text>
+
+  <rect class="bx-g" x="20" y="32" width="720" height="40" rx="7"/>
+  <text class="lbl on-g" x="40" y="48">① 浏览器缓存 / CDN</text>
+  <text class="sm" x="230" y="48">静态文件加长期 Cache-Control + 文件名带哈希。<tspan class="on-g">零风险，必做</tspan></text>
+  <text class="sm" x="230" y="64">Javalin：staticFiles.headers = Map.of("Cache-Control", "max-age=31536000, immutable")</text>
+
+  <rect class="bx-g" x="20" y="80" width="720" height="40" rx="7"/>
+  <text class="lbl on-g" x="40" y="96">② HTTP 条件请求（ETag）</text>
+  <text class="sm" x="230" y="96">内容没变就返回 304，省掉传输。<tspan class="on-g">风险很低</tspan></text>
+  <text class="sm" x="230" y="112">Javalin：config.http.generateEtags = true</text>
+
+  <rect class="bx-a" x="20" y="128" width="720" height="40" rx="7"/>
+  <text class="lbl on-a" x="40" y="144">③ 应用内缓存（Caffeine）</text>
+  <text class="sm" x="230" y="144">进程内的 Map，带过期和容量上限。<tspan class="on-a">注意：多实例部署时各自一份，会不一致</tspan></text>
+  <text class="sm" x="230" y="160">适合：角色表这种"很少变、所有人都要读"的数据</text>
+
+  <rect class="bx-a" x="20" y="176" width="720" height="40" rx="7"/>
+  <text class="lbl on-a" x="40" y="192">④ 分布式缓存（Redis）</text>
+  <text class="sm" x="230" y="192">多实例共享。<tspan class="on-a">多了一个要运维的组件，以及缓存失效的复杂度</tspan></text>
+
+  <rect class="bx-r" x="20" y="224" width="720" height="60" rx="7"/>
+  <text class="ttl on-r" x="40" y="246">在动用 ③ 和 ④ 之前，先确认你已经做完了这些</text>
+  <text class="sm" x="40" y="268">· 该加的索引都加了　· N+1 都消了　· 查询只取需要的列　· 分页没有用巨大的 OFFSET</text>
+  <text class="sm on-r" x="40" y="282">绝大多数"需要缓存"的场景，其实是"缺一个索引"。<tspan class="on-r">缓存不该用来掩盖设计问题。</tspan></text>
+</svg>
+<figcaption>图 16-5　缓存的层次</figcaption>
+</figure>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本章对应原书 <b>git checkout 16a / 16b</b>（慢查询日志、代码剖析）。</div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>造一批大数据：<code>Cli fake 500 20000</code>。然后访问首页的深页（<code>?page=500</code>），
+        看浏览器开发者工具里的 <code>Server-Timing</code>，记下耗时。</li>
+    <li>把 <code>hibernate.log_slow_query</code> 设成 <code>10</code>（毫秒），
+        浏览几个页面，看日志里冒出哪些查询。找出最慢的那一条。</li>
+    <li>连上数据库，对上一题找到的慢查询跑 <code>EXPLAIN ANALYZE</code>。
+        找出 <code>Seq Scan</code>。加一个索引（写成迁移文件），再跑一次对比。</li>
+    <li>故意制造一个 N+1：在 <code>tag/posts.jte</code> 里加一行
+        <code>${post.authorUsername()}</code> 改成访问实体的
+        <code>post.getAuthor().getRole().getName()</code>。
+        访问首页，看 <code>Server-Timing</code> 里的 <code>queries</code> 数字从 5 变成多少。</li>
+    <li>写一个像正文里那样的"查询条数断言"测试，然后让上一题那个 N+1 把它弄红。</li>
+    <li>用 JFR 采一次：启动应用，用 <code>ab</code> 或 <code>hey</code> 压首页
+        （<code>hey -n 2000 -c 20 http://localhost:7070/</code>），
+        同时 <code>jcmd &lt;pid&gt; JFR.start settings=profile</code>，
+        压完 dump 出来用 <code>jfr print --events jdk.ExecutionSample</code> 看热点。</li>
+    <li>给静态文件配上长期缓存头，然后在开发者工具的 Network 面板里确认
+        第二次访问时 CSS 和 JS 是 <code>(from disk cache)</code>。</li>
+    <li>（进阶）给第 9 章的角色查询加一个 Caffeine 缓存
+        （角色几乎不变，但每个请求都要查）。
+        然后想清楚一个问题：<strong>管理员改了某个角色的权限之后，缓存怎么失效？</strong>
+        这个问题的答案就是缓存复杂度的来源。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

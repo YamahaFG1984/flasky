@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 18 章 · 更多资源 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="18">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 18 章</span>
+<h1>更多资源</h1>
+<p class="lede">
+  你读完了。Javalinky 从一行 “Hello World” 长成了一个有用户系统、权限、
+  富文本、关注关系、REST API、测试和部署流程的完整应用。
+  这最后一章讲讲接下来往哪走。
+</p>
+
+<div class="goals">
+  <h4>本章内容</h4>
+  <ul>
+    <li>配好 IDE，让它替你干活</li>
+    <li>怎么找靠谱的 Java 库</li>
+    <li>一张 Java Web 生态地图</li>
+    <li>三条继续深入的路线</li>
+    <li>和其他 Java Web 框架的关系</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="ide">把 IDE 用好</h2>
+
+<p>
+  原书这一节推荐了 PyCharm、VS Code、PyDev。
+  Java 的情况是：<strong>IDE 的收益比 Python 大得多</strong>——
+  因为类型信息完整，IDE 能做到准确的跳转、补全和重构，而不是靠猜。
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128161;</span><h4>IntelliJ IDEA</h4>
+    <p>事实标准。社区版免费且足够本教程全部内容（Web 开发不需要付费版的那些框架支持）。</p></div>
+  <div class="card"><span class="ic">&#128187;</span><h4>VS Code</h4>
+    <p>装 “Extension Pack for Java”。启动快、占资源少，适合已经习惯它的人。重构能力弱一些。</p></div>
+  <div class="card"><span class="ic">&#127758;</span><h4>Eclipse</h4>
+    <p>老牌全功能免费 IDE。界面古典，但 Maven 和调试支持很完整。</p></div>
+  <div class="card"><span class="ic">&#9749;</span><h4>NetBeans</h4>
+    <p>Apache 基金会维护。对 Maven 的开箱支持最好。</p></div>
+</div>
+
+<h3>值得装的插件</h3>
+
+<div class="tw">
+<table>
+<tr><th>插件</th><th>解决什么</th></tr>
+<tr><td><strong>JTE</strong></td><td>模板文件里的语法高亮、<code>@param</code> 类型补全、
+    <code>${}</code> 里的 Java 表达式补全、从模板跳到 record 定义。
+    <strong>第 3 章之后几乎必装</strong>，不然写模板像在记事本里写代码</td></tr>
+<tr><td><strong>SonarQube for IDE</strong>（旧名 SonarLint）</td><td>实时静态分析。
+    能当场指出"这里可能 NPE"、"这个资源没关"、"这个正则有性能问题"</td></tr>
+<tr><td><strong>Maven Helper</strong></td><td>可视化依赖树，一键找出版本冲突</td></tr>
+<tr><td><strong>Database Tools</strong>（IDEA 自带 / VS Code 装 SQLTools）</td><td>
+    直接在 IDE 里连数据库、跑查询、看执行计划。省掉在终端里敲 psql</td></tr>
+<tr><td><strong>HTTP Client</strong>（IDEA 自带 <code>.http</code> 文件）</td><td>
+    把第 14 章那些 curl 命令写成文件存进仓库，点一下就发请求</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 三个让开发体验质变的 IDE 设置</div>
+  <ol>
+    <li><strong>打开“自动构建项目”</strong>（Settings → Build → Compiler →
+        Build project automatically）。配合 Debug 模式下的热交换，
+        改方法体之后保存就生效，不用重启 —— 这最接近 Flask 的自动重载体验。</li>
+    <li><strong>配好运行配置</strong>：把 <code>APP_PROFILE=dev</code> 这些环境变量
+        填进 Run Configuration，以后点一下绿色三角就能跑，不用每次敲 mvn 命令。</li>
+    <li><strong>学会条件断点</strong>：右键断点可以填条件（比如
+        <code>user.getUsername().equals("john")</code>）。
+        调试"只有某个用户会出错"这类问题时，比加 <code>log.info</code> 高效得多。</li>
+  </ol>
+</div>
+
+<h2 id="finding">怎么找靠谱的 Java 库</h2>
+
+<p>
+  原书这一节讲"怎么找 Flask 扩展"。Java 这边没有"官方扩展注册表"，
+  但有几个靠得住的入口：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>去处</th><th>适合找什么</th></tr>
+<tr><td><a href="https://central.sonatype.com">central.sonatype.com</a></td><td>Maven Central 的官方搜索。查某个库的最新版本、坐标、依赖</td></tr>
+<tr><td><a href="https://mvnrepository.com">mvnrepository.com</a></td><td>同上，界面更友好，还能看到"有多少项目在用它"</td></tr>
+<tr><td><a href="https://javalin.io/plugins">javalin.io/plugins</a></td><td>Javalin 的官方与社区插件清单</td></tr>
+<tr><td><a href="https://github.com/akullpp/awesome-java">awesome-java</a></td><td>按分类整理的精选库列表</td></tr>
+<tr><td><a href="https://javalin.io/documentation">Javalin 官方文档</a></td><td>一页讲完整个框架。<strong>强烈建议通读一遍</strong>，大概一小时</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 判断一个库值不值得用：五个信号</div>
+  <ol>
+    <li><strong>最近一次发布是什么时候。</strong>超过两年没更新的库要谨慎 ——
+        尤其是 Jakarta EE 迁移（<code>javax.*</code> → <code>jakarta.*</code>）之后，
+        老库可能根本跑不起来。</li>
+    <li><strong>传递依赖有多少。</strong><code>mvn dependency:tree</code> 看一眼。
+        一个工具库拖进来 40 个 jar 是个坏信号。</li>
+    <li><strong>许可证。</strong>Apache 2.0 / MIT / BSD 可以放心用；
+        GPL / AGPL 要看清楚对你的项目有什么要求。</li>
+    <li><strong>issue 的响应情况。</strong>不是看有多少 issue，
+        而是看维护者<strong>回不回</strong>。</li>
+    <li><strong>有没有安全公告记录。</strong>有 CVE 不一定是坏事（说明有人在审计），
+        但要看修得快不快。</li>
+  </ol>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 一个必须做的自动化：依赖漏洞扫描</div>
+  <p>
+    Java 生态出过 Log4Shell 这种级别的漏洞。<strong>不要靠人工关注安全新闻</strong>，
+    让工具每天帮你查：
+  </p>
+  <div class="code" data-lang="xml">
+<pre>
+&lt;!-- OWASP Dependency-Check：扫描已知 CVE --&gt;
+&lt;plugin&gt;
+  &lt;groupId&gt;org.owasp&lt;/groupId&gt;
+  &lt;artifactId&gt;dependency-check-maven&lt;/artifactId&gt;
+  &lt;version&gt;（查当前版本）&lt;/version&gt;
+  &lt;executions&gt;
+    &lt;execution&gt;&lt;goals&gt;&lt;goal&gt;check&lt;/goal&gt;&lt;/goals&gt;&lt;/execution&gt;
+  &lt;/executions&gt;
+&lt;/plugin&gt;
+</pre>
+  </div>
+  <p>
+    或者更省事：在 GitHub 上打开 <strong>Dependabot</strong>——
+    它会自动给有漏洞的依赖提升级 PR。免费，配置只要一个文件。
+  </p>
+</div>
+
+<h2 id="ecosystem">Java Web 生态地图</h2>
+
+<p>
+  本教程用到的只是其中一小部分。这张图是常见选择的全景，
+  遇到需求时知道该往哪个方向找：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 460" role="img" aria-label="Java Web 开发生态地图">
+  <rect class="bx-b" x="20" y="24" width="230" height="124" rx="9"/>
+  <text class="ttl on-b" x="36" y="46">Web 框架</text>
+  <text class="sm on-a" x="36" y="66">Javalin　← 本教程</text>
+  <text class="sm" x="36" y="84">Spring Boot（生态最大）</text>
+  <text class="sm" x="36" y="102">Quarkus（启动快、原生镜像）</text>
+  <text class="sm" x="36" y="120">Micronaut（编译期 DI）</text>
+  <text class="sm" x="36" y="138">Ktor（Kotlin 优先）</text>
+
+  <rect class="bx-b" x="266" y="24" width="230" height="124" rx="9"/>
+  <text class="ttl on-b" x="282" y="46">数据访问</text>
+  <text class="sm on-a" x="282" y="66">Hibernate / JPA　← 本教程</text>
+  <text class="sm" x="282" y="84">jOOQ（类型安全 SQL）</text>
+  <text class="sm" x="282" y="102">JDBI 3（轻量，SQL 可见）</text>
+  <text class="sm" x="282" y="120">MyBatis</text>
+  <text class="sm" x="282" y="138">Spring Data JPA</text>
+
+  <rect class="bx-b" x="512" y="24" width="228" height="124" rx="9"/>
+  <text class="ttl on-b" x="528" y="46">模板引擎</text>
+  <text class="sm on-a" x="528" y="66">JTE　← 本教程（类型安全）</text>
+  <text class="sm" x="528" y="84">Thymeleaf（Spring 默认）</text>
+  <text class="sm" x="528" y="102">Pebble（语法最接近 Jinja2）</text>
+  <text class="sm" x="528" y="120">FreeMarker / Velocity</text>
+  <text class="sm" x="528" y="138">Mustache / Handlebars</text>
+
+  <rect class="bx-g" x="20" y="164" width="230" height="124" rx="9"/>
+  <text class="ttl on-g" x="36" y="186">测试</text>
+  <text class="sm on-a" x="36" y="206">JUnit 5 + AssertJ　← 本教程</text>
+  <text class="sm on-a" x="36" y="224">JavalinTest / Playwright</text>
+  <text class="sm" x="36" y="242">Testcontainers（真数据库）</text>
+  <text class="sm" x="36" y="260">Mockito（打桩）</text>
+  <text class="sm" x="36" y="278">WireMock（假第三方接口）</text>
+
+  <rect class="bx-g" x="266" y="164" width="230" height="124" rx="9"/>
+  <text class="ttl on-g" x="282" y="186">安全</text>
+  <text class="sm on-a" x="282" y="206">bcrypt / java-jwt　← 本教程</text>
+  <text class="sm" x="282" y="224">Spring Security（最全）</text>
+  <text class="sm" x="282" y="242">Pac4j（框架中立）</text>
+  <text class="sm" x="282" y="260">Keycloak（独立身份服务）</text>
+  <text class="sm" x="282" y="278">Argon2（更现代的密码哈希）</text>
+
+  <rect class="bx-g" x="512" y="164" width="228" height="124" rx="9"/>
+  <text class="ttl on-g" x="528" y="186">可观测性</text>
+  <text class="sm on-a" x="528" y="206">SLF4J + Logback　← 本教程</text>
+  <text class="sm on-a" x="528" y="224">Micrometer / JFR</text>
+  <text class="sm" x="528" y="242">OpenTelemetry（分布式追踪）</text>
+  <text class="sm" x="528" y="260">Prometheus + Grafana</text>
+  <text class="sm" x="528" y="278">Sentry（错误聚合）</text>
+
+  <rect class="bx-p" x="20" y="304" width="230" height="124" rx="9"/>
+  <text class="ttl on-p" x="36" y="326">异步与队列</text>
+  <text class="sm" x="36" y="346">虚拟线程（Java 21 内置）</text>
+  <text class="sm" x="36" y="364">JobRunr / Quartz（定时任务）</text>
+  <text class="sm" x="36" y="382">db-scheduler（数据库队列）</text>
+  <text class="sm" x="36" y="400">Kafka / RabbitMQ（消息）</text>
+  <text class="sm" x="36" y="418">Project Reactor（响应式）</text>
+
+  <rect class="bx-p" x="266" y="304" width="230" height="124" rx="9"/>
+  <text class="ttl on-p" x="282" y="326">缓存与存储</text>
+  <text class="sm" x="282" y="346">Caffeine（进程内缓存）</text>
+  <text class="sm" x="282" y="364">Redis（Jedis / Lettuce）</text>
+  <text class="sm" x="282" y="382">MinIO / S3 SDK（对象存储）</text>
+  <text class="sm" x="282" y="400">Elasticsearch / OpenSearch</text>
+  <text class="sm" x="282" y="418">PostgreSQL 全文检索（够用）</text>
+
+  <rect class="bx-p" x="512" y="304" width="228" height="124" rx="9"/>
+  <text class="ttl on-p" x="528" y="326">构建与交付</text>
+  <text class="sm on-a" x="528" y="346">Maven　← 本教程</text>
+  <text class="sm" x="528" y="364">Gradle（增量构建更快）</text>
+  <text class="sm" x="528" y="382">Jib（不写 Dockerfile 建镜像）</text>
+  <text class="sm" x="528" y="400">GraalVM Native Image</text>
+  <text class="sm" x="528" y="418">jlink（裁剪过的自带运行时）</text>
+
+  <rect class="bx-d" x="140" y="440" width="480" height="18" rx="5"/>
+  <text class="sm" x="380" y="454" text-anchor="middle">橙色标出的是本教程用过的。其余的，等遇到问题时再去学。</text>
+</svg>
+<figcaption>图 18-1　Java Web 生态地图</figcaption>
+</figure>
+
+<h2 id="paths">接下来学什么</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="三条继续深入的路线">
+  <rect class="bx-a" x="280" y="20" width="200" height="44" rx="9"/>
+  <text class="ttl on-a" x="380" y="48" text-anchor="middle">你现在在这里</text>
+
+  <path class="ln-a" d="M330 66 L170 104" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M380 66 V104" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M430 66 L590 104" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-b" x="20" y="108" width="230" height="190" rx="9"/>
+  <text class="ttl on-b" x="135" y="130" text-anchor="middle">① 往深：把这个项目做完</text>
+  <text class="sm" x="36" y="154">· 头像上传（第 10 章练习）</text>
+  <text class="sm" x="36" y="172">· 全文搜索</text>
+  <text class="sm" x="36" y="190">· 持久化邮件队列（第 6 章）</text>
+  <text class="sm" x="36" y="208">· 游标分页（第 11 章练习）</text>
+  <text class="sm" x="36" y="226">· 楼中楼评论（第 13 章练习）</text>
+  <text class="sm" x="36" y="244">· WebSocket 实时通知</text>
+  <text class="sm" x="36" y="262">· 第三方登录（OAuth2）</text>
+  <text class="sm on-g" x="36" y="286">收益最大：每一项都会逼你</text>
+  <text class="sm on-g" x="36" y="296">重新理解前面的设计</text>
+
+  <rect class="bx-g" x="266" y="108" width="230" height="190" rx="9"/>
+  <text class="ttl on-g" x="381" y="130" text-anchor="middle">② 往广：补基础</text>
+  <text class="sm" x="282" y="154">· HTTP/1.1 和 HTTP/2 协议细节</text>
+  <text class="sm" x="282" y="172">· SQL 与索引原理（极高回报）</text>
+  <text class="sm" x="282" y="190">· 并发：锁、内存模型、虚拟线程</text>
+  <text class="sm" x="282" y="208">· JVM：GC、类加载、JIT</text>
+  <text class="sm" x="282" y="226">· 安全：读完 OWASP Top 10</text>
+  <text class="sm" x="282" y="244">· 系统设计：缓存、队列、一致性</text>
+  <text class="sm on-g" x="282" y="272">这些知识<tspan class="on-g">换框架也带得走</tspan>，</text>
+  <text class="sm on-g" x="282" y="288">而且随着经验增长越来越值钱</text>
+
+  <rect class="bx-p" x="512" y="108" width="228" height="190" rx="9"/>
+  <text class="ttl on-p" x="626" y="130" text-anchor="middle">③ 往旁：其他框架</text>
+  <text class="sm" x="528" y="154">· <tspan class="ttl">Spring Boot</tspan>：职场上最可能</text>
+  <text class="sm" x="528" y="170">　用到的。读完本教程再去学，</text>
+  <text class="sm" x="528" y="186">　你会知道每个自动配置在干什么</text>
+  <text class="sm" x="528" y="208">· <tspan class="ttl">Quarkus</tspan>：启动几十毫秒，</text>
+  <text class="sm" x="528" y="224">　适合 Serverless</text>
+  <text class="sm" x="528" y="246">· <tspan class="ttl">Kotlin + Ktor</tspan>：Javalin 对</text>
+  <text class="sm" x="528" y="262">　Kotlin 支持很好，可以先用</text>
+  <text class="sm" x="528" y="278">　Kotlin 重写本项目过渡</text>
+</svg>
+<figcaption>图 18-2　三条路线</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 如果只能选一个方向</div>
+  <p>
+    选 <strong>②-SQL 与索引原理</strong>。
+  </p>
+  <p>
+    理由很实在：在真实项目里，<strong>性能问题有八成在数据库</strong>，
+    而数据库知识是所有后端框架共用的。
+    第 16 章只是打开了一道门缝 ——
+    把执行计划、索引结构（B 树）、事务隔离级别、锁这几件事搞透，
+    你解决问题的能力会有质的变化。
+  </p>
+</div>
+
+<h2 id="frameworks">Javalin 和 Spring Boot 的关系</h2>
+
+<p>
+  这是最多人问的问题，值得单独说清楚：
+</p>
+
+<div class="tw">
+<table>
+<tr><th></th><th>Javalin</th><th>Spring Boot</th></tr>
+<tr><td>定位</td><td>一个库：你的 main 方法调用它</td><td>一个框架：它调用你的代码</td></tr>
+<tr><td>启动时间</td><td>约 0.2 秒</td><td>约 2–5 秒</td></tr>
+<tr><td>依赖注入</td><td>没有，手工 new（第 7 章）</td><td>内置容器，注解驱动</td></tr>
+<tr><td>事务管理</td><td>自己写（第 5 章的 <code>UnitOfWork</code>）</td><td><code>@Transactional</code> 一个注解</td></tr>
+<tr><td>学习曲线</td><td>一两天读完官方文档</td><td>几个月，而且永远有新东西</td></tr>
+<tr><td>出问题时</td><td>调用栈是直的，能一路读到框架内部</td><td>堆栈几十层代理，要懂框架才能读</td></tr>
+<tr><td>现成功能</td><td>要自己拼</td><td>几千个 starter，基本都有</td></tr>
+<tr><td>招聘市场</td><td>小众</td><td>Java 后端岗位的默认要求</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 本教程的真正用意</div>
+  <p>
+    不是说 Javalin 比 Spring Boot 好 —— 大项目里 Spring Boot 的生态优势是压倒性的。
+  </p>
+  <p>
+    本教程的用意是：<strong>先在一个没有魔法的框架上，把 Web 开发的每一层亲手做一遍。</strong>
+  </p>
+  <p>
+    于是当你之后用 Spring Boot 时，
+    <code>@Transactional</code>、<code>HttpSession</code>、
+    <code>HandlerInterceptor</code>、<code>@PreAuthorize</code>、
+    <code>spring.jpa.open-in-view</code> 这些东西对你来说<strong>不是黑盒</strong>——
+    你知道它们在解决什么问题、代价是什么、出错时该往哪看。
+  </p>
+  <p>
+    这是直接从 Spring Boot 入门很难获得的视角。
+  </p>
+</div>
+
+<h2 id="community">遇到问题去哪问</h2>
+
+<div class="tw">
+<table>
+<tr><th>地方</th><th>适合</th></tr>
+<tr><td><strong>Javalin 官方文档</strong>（javalin.io/documentation）</td><td>先在这里搜。单页文档，<kbd>Ctrl</kbd>+<kbd>F</kbd> 很好用</td></tr>
+<tr><td><strong>Javalin Discord</strong></td><td>维护者本人常在线，响应很快。适合"这个用法对不对"这类问题</td></tr>
+<tr><td><strong>GitHub Issues</strong>（javalin/javalin）</td><td>报 bug、提功能请求。先搜一下有没有人提过</td></tr>
+<tr><td><strong>Stack Overflow</strong></td><td>打上 <code>javalin</code>、<code>jte</code>、<code>hibernate</code> 标签。答案会被搜索引擎收录，帮到后来人</td></tr>
+<tr><td><strong>Hibernate / Jakarta 的官方文档</strong></td><td>ORM 的问题八成能在官方文档里找到答案，而且比博客准确</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 怎么问出一个能被回答的问题</div>
+  <p>
+    这是一个被严重低估的技能。一个好问题包含：
+  </p>
+  <ol>
+    <li><strong>最小可复现代码</strong>——不是贴你整个项目，而是删到只剩问题本身的二十行；</li>
+    <li><strong>完整的错误信息</strong>——包括堆栈（而不是"报错了"）；</li>
+    <li><strong>版本号</strong>——Java、Javalin、相关库；</li>
+    <li><strong>你已经试过什么</strong>——这能避免别人重复建议你试过的方案。</li>
+  </ol>
+  <p>
+    有意思的是：<strong>整理最小复现的过程本身就能解决掉一半的问题。</strong>
+    所以这件事即使最后没发出去也不亏。
+  </p>
+</div>
+
+<h2 id="contribute">参与进来</h2>
+
+<p>
+  原书最后这一节讲"回馈社区"，这里原样转述它的建议（都同样适用于 Java 生态）：
+</p>
+
+<ul>
+  <li>读一读 Javalin（或你喜欢的任何库）的文档，<strong>提交修正或改进</strong>——
+      文档的 typo、不清楚的措辞、过时的例子，维护者通常很乐意接受这类 PR。
+      这也是参与开源最容易的第一步。</li>
+  <li>把文档<strong>翻译</strong>成你的语言。</li>
+  <li>在 Stack Overflow 这类地方<strong>回答问题</strong>。</li>
+  <li>在用户组或会议上<strong>分享你的工作</strong>。</li>
+  <li>给你在用的库<strong>贡献 bug 修复或改进</strong>。</li>
+  <li><strong>写新的库并开源</strong>。</li>
+  <li>把<strong>你的应用开源</strong>。</li>
+</ul>
+
+<div class="box note">
+  <div class="t">&#9432; Javalin 本身就是一个很适合读源码的项目</div>
+  <p>
+    它只有一万多行 Kotlin 代码，而且结构清晰。
+    你现在已经知道 <code>config.routes.get()</code>、
+    <code>beforeMatched</code>、<code>ctx.routeRoles()</code> 这些 API 的语义了，
+    去看它们是怎么实现的会非常有收获 —— 这是把"会用"变成"懂了"的最快路径。
+  </p>
+  <p>
+    建议的切入顺序：<code>JavalinServlet</code>（请求怎么被分发） →
+    <code>Context</code>（它到底包了什么） →
+    路由匹配的那棵树。
+  </p>
+</div>
+
+<h2 id="end">最后</h2>
+
+<p>
+  回到第 0 章说的那句话：
+</p>
+
+<div class="box key">
+  <div class="t">&#9728; 一句话总结整本教程</div>
+  <p>
+    <strong>Javalin 应用就是“一张路由表 + 一串 <code>ctx -&gt; {}</code> 处理器”，
+    过滤器是包在处理器外面的一层层洋葱皮。</strong>
+  </p>
+  <p>
+    十八章下来，这层层洋葱皮分别是：事务边界（第 5 章）、CSRF 校验（第 4 章）、
+    当前用户加载（第 8 章）、权限检查（第 9 章）、耗时统计（第 16 章）、
+    请求 ID（第 17 章）。而每个处理器都在做同一件事：
+    <strong>从 <code>ctx</code> 取出参数，调用不知道 HTTP 存在的业务代码，把结果设回 <code>ctx</code>。</strong>
+  </p>
+  <p>
+    这个结构简单到可以画在一张纸上 —— 但它足以支撑一个真实的产品。
+    而且<strong>这个结构和框架无关</strong>：换成 Spring Boot、Express、Rails、Django，
+    层次和职责都是一样的，只是名字不同。
+  </p>
+</div>
+
+<p>
+  还要说一句：本教程改编自 Miguel Grinberg 的《Flask Web Development》。
+  那本书的章节安排、知识递进顺序、以及"用一个贯穿全书的真实应用来教学"的思路，
+  都是经过验证的优秀设计 —— 我们只是把 Python 换成了 Java。
+  如果你以后要学 Python Web 开发，强烈推荐去读原书。
+</p>
+
+<p>
+  现在，去把那个你一直想做的东西做出来。
+</p>
+
+<div class="exercise">
+  <h3>最后一个练习</h3>
+  <ol>
+    <li><strong>把 Javalinky 真的部署上线</strong>（第 17 章任选一条路线），
+        然后发一篇文章。看着它在公网 URL 上跑起来的感觉，和在 localhost 上完全不同。</li>
+    <li>挑第 18-1 图里<strong>一个你没用过的方向</strong>，给 Javalinky 加一个功能。
+        推荐：Testcontainers（用真的 PostgreSQL 跑测试，替代 H2）——
+        它能暴露出 H2 和 Postgres 行为不一致的地方，很有教育意义。</li>
+    <li>把你的 Javalinky 推到 GitHub，写一个 README 说明怎么跑起来。
+        <strong>然后找一个朋友，让他照着 README 在自己机器上跑一遍。</strong>
+        凡是他卡住的地方，都是你的文档（或配置默认值）该改的地方。
+        这是检验一个项目是否"能交付"的最好方法。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

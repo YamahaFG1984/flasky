@@ -44,3 +44,6 @@ venv
 # Environment files
 .env
 .env-mysql
+
+# 参考用的原书 PDF（有版权，不入库）
+*.pdf

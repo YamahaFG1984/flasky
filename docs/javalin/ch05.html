@@ -1,0 +1,1399 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 5 章 · 数据库 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="5">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 5 章</span>
+<h1>数据库</h1>
+<p class="lede">
+  到目前为止，应用重启一次数据就全没了。这一章接上数据库：先搞懂关系模型，
+  再用 <strong>Hibernate ORM</strong> 把 Java 对象和数据库表对应起来，
+  最后用 <strong>Flyway</strong> 管理表结构的演进。这是整本教程技术密度最高的一章，慢慢读。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>看懂实体-关系图，理解主键、外键、一对多</li>
+    <li>知道 Java 有哪些数据访问方案，以及为什么本教程选 Hibernate</li>
+    <li>会用 <code>@Entity</code> 把类映射成表，会写一对多关联</li>
+    <li>理解 <code>EntityManager</code> 和“实体的四种状态”——这是 Hibernate 最大的认知门槛</li>
+    <li>会用 JPQL 查询，知道 <code>LAZY</code> 和 <code>EAGER</code> 的区别</li>
+    <li>给每个请求配好事务边界</li>
+    <li>会用 Flyway 做数据库迁移</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="sql">SQL 数据库</h2>
+
+<p>
+  关系型数据库把数据存在<strong>表</strong>里。表有固定的几列（定义了实体的属性）和任意多行（每行是一条实际数据）。
+  其中有两种特殊的列：
+</p>
+
+<ul>
+  <li><strong>主键（primary key）</strong>：唯一标识一行。通常是一个自增整数 <code>id</code>。</li>
+  <li><strong>外键（foreign key）</strong>：存着另一张表（或同一张表）某一行的主键值，由此在两行之间建立<strong>关系</strong>。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="roles 表与 users 表的一对多关系">
+  <!-- roles table -->
+  <rect class="bx-a" x="60" y="40" width="230" height="130" rx="8"/>
+  <rect class="bx-a" x="60" y="40" width="230" height="30" rx="8"/>
+  <text class="ttl on-a" x="175" y="60" text-anchor="middle">roles</text>
+  <line class="ln" x1="60" y1="70" x2="290" y2="70"/>
+  <text class="mono" x="76" y="92">id</text><text class="sm" x="160" y="92">bigint　主键</text>
+  <text class="mono" x="76" y="116">name</text><text class="sm" x="160" y="116">varchar(64)　唯一</text>
+  <text class="mono" x="76" y="140">is_default</text><text class="sm" x="160" y="140">boolean</text>
+  <text class="mono" x="76" y="164">permissions</text><text class="sm" x="160" y="164">int</text>
+
+  <!-- users table -->
+  <rect class="bx-b" x="470" y="30" width="230" height="180" rx="8"/>
+  <rect class="bx-b" x="470" y="30" width="230" height="30" rx="8"/>
+  <text class="ttl on-b" x="585" y="50" text-anchor="middle">users</text>
+  <line class="ln" x1="470" y1="60" x2="700" y2="60"/>
+  <text class="mono" x="486" y="82">id</text><text class="sm" x="600" y="82">bigint　主键</text>
+  <text class="mono" x="486" y="106">email</text><text class="sm" x="600" y="106">varchar　唯一</text>
+  <text class="mono" x="486" y="130">username</text><text class="sm" x="600" y="130">varchar　唯一</text>
+  <text class="mono" x="486" y="154">password_hash</text><text class="sm" x="600" y="154">varchar</text>
+  <text class="mono on-r" x="486" y="178">role_id</text><text class="sm on-r" x="600" y="178">bigint　外键</text>
+  <text class="mono" x="486" y="202">…</text>
+
+  <!-- relationship -->
+  <path class="ln-r" d="M292 105 C360 105 400 178 466 178"/>
+  <circle class="dot-r" cx="296" cy="105" r="4"/>
+  <text class="sm on-r" x="310" y="98">1</text>
+  <text class="sm on-r" x="430" y="172">多</text>
+  <path class="ln-r" d="M452 170 L466 178 L452 186"/>
+
+  <rect class="bx-d" x="40" y="236" width="680" height="54" rx="9"/>
+  <text class="lbl" x="60" y="258">读法：<tspan class="on-a">一个</tspan>角色可以属于<tspan class="on-b">很多个</tspan>用户；每个用户只有<tspan class="on-a">一个</tspan>角色。这叫<tspan class="on-r">一对多</tspan>关系。</text>
+  <text class="sm" x="60" y="278">好处：改角色名只要改 roles 表的一行，所有用户立刻生效（不存在数据不一致）。</text>
+</svg>
+<figcaption>图 5-1　实体-关系图：这就是本章要建的两张表</figcaption>
+</figure>
+
+<h3>NoSQL 和反范式化</h3>
+
+<p>
+  不遵循关系模型的数据库统称 NoSQL。它们常用“集合 + 文档”代替“表 + 行”，
+  并且通常<strong>不支持 JOIN</strong>。所以在 NoSQL 里存上面的数据，更自然的设计是把角色名直接写进每个用户文档：
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+# 关系型（范式化）              # 文档型（反范式化）
+roles:  {id:1, name:"管理员"}   users: {id:7, username:"john", role:"管理员"}
+users:  {id:7, role_id:1}       users: {id:8, username:"susan", role:"普通用户"}
+</pre>
+</div>
+
+<p>
+  <strong>反范式化</strong>用数据重复换查询速度：列用户和角色不需要 JOIN。
+  代价是改一个角色名要更新成千上万个文档。
+</p>
+
+<p>
+  原书的结论今天依然成立：<strong>中小型应用用哪种都行，性能几乎没差别。</strong>
+  关系型数据库在保证一致性（ACID：原子性、一致性、隔离性、持久性）上做得极致，
+  而社交博客这种有大量关联的数据正是它的主场。本教程全程用关系型。
+</p>
+
+<h2 id="landscape">Java 的数据访问方案</h2>
+
+<p>
+  原书比较了几种 Python 方案，最后选了 Flask-SQLAlchemy。
+  Java 这边的选项更多，按“抽象层次”从低到高排：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>方案</th><th>你写什么</th><th>优点</th><th>缺点</th></tr>
+<tr><td><strong>JDBC</strong>（标准库）</td><td>SQL 字符串 + 手动取结果集每一列</td><td>没有任何魔法，完全可控</td><td>样板代码极多，20 行代码干 1 行的事</td></tr>
+<tr><td><strong>JDBI 3</strong></td><td>SQL + 自动映射到 record</td><td>轻量，SQL 可见，学习成本低</td><td>关联关系要自己处理</td></tr>
+<tr><td><strong>jOOQ</strong></td><td>用 Java 方法链拼 SQL（类型安全）</td><td>编译期检查 SQL，对复杂查询极强</td><td>需要代码生成；商业数据库要付费</td></tr>
+<tr><td><strong>MyBatis</strong></td><td>XML / 注解里写 SQL</td><td>国内生态成熟</td><td>配置较多</td></tr>
+<tr><td><strong>Hibernate ORM</strong>（JPA）</td><td>给类加注解，很多时候完全不写 SQL</td><td>关联关系、脏检查、缓存、迁移生态最全</td><td>抽象厚，出问题时要懂它背后干了什么</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 为什么本教程选 Hibernate</div>
+  <p>
+    一个理由：<strong>它和 SQLAlchemy 是同一类东西</strong>。原书第 5、11、12 章大量篇幅在讲
+    <code>db.relationship</code>、<code>backref</code>、<code>lazy='dynamic'</code>、
+    多对多关联表、自引用关系 —— 这些概念在 Hibernate 里有<strong>一一对应</strong>的东西
+    （<code>@OneToMany</code>、<code>mappedBy</code>、<code>FetchType.LAZY</code>、<code>@JoinTable</code>）。
+    换成 JDBI 的话第 12 章就得整章重写。
+  </p>
+  <p>
+    代价是你得理解它的工作模型。本章会花力气把这件事讲透，因为
+    <strong>“不理解 Hibernate 在干什么”是 Java Web 新手最常见的坑</strong>。
+  </p>
+</div>
+
+<h3>Jakarta Persistence 和 Hibernate 的关系</h3>
+
+<p>
+  这里有个容易混的地方：<strong>Jakarta Persistence</strong>（旧名 JPA）是一套<strong>规范</strong>，
+  定义了 <code>@Entity</code>、<code>EntityManager</code> 这些接口；
+  <strong>Hibernate ORM</strong> 是这套规范的<strong>实现</strong>（也是最主流的那个）。
+</p>
+
+<p>
+  实践意义：你写的注解和 <code>EntityManager</code> 调用是标准的，理论上能换成别的实现
+  （EclipseLink、OpenJPA）。但 Hibernate 也有自己的增强 API，用了就绑定了。
+  本教程尽量只用标准 API。
+</p>
+
+<h2 id="setup">配置数据库</h2>
+
+<h3>加依赖</h3>
+
+<div class="code" data-lang="xml" data-file="pom.xml（新增）">
+<pre>
+&lt;properties&gt;
+  &lt;!-- ... --&gt;
+  &lt;hibernate.version&gt;7.4.2.Final&lt;/hibernate.version&gt;
+  &lt;flyway.version&gt;11.14.0&lt;/flyway.version&gt;
+&lt;/properties&gt;
+
+&lt;dependencies&gt;
+  &lt;!-- Hibernate ORM（自带 Jakarta Persistence 接口） --&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;org.hibernate.orm&lt;/groupId&gt;
+    &lt;artifactId&gt;hibernate-core&lt;/artifactId&gt;
+    &lt;version&gt;${hibernate.version}&lt;/version&gt;
+  &lt;/dependency&gt;
+
+  &lt;!-- 连接池。Hibernate 的这个模块会自动把 HikariCP 接上 --&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;org.hibernate.orm&lt;/groupId&gt;
+    &lt;artifactId&gt;hibernate-hikaricp&lt;/artifactId&gt;
+    &lt;version&gt;${hibernate.version}&lt;/version&gt;
+  &lt;/dependency&gt;
+
+  &lt;!-- 数据库迁移 --&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;org.flywaydb&lt;/groupId&gt;
+    &lt;artifactId&gt;flyway-core&lt;/artifactId&gt;
+    &lt;version&gt;${flyway.version}&lt;/version&gt;
+  &lt;/dependency&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;org.flywaydb&lt;/groupId&gt;
+    &lt;artifactId&gt;flyway-database-postgresql&lt;/artifactId&gt;
+    &lt;version&gt;${flyway.version}&lt;/version&gt;
+  &lt;/dependency&gt;
+
+  &lt;!-- 开发和测试用：H2，零配置的嵌入式数据库 --&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;com.h2database&lt;/groupId&gt;
+    &lt;artifactId&gt;h2&lt;/artifactId&gt;
+    &lt;version&gt;2.3.232&lt;/version&gt;
+  &lt;/dependency&gt;
+
+  &lt;!-- 生产用：PostgreSQL 驱动 --&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;org.postgresql&lt;/groupId&gt;
+    &lt;artifactId&gt;postgresql&lt;/artifactId&gt;
+    &lt;version&gt;42.7.8&lt;/version&gt;
+  &lt;/dependency&gt;
+&lt;/dependencies&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; H2 相当于原书的 SQLite</div>
+  <p>
+    原书开发时用 SQLite（一个文件就是一个数据库，不需要装服务器）。
+    Java 世界的等价物是 <strong>H2</strong>：纯 Java 实现，可以存文件也可以纯内存，
+    而且<strong>能模拟 PostgreSQL 的方言</strong>，这让“开发用 H2、生产用 Postgres”的差异比
+    “开发 SQLite、生产 Postgres”小得多。
+  </p>
+  <p>
+    连接 URL 的写法：
+  </p>
+  <div class="code" data-lang="text">
+<pre>
+jdbc:h2:./data/javalinky-dev;MODE=PostgreSQL   # 存文件，开发用
+jdbc:h2:mem:test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1  # 纯内存，测试用
+jdbc:postgresql://localhost:5432/javalinky     # 生产
+</pre>
+  </div>
+</div>
+
+<div class="tw">
+<table>
+<tr><th>数据库</th><th>JDBC URL 格式</th><th>原书对应</th></tr>
+<tr><td>PostgreSQL</td><td><code>jdbc:postgresql://主机:5432/库名</code></td><td><code>postgresql://…</code></td></tr>
+<tr><td>MySQL</td><td><code>jdbc:mysql://主机:3306/库名</code></td><td><code>mysql://…</code></td></tr>
+<tr><td>H2（文件）</td><td><code>jdbc:h2:./路径/库名</code></td><td><code>sqlite:///文件名</code></td></tr>
+<tr><td>H2（内存）</td><td><code>jdbc:h2:mem:名字</code></td><td><code>sqlite://</code></td></tr>
+</table>
+</div>
+
+<h3>persistence.xml</h3>
+
+<p>
+  Jakarta Persistence 用一个固定位置的配置文件描述“持久化单元”
+  （哪些类是实体、连什么数据库、怎么配）：
+</p>
+
+<div class="code" data-lang="xml" data-file="src/main/resources/META-INF/persistence.xml">
+<pre>
+&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;persistence xmlns="https://jakarta.ee/xml/ns/persistence"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xsi:schemaLocation="https://jakarta.ee/xml/ns/persistence
+               https://jakarta.ee/xml/ns/persistence/persistence_3_1.xsd"
+             version="3.1"&gt;
+
+  &lt;persistence-unit name="javalinky" transaction-type="RESOURCE_LOCAL"&gt;
+
+    &lt;!-- 实体类清单。加新实体时记得往这里加一行 --&gt;
+    &lt;class&gt;com.example.javalinky.model.Role&lt;/class&gt;
+    &lt;class&gt;com.example.javalinky.model.User&lt;/class&gt;
+
+    &lt;!-- 不扫描未列出的类，避免意外 --&gt;
+    &lt;exclude-unlisted-classes&gt;true&lt;/exclude-unlisted-classes&gt;
+
+    &lt;properties&gt;
+      &lt;!-- 表结构由 Flyway 管，Hibernate 只做校验：
+           启动时对比实体和真实表结构，不一致就启动失败。
+           这能帮你第一时间发现"忘了写迁移"。 --&gt;
+      &lt;property name="jakarta.persistence.schema-generation.database.action"
+                value="none"/&gt;
+      &lt;property name="hibernate.hbm2ddl.auto" value="validate"/&gt;
+
+      &lt;!-- 连接池 --&gt;
+      &lt;property name="hibernate.hikari.maximumPoolSize" value="10"/&gt;
+      &lt;property name="hibernate.hikari.minimumIdle" value="2"/&gt;
+
+      &lt;!-- 开发期看 SQL（第 16 章会换成更好的方式） --&gt;
+      &lt;property name="hibernate.format_sql" value="true"/&gt;
+      &lt;property name="hibernate.highlight_sql" value="true"/&gt;
+    &lt;/properties&gt;
+  &lt;/persistence-unit&gt;
+&lt;/persistence&gt;
+</pre>
+</div>
+
+<p>
+  <strong>连接地址故意没写在这里</strong> —— 它每个环境都不一样，应该来自环境变量。
+  我们在代码里覆盖：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/db/Db.java">
+<pre>
+package com.example.javalinky.db;
+
+import io.javalin.http.Context;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.EntityManagerFactory;
+import jakarta.persistence.Persistence;
+import org.flywaydb.core.Flyway;
+
+import java.util.HashMap;
+import java.util.Map;
+
+public final class Db {
+
+    public static final String CTX_KEY = "entityManager";
+
+    private static EntityManagerFactory emf;
+
+    /** 应用启动时调一次：先跑迁移，再建 EntityManagerFactory */
+    public static void init(String jdbcUrl, String user, String password) {
+        // 1. Flyway 先把表结构升到最新
+        Flyway.configure()
+              .dataSource(jdbcUrl, user, password)
+              .locations("classpath:db/migration")
+              .load()
+              .migrate();
+
+        // 2. 再创建 EMF（此时 hbm2ddl=validate 的校验才会通过）
+        Map&lt;String, Object&gt; overrides = new HashMap&lt;&gt;();
+        overrides.put("jakarta.persistence.jdbc.url", jdbcUrl);
+        overrides.put("jakarta.persistence.jdbc.user", user);
+        overrides.put("jakarta.persistence.jdbc.password", password);
+        emf = Persistence.createEntityManagerFactory("javalinky", overrides);
+    }
+
+    public static EntityManagerFactory emf() {
+        if (emf == null) throw new IllegalStateException("Db.init() 还没调用");
+        return emf;
+    }
+
+    /** 取当前请求的 EntityManager（由过滤器放进 Context） */
+    public static EntityManager em(Context ctx) {
+        EntityManager em = ctx.attribute(CTX_KEY);
+        if (em == null) throw new IllegalStateException("当前请求没有 EntityManager");
+        return em;
+    }
+
+    public static void close() {
+        if (emf != null) emf.close();
+    }
+
+    private Db() {}
+}
+</pre>
+</div>
+
+<h2 id="entity">定义实体</h2>
+
+<p>
+  “模型”指应用里需要持久化的实体。在 ORM 里，一个模型就是一个类，它的字段对应表的列。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="ORM 的对应关系：表与类、行与对象、列与字段、外键与引用">
+  <rect class="bx-a" x="30" y="24" width="300" height="190" rx="10"/>
+  <text class="ttl on-a" x="180" y="46" text-anchor="middle">数据库世界</text>
+  <rect class="bx" x="50" y="58" width="260" height="26" rx="5"/><text class="sm" x="180" y="76" text-anchor="middle">表 users</text>
+  <rect class="bx" x="50" y="92" width="260" height="26" rx="5"/><text class="sm" x="180" y="110" text-anchor="middle">一行数据</text>
+  <rect class="bx" x="50" y="126" width="260" height="26" rx="5"/><text class="sm" x="180" y="144" text-anchor="middle">列 username VARCHAR(64)</text>
+  <rect class="bx" x="50" y="160" width="260" height="26" rx="5"/><text class="sm" x="180" y="178" text-anchor="middle">外键 role_id = 1</text>
+  <text class="sm" x="180" y="204" text-anchor="middle">SQL：SELECT / INSERT / UPDATE</text>
+
+  <rect class="bx-b" x="430" y="24" width="300" height="190" rx="10"/>
+  <text class="ttl on-b" x="580" y="46" text-anchor="middle">Java 世界</text>
+  <rect class="bx" x="450" y="58" width="260" height="26" rx="5"/><text class="sm" x="580" y="76" text-anchor="middle">类 User（@Entity）</text>
+  <rect class="bx" x="450" y="92" width="260" height="26" rx="5"/><text class="sm" x="580" y="110" text-anchor="middle">一个 User 对象</text>
+  <rect class="bx" x="450" y="126" width="260" height="26" rx="5"/><text class="sm" x="580" y="144" text-anchor="middle">字段 String username</text>
+  <rect class="bx" x="450" y="160" width="260" height="26" rx="5"/><text class="sm" x="580" y="178" text-anchor="middle">引用 Role role（直接是对象！）</text>
+  <text class="sm" x="580" y="204" text-anchor="middle">Java：user.getRole().getName()</text>
+
+  <path class="ln-a" d="M332 71 H428" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M332 105 H428" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M332 139 H428" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M332 173 H428" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="380" y="18" text-anchor="middle">ORM 负责这四条映射</text>
+</svg>
+<figcaption>图 5-2　ORM 在两个世界之间做翻译</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/model/Role.java">
+<pre>
+package com.example.javalinky.model;
+
+import jakarta.persistence.*;
+import java.util.ArrayList;
+import java.util.List;
+
+@Entity
+@Table(name = "roles")
+public class Role {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(length = 64, unique = true, nullable = false)
+    private String name;
+
+    @Column(name = "is_default", nullable = false)
+    private boolean defaultRole;
+
+    @Column(nullable = false)
+    private int permissions;
+
+    /** 关系的"一"这一侧。mappedBy 指向 User 里那个字段的名字 */
+    @OneToMany(mappedBy = "role", fetch = FetchType.LAZY)
+    private List&lt;User&gt; users = new ArrayList&lt;&gt;();
+
+    // JPA 要求有一个无参构造器（可以是 protected）
+    protected Role() {}
+
+    public Role(String name) {
+        this.name = name;
+    }
+
+    public Long getId() { return id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public boolean isDefaultRole() { return defaultRole; }
+    public void setDefaultRole(boolean v) { this.defaultRole = v; }
+    public int getPermissions() { return permissions; }
+    public void setPermissions(int p) { this.permissions = p; }
+    public List&lt;User&gt; getUsers() { return users; }
+
+    @Override
+    public String toString() {
+        return "Role[" + name + "]";
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/model/User.java">
+<pre>
+package com.example.javalinky.model;
+
+import jakarta.persistence.*;
+import java.time.Instant;
+
+@Entity
+@Table(name = "users", indexes = {
+    @Index(name = "ix_users_email", columnList = "email", unique = true),
+    @Index(name = "ix_users_username", columnList = "username", unique = true)
+})
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(length = 64, nullable = false)
+    private String email;
+
+    @Column(length = 64, nullable = false)
+    private String username;
+
+    @Column(name = "password_hash", length = 128)
+    private String passwordHash;
+
+    @Column(nullable = false)
+    private boolean confirmed = false;
+
+    @Column(name = "member_since", nullable = false)
+    private Instant memberSince = Instant.now();
+
+    /** 关系的"多"这一侧：真正的外键列在这里 */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "role_id")
+    private Role role;
+
+    protected User() {}
+
+    public User(String email, String username) {
+        this.email = email;
+        this.username = username;
+    }
+
+    public Long getId() { return id; }
+    public String getEmail() { return email; }
+    public void setEmail(String email) { this.email = email; }
+    public String getUsername() { return username; }
+    public void setUsername(String username) { this.username = username; }
+    public String getPasswordHash() { return passwordHash; }
+    public void setPasswordHash(String h) { this.passwordHash = h; }
+    public boolean isConfirmed() { return confirmed; }
+    public void setConfirmed(boolean c) { this.confirmed = c; }
+    public Instant getMemberSince() { return memberSince; }
+    public Role getRole() { return role; }
+    public void setRole(Role role) { this.role = role; }
+
+    @Override
+    public String toString() {
+        return "User[" + username + "]";
+    }
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 实体类不能用 <code>record</code></div>
+  <p>
+    上一章我们到处用 <code>record</code>，这里却用了老式的类加 getter/setter。原因是
+    Hibernate 需要<strong>可变对象</strong>：它靠“修改字段”来表达更新，靠无参构造器来创建代理对象。
+    <code>record</code> 是不可变的，做不到。
+  </p>
+  <p>
+    所以本教程的分工是：<strong>实体类用普通类，传给模板和 API 的数据用 record</strong>。
+    这个分界其实是好事 —— 第 14 章会讲为什么不该把实体直接序列化成 JSON。
+  </p>
+</div>
+
+<h3>常用的字段映射注解</h3>
+
+<div class="tw">
+<table>
+<tr><th>注解</th><th>作用</th><th>SQLAlchemy 的对应</th></tr>
+<tr><td><code>@Entity</code></td><td>声明这个类是实体</td><td>继承 <code>db.Model</code></td></tr>
+<tr><td><code>@Table(name=)</code></td><td>指定表名（默认用类名）</td><td><code>__tablename__</code></td></tr>
+<tr><td><code>@Id</code></td><td>主键</td><td><code>primary_key=True</code></td></tr>
+<tr><td><code>@GeneratedValue(IDENTITY)</code></td><td>主键由数据库自增生成</td><td>同上（默认行为）</td></tr>
+<tr><td><code>@Column(name=)</code></td><td>列名。默认把 <code>camelCase</code> 转成 <code>snake_case</code></td><td>列名即属性名</td></tr>
+<tr><td><code>@Column(nullable=false)</code></td><td>非空</td><td><code>nullable=False</code></td></tr>
+<tr><td><code>@Column(unique=true)</code></td><td>唯一约束</td><td><code>unique=True</code></td></tr>
+<tr><td><code>@Column(length=)</code></td><td>varchar 长度</td><td><code>db.String(64)</code></td></tr>
+<tr><td><code>@Index</code>（在 <code>@Table</code> 里）</td><td>索引</td><td><code>index=True</code></td></tr>
+<tr><td><code>@Lob</code> / <code>@Column(columnDefinition="text")</code></td><td>长文本</td><td><code>db.Text()</code></td></tr>
+<tr><td><code>@Enumerated(EnumType.STRING)</code></td><td>枚举存成字符串</td><td><code>db.Enum</code></td></tr>
+<tr><td><code>@Transient</code></td><td>这个字段不入库</td><td>—</td></tr>
+<tr><td><code>@ManyToOne</code> + <code>@JoinColumn</code></td><td>多对一，外键在本表</td><td><code>db.ForeignKey</code></td></tr>
+<tr><td><code>@OneToMany(mappedBy=)</code></td><td>一对多，外键在对方表</td><td><code>db.relationship(backref=)</code></td></tr>
+<tr><td><code>@ManyToMany</code> + <code>@JoinTable</code></td><td>多对多（第 12 章）</td><td><code>secondary=</code></td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 关系的两侧，只有一侧是“真的”</div>
+  <p>
+    数据库里只有一个 <code>users.role_id</code> 列。
+    <code>@ManyToOne</code> 那一侧（<code>User.role</code>）对应这个列，是<strong>拥有方</strong>；
+    <code>@OneToMany(mappedBy="role")</code> 那一侧（<code>Role.users</code>）只是<strong>反向视图</strong>，
+    不产生任何列。
+  </p>
+  <p>
+    这意味着：<strong>要建立关系，必须设置拥有方。</strong>
+    只往 <code>role.getUsers().add(user)</code> 里加而不设 <code>user.setRole(role)</code>，
+    数据库里什么都不会变。这是 JPA 新手最常见的 bug。
+  </p>
+</div>
+
+<h2 id="flyway">Flyway：数据库迁移</h2>
+
+<p>
+  原书用 <code>db.create_all()</code> 建表，然后指出它的致命问题：
+  <strong>模型变了它不会更新已有的表</strong>，只能删表重建（数据全丢）。
+  于是引入 Flask-Migrate（Alembic）。
+</p>
+
+<p>
+  Java 这边的对应工具是 <strong>Flyway</strong>（或 Liquibase）。
+  Flyway 的模型比 Alembic 更简单，也更容易讲清楚：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="Flyway 的版本化迁移机制">
+  <text class="ttl" x="20" y="20">你写的：一串按版本号排序、只增不改的 SQL 文件</text>
+
+  <rect class="bx-b" x="20" y="34" width="160" height="60" rx="8"/>
+  <text class="mono on-b" x="100" y="54" text-anchor="middle">V1__init.sql</text>
+  <text class="sm" x="100" y="72" text-anchor="middle">CREATE TABLE roles</text>
+  <text class="sm" x="100" y="87" text-anchor="middle">CREATE TABLE users</text>
+
+  <rect class="bx-b" x="200" y="34" width="170" height="60" rx="8"/>
+  <text class="mono on-b" x="285" y="54" text-anchor="middle">V2__add_posts.sql</text>
+  <text class="sm" x="285" y="72" text-anchor="middle">CREATE TABLE posts</text>
+  <text class="sm" x="285" y="87" text-anchor="middle">（第 11 章）</text>
+
+  <rect class="bx-b" x="390" y="34" width="180" height="60" rx="8"/>
+  <text class="mono on-b" x="480" y="54" text-anchor="middle">V3__add_follows.sql</text>
+  <text class="sm" x="480" y="72" text-anchor="middle">CREATE TABLE follows</text>
+  <text class="sm" x="480" y="87" text-anchor="middle">（第 12 章）</text>
+
+  <rect class="bx-d" x="590" y="34" width="150" height="60" rx="8"/>
+  <text class="sm" x="665" y="60" text-anchor="middle">V4、V5……</text>
+  <text class="sm" x="665" y="78" text-anchor="middle">一直往后加</text>
+
+  <path class="ln-b" d="M182 64 H198" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M372 64 H388" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M572 64 H588" marker-end="url(#ar-b)"/>
+
+  <path class="ln-a" d="M380 96 V124" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-a" x="140" y="126" width="480" height="60" rx="9"/>
+  <text class="ttl on-a" x="380" y="148" text-anchor="middle">Flyway 启动时做的事</text>
+  <text class="lbl" x="380" y="168" text-anchor="middle">读表 flyway_schema_history → 看当前版本 → 按顺序跑还没跑过的文件</text>
+
+  <path class="ln-a" d="M380 188 V214" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="200" y="216" width="360" height="62" rx="9"/>
+  <text class="ttl on-g" x="380" y="238" text-anchor="middle">结果：任何数据库都能从任意旧版本升到最新</text>
+  <text class="sm" x="380" y="257" text-anchor="middle">新同事的空库、测试库、生产库 —— 跑同一套脚本，结果一致</text>
+  <text class="sm" x="380" y="272" text-anchor="middle">已执行过的文件改了内容会被校验和拦住（防止"偷偷改历史"）</text>
+</svg>
+<figcaption>图 5-3　Flyway 的版本化迁移</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; Flyway 和 Alembic 的一个重要区别</div>
+  <p>
+    Alembic 可以<strong>自动生成</strong>迁移脚本（对比模型和数据库的差异），
+    原书也提醒过“自动生成的脚本必须人工审查，否则改列名可能被识别成删列 + 加列，数据就丢了”。
+  </p>
+  <p>
+    Flyway 社区版<strong>不自动生成</strong>，SQL 要你自己写。
+    一开始觉得麻烦，但实际上这是优点：你完全清楚将在生产库上执行什么，
+    不存在“自动生成的脚本悄悄删了一列”这种事故。
+  </p>
+</div>
+
+<h3>第一个迁移</h3>
+
+<p>
+  迁移文件放在 <code>src/main/resources/db/migration/</code>，
+  命名规则是 <code>V&lt;版本&gt;__&lt;描述&gt;.sql</code>（<strong>两个下划线</strong>）：
+</p>
+
+<div class="code" data-lang="sql" data-file="src/main/resources/db/migration/V1__create_roles_and_users.sql">
+<pre>
+CREATE TABLE roles (
+    id          BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    name        VARCHAR(64) NOT NULL UNIQUE,
+    is_default  BOOLEAN     NOT NULL DEFAULT FALSE,
+    permissions INTEGER     NOT NULL DEFAULT 0
+);
+
+CREATE INDEX ix_roles_is_default ON roles (is_default);
+
+CREATE TABLE users (
+    id            BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    email         VARCHAR(64)  NOT NULL,
+    username      VARCHAR(64)  NOT NULL,
+    password_hash VARCHAR(128),
+    confirmed     BOOLEAN      NOT NULL DEFAULT FALSE,
+    member_since  TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+    role_id       BIGINT       REFERENCES roles (id)
+);
+
+CREATE UNIQUE INDEX ix_users_email    ON users (email);
+CREATE UNIQUE INDEX ix_users_username ON users (username);
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>GENERATED BY DEFAULT AS IDENTITY</code> 是什么</div>
+  <p>
+    这是 SQL 标准的自增列写法，PostgreSQL 10+ 和 H2 都支持。
+    （老教程里常见的 <code>SERIAL</code> 是 PostgreSQL 的专有语法，
+    <code>AUTO_INCREMENT</code> 是 MySQL 的。用标准写法可以让同一份脚本同时跑在 H2 和 Postgres 上。）
+  </p>
+  <p>
+    <code>TIMESTAMP WITH TIME ZONE</code> 对应 Java 的 <code>Instant</code>，
+    数据库内部按 UTC 存储 —— 这正是第 3 章讲的时间策略。
+  </p>
+</div>
+
+<h3>启动应用时自动迁移</h3>
+
+<p>
+  上面 <code>Db.init()</code> 里已经写好了：<strong>先 Flyway 迁移，再创建 EntityManagerFactory</strong>。
+  这个顺序很重要，因为 <code>hbm2ddl.auto=validate</code> 要在表已经存在之后才能校验成功。
+</p>
+
+<div class="code" data-lang="java" data-file="App.java">
+<pre>
+public static void main(String[] args) {
+    Db.init(
+        System.getenv().getOrDefault("DATABASE_URL",
+            "jdbc:h2:./data/javalinky-dev;MODE=PostgreSQL"),
+        System.getenv().getOrDefault("DATABASE_USER", "sa"),
+        System.getenv().getOrDefault("DATABASE_PASSWORD", "")
+    );
+
+    Runtime.getRuntime().addShutdownHook(new Thread(Db::close));
+
+    Javalin.create(config -&gt; { /* ... */ }).start(port);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+[main] INFO o.f.c.i.license - Flyway Community Edition 11.14.0 by Redgate
+[main] INFO o.f.c.i.d.DatabaseType - Database: jdbc:h2:./data/javalinky-dev (H2 2.3)
+[main] INFO o.f.core.FlywayExecutor - Current version of schema "PUBLIC": &lt;&lt; Empty Schema &gt;&gt;
+[main] INFO o.f.c.i.c.DbMigrate - Migrating schema "PUBLIC" to version "1 - create roles and users"
+[main] INFO o.f.c.i.c.DbMigrate - Successfully applied 1 migration
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 常用的 Flyway 命令</div>
+  <p>除了启动时自动跑，也可以装 Maven 插件手动操作（排查问题时有用）：</p>
+  <div class="code" data-lang="bash">
+<pre>
+mvn flyway:info       # 看每个迁移的状态（相当于 flask db current + history）
+mvn flyway:migrate    # 升到最新（相当于 flask db upgrade）
+mvn flyway:validate   # 校验已执行脚本没被改动
+mvn flyway:clean      # 删掉所有表 —— 只在开发库上用！
+mvn flyway:repair     # 修复校验和不匹配
+</pre>
+  </div>
+  <p>
+    注意 Flyway 社区版<strong>没有 <code>downgrade</code></strong>（撤销迁移是商业版功能）。
+    开发期要回退就 <code>flyway:clean</code> 重来；生产环境则是“只向前”——
+    写一个新的 <code>V5__revert_xxx.sql</code>。这个约束其实让生产操作更安全。
+  </p>
+</div>
+
+<h2 id="entitymanager">EntityManager 与实体的四种状态</h2>
+
+<p>
+  这一节是本章的核心。原书对应的内容是 <code>db.session</code>：
+  “改动通过数据库会话管理，<code>add()</code> 加进会话，<code>commit()</code> 真正写库”。
+  Hibernate 的模型类似但更精细，而且<strong>不理解它就会写出各种诡异的 bug</strong>。
+</p>
+
+<p>
+  <code>EntityManager</code>（Hibernate 里也叫 Session）是一个<strong>短命的工作单元</strong>。
+  它内部维护一个“一级缓存”，记录着它当前管理的所有实体对象。
+  一个实体对象相对于某个 EntityManager，有四种状态：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 350" role="img" aria-label="JPA 实体的四种状态及状态转换">
+  <!-- transient -->
+  <rect class="bx" x="40" y="30" width="170" height="64" rx="9"/>
+  <text class="ttl" x="125" y="52" text-anchor="middle">① 瞬态 Transient</text>
+  <text class="sm" x="125" y="70" text-anchor="middle">new User(…) 刚创建</text>
+  <text class="sm" x="125" y="85" text-anchor="middle">EM 不知道它，id 是 null</text>
+
+  <!-- managed -->
+  <rect class="bx-a" x="295" y="30" width="190" height="64" rx="9"/>
+  <text class="ttl on-a" x="390" y="52" text-anchor="middle">② 托管 Managed</text>
+  <text class="sm" x="390" y="70" text-anchor="middle">在 EM 的缓存里</text>
+  <text class="sm" x="390" y="85" text-anchor="middle">改字段会自动同步到库</text>
+
+  <!-- detached -->
+  <rect class="bx-b" x="570" y="30" width="160" height="64" rx="9"/>
+  <text class="ttl on-b" x="650" y="52" text-anchor="middle">③ 游离 Detached</text>
+  <text class="sm" x="650" y="70" text-anchor="middle">EM 关了，但对象还在</text>
+  <text class="sm" x="650" y="85" text-anchor="middle">有 id，改了不会入库</text>
+
+  <!-- removed -->
+  <rect class="bx-r" x="295" y="156" width="190" height="56" rx="9"/>
+  <text class="ttl on-r" x="390" y="178" text-anchor="middle">④ 已删除 Removed</text>
+  <text class="sm" x="390" y="196" text-anchor="middle">提交时执行 DELETE</text>
+
+  <path class="ln-a" d="M212 52 H291" marker-end="url(#ar-a)"/>
+  <text class="mono on-a" x="251" y="44" text-anchor="middle">persist()</text>
+
+  <path class="ln-b" d="M487 52 H566" marker-end="url(#ar-b)"/>
+  <text class="mono on-b" x="527" y="44" text-anchor="middle">close()</text>
+  <text class="sm" x="527" y="66" text-anchor="middle">detach()</text>
+
+  <path class="ln-a" d="M566 80 C520 110 450 110 420 96" marker-end="url(#ar-a)"/>
+  <text class="mono on-a" x="500" y="118" text-anchor="middle">merge()</text>
+
+  <path class="ln-r" d="M390 96 V152" marker-end="url(#ar-r)"/>
+  <text class="mono on-r" x="420" y="128" text-anchor="middle">remove()</text>
+
+  <path class="ln" d="M291 80 C240 110 200 110 180 96" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="118" text-anchor="middle">（从没持久化过的对象被丢弃）</text>
+
+  <rect class="bx-d" x="40" y="236" width="690" height="100" rx="10"/>
+  <text class="ttl" x="60" y="258">最重要的一条：托管状态下，<tspan class="on-a">改字段就等于改数据库</tspan></text>
+  <text class="mono" x="60" y="282">User u = em.find(User.class, 7L);   // 托管</text>
+  <text class="mono" x="60" y="302">u.setUsername("新名字");             // 没调任何 save/update</text>
+  <text class="mono on-g" x="60" y="322">// 提交事务时，Hibernate 自动发出 UPDATE —— 这叫"脏检查"</text>
+</svg>
+<figcaption>图 5-4　实体的四种状态</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 和 SQLAlchemy 的异同</div>
+  <div class="tw">
+  <table>
+  <tr><th>操作</th><th>SQLAlchemy</th><th>JPA / Hibernate</th></tr>
+  <tr><td>把新对象纳入管理</td><td><code>db.session.add(obj)</code></td><td><code>em.persist(obj)</code></td></tr>
+  <tr><td>更新已有对象</td><td>改字段即可（也可 <code>add</code>）</td><td>改字段即可（托管状态下）</td></tr>
+  <tr><td>把游离对象改动合并回来</td><td><code>db.session.merge(obj)</code></td><td><code>em.merge(obj)</code></td></tr>
+  <tr><td>删除</td><td><code>db.session.delete(obj)</code></td><td><code>em.remove(obj)</code></td></tr>
+  <tr><td>按主键查</td><td><code>Model.query.get(id)</code></td><td><code>em.find(Model.class, id)</code></td></tr>
+  <tr><td>提交</td><td><code>db.session.commit()</code></td><td><code>em.getTransaction().commit()</code></td></tr>
+  <tr><td>回滚</td><td><code>db.session.rollback()</code></td><td><code>em.getTransaction().rollback()</code></td></tr>
+  </table>
+  </div>
+  <p>
+    几乎一一对应。最大的差别是 Flask-SQLAlchemy 把 <code>db.session</code>
+    藏在了“请求上下文”里（看起来像全局变量），而 JPA 要你明确地创建、传递和关闭 <code>EntityManager</code>。
+  </p>
+</div>
+
+<h2 id="unitofwork">给每个请求配事务边界</h2>
+
+<p>
+  那么 <code>EntityManager</code> 该活多久？答案是：<strong>一个请求一个</strong>。
+  这和 Flask-SQLAlchemy 的行为完全一致。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="一个请求一个 EntityManager 的生命周期">
+  <rect class="bx-d" x="30" y="40" width="700" height="130" rx="12"/>
+  <text class="sm" x="46" y="60">一次 HTTP 请求的生命周期</text>
+
+  <rect class="bx-g" x="50" y="70" width="150" height="46" rx="7"/>
+  <text class="lbl on-g" x="125" y="90" text-anchor="middle">before 过滤器</text>
+  <text class="sm" x="125" y="107" text-anchor="middle">创建 EM、开启事务</text>
+
+  <rect class="bx-a" x="230" y="70" width="300" height="46" rx="7"/>
+  <text class="lbl on-a" x="380" y="90" text-anchor="middle">处理器 + 仓储类</text>
+  <text class="sm" x="380" y="107" text-anchor="middle">查询、改字段、persist、remove</text>
+
+  <rect class="bx-g" x="560" y="70" width="150" height="46" rx="7"/>
+  <text class="lbl on-g" x="635" y="90" text-anchor="middle">after 过滤器</text>
+  <text class="sm" x="635" y="107" text-anchor="middle">提交或回滚，关闭 EM</text>
+
+  <path class="ln-a" d="M202 93 H226" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M532 93 H556" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-b" x="230" y="126" width="300" height="32" rx="6"/>
+  <text class="sm on-b" x="380" y="147" text-anchor="middle">这期间所有操作在同一个事务里 —— 要么全成功，要么全回滚</text>
+
+  <rect class="bx-r" x="60" y="186" width="640" height="44" rx="8"/>
+  <text class="lbl on-r" x="80" y="206">判定规则：响应状态码 &lt; 400 就提交，&ge; 400 就回滚。</text>
+  <text class="sm" x="80" y="222">所以第 2 章那些 throw new NotFoundResponse() 会自动触发回滚，不用你操心。</text>
+</svg>
+<figcaption>图 5-5　一个请求一个 EntityManager</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/db/UnitOfWork.java">
+<pre>
+package com.example.javalinky.db;
+
+import io.javalin.config.JavalinConfig;
+import jakarta.persistence.EntityManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public final class UnitOfWork {
+
+    private static final Logger log = LoggerFactory.getLogger(UnitOfWork.class);
+
+    public static void install(JavalinConfig config) {
+
+        // 请求开始：开一个 EntityManager 和事务
+        config.routes.before(ctx -&gt; {
+            EntityManager em = Db.emf().createEntityManager();
+            ctx.attribute(Db.CTX_KEY, em);
+            em.getTransaction().begin();
+        });
+
+        // 请求结束：按状态码决定提交还是回滚，然后一定要关掉
+        config.routes.after(ctx -&gt; {
+            EntityManager em = ctx.attribute(Db.CTX_KEY);
+            if (em == null) return;
+            try {
+                var tx = em.getTransaction();
+                if (!tx.isActive()) return;
+                if (ctx.statusCode() &gt;= 400) {
+                    tx.rollback();
+                } else {
+                    tx.commit();
+                }
+            } catch (RuntimeException e) {
+                log.error("提交事务失败", e);
+                safeRollback(em);
+                throw e;
+            } finally {
+                em.close();          // 必须关，否则连接池会耗尽
+            }
+        });
+    }
+
+    private static void safeRollback(EntityManager em) {
+        try {
+            if (em.getTransaction().isActive()) em.getTransaction().rollback();
+        } catch (RuntimeException ignored) {
+            // 回滚本身失败就只能放弃了
+        }
+    }
+
+    private UnitOfWork() {}
+}
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：这个模式的名字和争议</div>
+  <p>
+    “整个请求共享一个数据库会话、在视图渲染期间还保持打开”这个模式叫
+    <strong>Open Session in View</strong>。它的好处是模板里可以放心地点
+    <code>user.getRole().getName()</code>（懒加载还能工作）；
+    坏处是数据库连接被占用的时间包含了渲染时间，高并发时连接池压力大，
+    而且容易在模板里无意触发大量查询（N+1 问题，第 12、16 章会详谈）。
+  </p>
+  <p>
+    更严格的做法是：在处理器里就把数据全部取出来转成 record（DTO），
+    关掉 EntityManager 再渲染。本教程为了贴近原书的写法用前者，
+    但到第 16 章我们会看到它的代价，并给出改进方向。
+    <strong>知道自己在用哪种模式、代价是什么</strong>，比盲目追求"最佳实践"重要。
+  </p>
+</div>
+
+<h2 id="crud">增删改查</h2>
+
+<p>按原书的顺序，用“仓储类”（Repository）把数据访问集中起来：</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/db/UserRepository.java">
+<pre>
+package com.example.javalinky.db;
+
+import com.example.javalinky.model.Role;
+import com.example.javalinky.model.User;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.NoResultException;
+import java.util.List;
+import java.util.Optional;
+
+public class UserRepository {
+
+    private final EntityManager em;
+
+    public UserRepository(EntityManager em) {
+        this.em = em;
+    }
+
+    // ---------- 增 ----------
+    public User save(User user) {
+        em.persist(user);        // 瞬态 → 托管
+        return user;
+    }
+
+    // ---------- 查 ----------
+    /** 按主键查，相当于 Model.query.get(id) */
+    public Optional&lt;User&gt; findById(long id) {
+        return Optional.ofNullable(em.find(User.class, id));
+    }
+
+    /** 按条件查一个，相当于 filter_by(...).first() */
+    public Optional&lt;User&gt; findByEmail(String email) {
+        return em.createQuery(
+                "select u from User u where lower(u.email) = lower(:email)", User.class)
+            .setParameter("email", email)
+            .getResultStream()      // 比 getSingleResult() 好：查不到不会抛异常
+            .findFirst();
+    }
+
+    public Optional&lt;User&gt; findByUsername(String username) {
+        return em.createQuery(
+                "select u from User u where u.username = :name", User.class)
+            .setParameter("name", username)
+            .getResultStream()
+            .findFirst();
+    }
+
+    /** 查全部，相当于 Model.query.all() */
+    public List&lt;User&gt; findAll() {
+        return em.createQuery("select u from User u order by u.username", User.class)
+                 .getResultList();
+    }
+
+    /** 计数，相当于 Model.query.count() */
+    public long count() {
+        return em.createQuery("select count(u) from User u", Long.class)
+                 .getSingleResult();
+    }
+
+    public boolean emailExists(String email) {
+        return em.createQuery(
+                "select count(u) from User u where lower(u.email) = lower(:email)", Long.class)
+            .setParameter("email", email)
+            .getSingleResult() &gt; 0;
+    }
+
+    // ---------- 改 ----------
+    // 不需要写！托管对象改字段，提交事务时自动 UPDATE。
+
+    // ---------- 删 ----------
+    public void delete(User user) {
+        em.remove(user);
+    }
+}
+</pre>
+</div>
+
+<h3>JPQL：面向对象的查询语言</h3>
+
+<p>
+  注意上面查询里写的不是 SQL，是 <strong>JPQL</strong>。
+  它看起来像 SQL，但操作的是<strong>实体和字段名</strong>，不是表和列名：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">SQL（表名、列名）</div>
+    <div class="code" data-lang="sql">
+<pre>
+select u.* from users u
+  join roles r on u.role_id = r.id
+ where r.name = '管理员'
+ order by u.member_since desc
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">JPQL（类名、字段名）</div>
+    <div class="code" data-lang="sql">
+<pre>
+select u from User u
+  join u.role r
+ where r.name = :roleName
+ order by u.memberSince desc
+</pre>
+    </div>
+  </div>
+</div>
+
+<p>
+  JPQL 的好处是数据库无关（Hibernate 负责翻译成对应方言的 SQL），
+  而且 <code>join u.role</code> 不用写 ON 条件 —— 映射关系里已经说明了。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 永远用参数绑定，不要拼字符串</div>
+  <div class="vs">
+    <div class="old">
+      <div class="h">&#10007; SQL 注入漏洞</div>
+      <div class="code" data-lang="java">
+<pre>
+em.createQuery(
+  "select u from User u where u.email = '"
+  + email + "'", User.class)
+</pre>
+      </div>
+    </div>
+    <div class="new">
+      <div class="h">&#10003; 参数绑定</div>
+      <div class="code" data-lang="java">
+<pre>
+em.createQuery(
+  "select u from User u where u.email = :e",
+  User.class).setParameter("e", email)
+</pre>
+      </div>
+    </div>
+  </div>
+  <p>
+    如果 <code>email</code> 的值是 <code>' or '1'='1</code>，第一种写法会把整张表的用户全查出来。
+    参数绑定则把值交给驱动单独传输，数据永远不会被当成代码执行。
+  </p>
+</div>
+
+<h3>常用查询方法对照</h3>
+
+<div class="tw">
+<table>
+<tr><th>要做的事</th><th>SQLAlchemy</th><th>JPA</th></tr>
+<tr><td>按主键取</td><td><code>User.query.get(1)</code></td><td><code>em.find(User.class, 1L)</code></td></tr>
+<tr><td>取全部</td><td><code>.all()</code></td><td><code>.getResultList()</code></td></tr>
+<tr><td>取第一个</td><td><code>.first()</code></td><td><code>.getResultStream().findFirst()</code></td></tr>
+<tr><td>相等过滤</td><td><code>.filter_by(x=1)</code></td><td>JPQL <code>where u.x = :x</code></td></tr>
+<tr><td>复杂过滤</td><td><code>.filter(User.x &gt; 1)</code></td><td>JPQL 或 Criteria API</td></tr>
+<tr><td>排序</td><td><code>.order_by(User.x.desc())</code></td><td>JPQL <code>order by u.x desc</code></td></tr>
+<tr><td>限量 / 偏移</td><td><code>.limit(10).offset(20)</code></td><td><code>.setMaxResults(10).setFirstResult(20)</code></td></tr>
+<tr><td>计数</td><td><code>.count()</code></td><td><code>select count(u) …</code></td></tr>
+<tr><td>分页</td><td><code>.paginate(page, per_page)</code></td><td>自己封装（第 11 章）</td></tr>
+<tr><td>查不到就 404</td><td><code>.first_or_404()</code></td><td><code>.orElseThrow(NotFoundResponse::new)</code></td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; <code>get_or_404()</code> 的 Java 版</div>
+  <p>
+    原书大量使用 <code>User.query.get_or_404(id)</code>。
+    Java 用 <code>Optional</code> 加方法引用，写出来一样短，而且类型更明确：
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+User user = users.findByUsername(ctx.pathParam("name"))
+                 .orElseThrow(() -&gt; new NotFoundResponse("没有这个用户"));
+</pre>
+  </div>
+</div>
+
+<h2 id="lazy">懒加载：最常见的两个坑</h2>
+
+<p>
+  原书讲了 SQLAlchemy 的 <code>lazy</code> 选项（<code>select</code> / <code>joined</code> / <code>subquery</code> / <code>dynamic</code>）。
+  JPA 只有两种，但背后的取舍一样：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>FetchType</th><th>行为</th><th>SQLAlchemy 的对应</th></tr>
+<tr><td><code>LAZY</code>（推荐默认）</td><td>关联对象先不查，第一次访问它时再发一条 SQL</td><td><code>lazy='select'</code></td></tr>
+<tr><td><code>EAGER</code></td><td>查主对象时就 JOIN 把关联一起取出来</td><td><code>lazy='joined'</code></td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 坑一：LazyInitializationException</div>
+  <p>
+    懒加载需要 <code>EntityManager</code> 还开着。如果你把实体返回到 EM 关闭之后再访问懒字段：
+  </p>
+  <div class="code" data-lang="text">
+<pre>
+org.hibernate.LazyInitializationException:
+  could not initialize proxy [com.example.javalinky.model.Role#1] - no Session
+</pre>
+  </div>
+  <p>
+    上一节的 <code>UnitOfWork</code> 让 EM 活到请求结束（包括模板渲染），所以本教程里不会碰到。
+    但如果你把实体扔进后台线程或缓存，就会撞上它。
+    <strong>解决办法：在 EM 还开着的时候就把需要的数据取出来，转成 record。</strong>
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 坑二：N+1 查询</div>
+  <p>列 100 个用户，模板里显示每个人的角色名：</p>
+  <div class="code" data-lang="text">
+<pre>
+select * from users                      ← 1 条
+select * from roles where id = 1         ← 第 1 个用户的角色
+select * from roles where id = 2         ← 第 2 个用户的角色
+...                                      ← 一共 100 条
+</pre>
+  </div>
+  <p>这就是 N+1：1 条主查询 + N 条关联查询。解决办法是用 <code>join fetch</code> 一次取完：</p>
+  <div class="code" data-lang="java">
+<pre>
+em.createQuery(
+    "select u from User u join fetch u.role order by u.username", User.class)
+  .getResultList();     // 只发 1 条带 JOIN 的 SQL
+</pre>
+  </div>
+  <p>
+    第 16 章会讲怎么<strong>发现</strong>自己写出了 N+1（而不是靠肉眼检查）。
+  </p>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 一条简单的纪律</div>
+  <p>
+    <strong>所有 <code>@ManyToOne</code> 和 <code>@OneToMany</code> 都写成 <code>LAZY</code>，
+    需要关联数据时在查询里显式 <code>join fetch</code>。</strong>
+  </p>
+  <p>
+    为什么不用 EAGER？因为 EAGER 是“无条件生效”的：
+    哪怕某个页面只需要用户名，也会被迫 JOIN 一堆表。
+    LAZY + 按需 fetch 把决定权交回给每个查询。
+  </p>
+</div>
+
+<h2 id="jshell">用 JShell 把玩数据库</h2>
+
+<p>
+  原书用 <code>flask shell</code> 在应用上下文里开一个 Python 交互式会话，
+  手动建角色、建用户、试查询。Java 的对应物是 <strong>JShell</strong>（JDK 9 自带）。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 1. 先把项目依赖拼成 classpath 文件（只需做一次，改依赖后重做）
+mvn -q dependency:build-classpath -Dmdep.outputFile=target/cp.txt
+
+# 2. 带着项目的类和依赖启动 JShell
+jshell --class-path "target/classes:src/main/resources:$(cat target/cp.txt)"
+</pre>
+</div>
+
+<div class="code" data-lang="java">
+<pre>
+jshell&gt; import com.example.javalinky.db.*;
+jshell&gt; import com.example.javalinky.model.*;
+
+jshell&gt; Db.init("jdbc:h2:./data/javalinky-dev;MODE=PostgreSQL", "sa", "")
+jshell&gt; var em = Db.emf().createEntityManager()
+jshell&gt; em.getTransaction().begin()
+
+jshell&gt; var admin = new Role("管理员"); admin.setPermissions(0xff);
+jshell&gt; var userRole = new Role("普通用户"); userRole.setDefaultRole(true);
+jshell&gt; em.persist(admin); em.persist(userRole);
+
+jshell&gt; admin.getId()         // 还没提交，id 可能已经有了（IDENTITY 策略会立刻插入）
+$9 ==&gt; 1
+
+jshell&gt; var john = new User("john@example.com", "john"); john.setRole(admin);
+jshell&gt; em.persist(john)
+jshell&gt; em.getTransaction().commit()
+
+jshell&gt; new UserRepository(em).findByUsername("john")
+$14 ==&gt; Optional[User[john]]
+
+jshell&gt; john.getRole().getName()
+$15 ==&gt; "管理员"
+
+jshell&gt; em.close(); Db.close();
+jshell&gt; /exit
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 更省事的办法：写一个 CLI 类</div>
+  <p>
+    JShell 适合临时探索，但敲 import 很烦。第 7 章我们会加一个
+    <code>Cli</code> 类，把“建表、灌种子数据、造假数据”这类维护任务做成命令：
+  </p>
+  <div class="code" data-lang="bash">
+<pre>
+mvn -q compile exec:java -Dexec.mainClass=com.example.javalinky.Cli -Dexec.args="seed-roles"
+</pre>
+  </div>
+  <p>第 17 章部署时，<code>deploy</code> 命令就是用这个机制做的。</p>
+</div>
+
+<h2 id="inviews">在处理器里用数据库</h2>
+
+<p>
+  把第 4 章的表单接上数据库。原书的做法是：提交的名字如果库里没有就新建，
+  并用 <code>session['known']</code> 记住这是不是老朋友。我们照着做：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+config.routes.post("/", ctx -&gt; {
+    var form = new NameForm(ctx.formParam("name"));
+    var errors = Forms.validate(form);
+    if (!errors.isEmpty()) {
+        View.render(ctx, "index.jte", "首页",
+                    "form", new FormView(Map.of("name", nullToEmpty(form.name())), errors));
+        return;
+    }
+
+    var users = new UserRepository(Db.em(ctx));
+    boolean known = users.findByUsername(form.name()).isPresent();
+    if (!known) {
+        var user = new User(form.name() + "@example.com", form.name());
+        users.save(user);
+        // 不需要手动 commit —— UnitOfWork 的 after 过滤器会在请求结束时提交
+    }
+
+    ctx.sessionAttribute("name", form.name());
+    ctx.sessionAttribute("known", known);
+    ctx.redirect(Routes.INDEX);     // Post/Redirect/Get
+});
+
+config.routes.get("/", ctx -&gt; {
+    String name = ctx.sessionAttribute("name");
+    Boolean known = ctx.sessionAttribute("known");
+    View.render(ctx, "index.jte", "首页",
+                "form", FormView.empty(),
+                "page", new IndexPage(name, Boolean.TRUE.equals(known)));
+});
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/index.jte">
+<pre>
+@import com.example.javalinky.web.*
+
+@param Layout layout
+@param FormView form
+@param IndexPage page
+
+@template.layout.base(layout = layout, content = @`
+  &lt;div class="pb-3 mb-4 border-bottom"&gt;
+    &lt;h1&gt;Hello, ${page.name() == null ? "陌生人" : page.name()}!&lt;/h1&gt;
+    @if(page.name() != null)
+      @if(page.known())
+        &lt;p class="text-secondary"&gt;又见面了！&lt;/p&gt;
+      @else
+        &lt;p class="text-secondary"&gt;很高兴认识你！&lt;/p&gt;
+      @endif
+    @endif
+  &lt;/div&gt;
+
+  &lt;form method="post" action="/" novalidate class="col-md-6"&gt;
+    @template.tag.csrf(token = layout.csrfToken())
+    @template.tag.field(form = form, name = "name", label = "你叫什么名字？",
+                        required = true)
+    &lt;button class="btn btn-primary" type="submit"&gt;提交&lt;/button&gt;
+  &lt;/form&gt;
+`)
+</pre>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本章对应原书 <b>git checkout 5a / 5b / 5c / 5d</b>（模型定义、在视图中使用、Shell 集成、迁移）。</div>
+</div>
+
+<h2 id="wiring">本章的 App.java</h2>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/App.java">
+<pre>
+package com.example.javalinky;
+
+import com.example.javalinky.db.Db;
+import com.example.javalinky.db.UnitOfWork;
+import com.example.javalinky.web.*;
+import io.javalin.Javalin;
+import io.javalin.http.staticfiles.Location;
+import io.javalin.rendering.template.JavalinJte;
+
+public class App {
+
+    public static void main(String[] args) {
+        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "7070"));
+
+        // 1. 数据库：Flyway 迁移 + EntityManagerFactory
+        Db.init(
+            System.getenv().getOrDefault("DATABASE_URL",
+                "jdbc:h2:./data/javalinky-dev;MODE=PostgreSQL"),
+            System.getenv().getOrDefault("DATABASE_USER", "sa"),
+            System.getenv().getOrDefault("DATABASE_PASSWORD", ""));
+        Runtime.getRuntime().addShutdownHook(new Thread(Db::close));
+
+        // 2. Web
+        Javalin.create(config -&gt; {
+            config.fileRenderer(new JavalinJte(JavalinJte.directoryTemplateEngine()));
+            config.staticFiles.add(f -&gt; {
+                f.directory = "/public";
+                f.location = Location.CLASSPATH;
+                f.hostedPath = "/";
+            });
+            config.jetty.modifyServletContextHandler(h -&gt;
+                h.setSessionHandler(Sessions.handler(false)));
+
+            // 注意顺序：事务过滤器要在 CSRF 之前装，
+            // 这样即使 CSRF 校验失败抛异常，after 过滤器也能正确回滚
+            UnitOfWork.install(config);
+            Csrf.install(config);
+
+            config.bundledPlugins.enableDevLogging();
+
+            config.routes.error(404, "html", ctx -&gt;
+                View.render(ctx, "error/404.jte", "页面不存在"));
+            config.routes.error(403, "html", ctx -&gt;
+                View.render(ctx, "error/403.jte", "没有权限"));
+            config.routes.error(500, "html", ctx -&gt;
+                View.render(ctx, "error/500.jte", "服务器错误"));
+
+            Routes.registerMain(config);   // 第 7 章会这样把路由拆出去
+        }).start(port);
+    }
+}
+</pre>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>按上面的 JShell 流程连上开发库，建三个角色和三个用户，然后：
+      <ul>
+        <li>把 <code>admin</code> 角色改名为 <code>超级管理员</code>（只改字段，不调任何 save），提交事务，再查一次确认改成功了 —— 体会"脏检查"。</li>
+        <li>执行 <code>em.remove(someRole)</code> 并提交，看看会不会因为外键约束失败。思考为什么。</li>
+      </ul>
+    </li>
+    <li>把 <code>User.role</code> 的 <code>fetch</code> 改成 <code>EAGER</code>，在 <code>persistence.xml</code> 里加上
+        <code>&lt;property name="hibernate.show_sql" value="true"/&gt;</code>，
+        然后查一个用户，对比控制台里 SQL 的变化。改完记得改回 <code>LAZY</code>。</li>
+    <li>写一个新迁移 <code>V2__add_user_about_me.sql</code>，给 <code>users</code> 加一列
+        <code>about_me TEXT</code>；在 <code>User</code> 实体里加对应字段。
+        重启应用，看 Flyway 的日志。
+        然后<strong>故意只改实体不写迁移</strong>，重启 —— 看 <code>hbm2ddl=validate</code> 怎么拦住你。</li>
+    <li>给 <code>UserRepository</code> 加一个方法：查出“注册时间最晚的 10 个用户”。
+        用 <code>setMaxResults</code> 和 <code>order by</code>。</li>
+    <li>故意在一个 POST 处理器里 <code>persist</code> 一个用户之后
+        <code>throw new RuntimeException("boom")</code>，然后去数据库里确认<strong>那个用户没有被插入</strong>。
+        这验证了事务回滚在工作。</li>
+    <li>写一个会触发 N+1 的查询（查全部用户，然后循环打印 <code>u.getRole().getName()</code>），
+        开着 <code>show_sql</code> 数一数发了多少条 SQL。再用 <code>join fetch</code> 改写，对比。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

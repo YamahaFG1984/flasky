@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 10 章 · 用户资料 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="10">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 10 章</span>
+<h1>用户资料</h1>
+<p class="lede">
+  现在用户只有邮箱和用户名，太干了。这一章给每个人加上个人资料页：
+  真名、所在地、自我介绍、注册时间、最后活跃时间和头像；
+  再做两套编辑器 —— 一套给用户自己，一套给管理员。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>给 <code>User</code> 加资料字段并写好迁移</li>
+    <li>做出资料页，并理解“页面模型 record”的价值</li>
+    <li>实现用户级和管理员级两套编辑器，看清它们的权限差异</li>
+    <li>接上 Gravatar 头像，理解 URL 是怎么拼出来的</li>
+    <li>认识“最后活跃时间”带来的写放大问题</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="fields">资料字段</h2>
+
+<div class="code" data-lang="sql" data-file="src/main/resources/db/migration/V4__user_profile.sql">
+<pre>
+ALTER TABLE users ADD COLUMN name        VARCHAR(64);
+ALTER TABLE users ADD COLUMN location    VARCHAR(64);
+ALTER TABLE users ADD COLUMN about_me    TEXT;
+ALTER TABLE users ADD COLUMN last_seen   TIMESTAMP(6) WITH TIME ZONE;
+ALTER TABLE users ADD COLUMN avatar_hash VARCHAR(32);
+
+-- 已有用户的 last_seen 先按注册时间填上，避免 null
+UPDATE users SET last_seen = member_since WHERE last_seen IS NULL;
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="model/User.java（新增字段）">
+<pre>
+@Column(length = 64)
+private String name;            // 真名，可以不填
+
+@Column(length = 64)
+private String location;
+
+@Column(name = "about_me", columnDefinition = "text")
+private String aboutMe;
+
+@Column(name = "last_seen")
+private Instant lastSeen = Instant.now();
+
+/** Gravatar 的邮箱哈希。缓存起来，避免每次渲染都算一遍 */
+@Column(name = "avatar_hash", length = 32)
+private String avatarHash;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么这些字段都可以为 null</div>
+  <p>
+    <code>name</code>、<code>location</code>、<code>aboutMe</code> 都没有 <code>nullable = false</code>——
+    用户刚注册时什么都没填，强制非空只会逼你用空字符串当"没填"，更乱。
+  </p>
+  <p>
+    但这意味着<strong>模板里必须处理 null</strong>。
+    下面我们用页面模型 record 把 null 统一转成空字符串，让模板干净。
+  </p>
+</div>
+
+<h2 id="lastseen">最后活跃时间：一个性能陷阱</h2>
+
+<p>
+  第 8 章的 <code>CurrentUser.install()</code> 里有这么一行：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+user.setLastSeen(Instant.now());   // 托管对象，改字段 = 提交时 UPDATE
+</pre>
+</div>
+
+<p>
+  原书也做了同样的事（<code>current_user.ping()</code>）。
+  它能工作，但有个代价值得知道：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="每请求更新 last_seen 导致的写放大">
+  <text class="ttl on-r" x="20" y="20">朴素做法：每个请求都 UPDATE</text>
+  <rect class="bx-r" x="20" y="30" width="720" height="92" rx="9"/>
+  <text class="lbl" x="40" y="54">一个用户浏览 20 个页面（含 CSS、图片请求）</text>
+  <text class="mono on-r" x="40" y="76">→ 20 次 UPDATE users SET last_seen = ? WHERE id = ?</text>
+  <text class="sm" x="40" y="96">1000 个在线用户 × 每分钟 10 个请求 = <tspan class="on-r">每分钟 1 万次写入</tspan>，而这个数据的精度要求其实只有"分钟级"</text>
+  <text class="sm" x="40" y="113">副作用：每次写入都要加行锁、写 WAL 日志、使行版本膨胀 —— 纯粹的浪费</text>
+
+  <text class="ttl on-g" x="20" y="152">改进：只在超过阈值时才写</text>
+  <rect class="bx-g" x="20" y="162" width="720" height="86" rx="9"/>
+  <text class="mono" x="40" y="186">if (user.getLastSeen() == null</text>
+  <text class="mono" x="40" y="204">    || Duration.between(user.getLastSeen(), now).toMinutes() &gt;= 5) {</text>
+  <text class="mono" x="40" y="222">    user.setLastSeen(now);</text>
+  <text class="mono" x="40" y="240">}      <tspan class="sm on-g">// 写入量降到约 1/50，而"5 分钟内活跃过"对用户完全够用</tspan></text>
+</svg>
+<figcaption>图 10-1　写放大与节流</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="web/CurrentUser.java（改进 install）">
+<pre>
+/** 最后活跃时间的最小更新间隔 */
+private static final Duration PING_INTERVAL = Duration.ofMinutes(5);
+
+public static void install(JavalinConfig config) {
+    config.routes.before(ctx -&gt; {
+        Long userId = ctx.sessionAttribute(SESSION_KEY);
+        if (userId == null) return;
+
+        User user = new UserRepository(Db.em(ctx)).findById(userId).orElse(null);
+        if (user == null) { logout(ctx); return; }
+
+        ctx.attribute(CTX_KEY, user);
+        ping(user);
+    });
+}
+
+private static void ping(User user) {
+    Instant now = Instant.now();
+    Instant last = user.getLastSeen();
+    if (last == null || Duration.between(last, now).compareTo(PING_INTERVAL) &gt;= 0) {
+        user.setLastSeen(now);
+    }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 还能再优化</div>
+  <p>
+    更彻底的做法是<strong>不写数据库</strong>：把 <code>userId → 最后活跃时间</code>
+    放进 Redis（或一个进程内的 <code>ConcurrentHashMap</code>），
+    每隔几分钟批量刷回数据库一次。
+  </p>
+  <p>
+    但在用户量不大时，上面的 5 分钟节流已经完全够用。
+    <strong>先用简单方案，有数据证明它成了瓶颈再优化</strong>——
+    第 16 章会讲怎么拿到这个数据。
+  </p>
+</div>
+
+<h2 id="profilepage">资料页</h2>
+
+<p>
+  这是本教程第一个“数据比较多”的页面，正好用它说明一个重要的做法：
+  <strong>不要把实体直接丢给模板，先转成页面模型。</strong>
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="实体直接给模板与先转页面模型的对比">
+  <text class="ttl on-r" x="20" y="20">&#10007; 把 User 实体直接丢给模板</text>
+  <rect class="bx-r" x="20" y="30" width="340" height="110" rx="9"/>
+  <text class="mono" x="40" y="54">View.render(ctx, "user.jte", …, "user", user)</text>
+  <text class="sm on-r" x="40" y="78">模板里：</text>
+  <text class="mono" x="40" y="96">@if(user.getName() != null)${user.getName()}@endif</text>
+  <text class="mono" x="40" y="114">${user.getPosts().size()}　← 触发懒加载，N+1</text>
+  <text class="sm on-r" x="40" y="132">模板里混进了判空和数据库查询</text>
+
+  <text class="ttl on-g" x="400" y="20">&#10003; 先转成页面模型 record</text>
+  <rect class="bx-g" x="400" y="30" width="340" height="110" rx="9"/>
+  <text class="mono" x="420" y="54">var page = UserProfilePage.of(user, …)</text>
+  <text class="sm on-g" x="420" y="78">模板里：</text>
+  <text class="mono" x="420" y="96">${page.name()}　　← 保证非 null</text>
+  <text class="mono" x="420" y="114">${page.postCount()}　← 已经是算好的数字</text>
+  <text class="sm on-g" x="420" y="132">模板只做展示，所有判断在 Java 里</text>
+
+  <rect class="bx-d" x="60" y="166" width="640" height="104" rx="10"/>
+  <text class="ttl" x="80" y="188">页面模型解决的四个问题</text>
+  <text class="lbl" x="80" y="212">① 判空只写一次（在 record 的工厂方法里），模板不用到处 @if</text>
+  <text class="lbl" x="80" y="232">② 数据库查询全部发生在处理器里，不会在渲染中途偷偷发 SQL</text>
+  <text class="lbl" x="80" y="252">③ 模板需要什么一目了然（看 record 定义即可）</text>
+  <text class="lbl" x="80" y="268">④ 不会把 passwordHash 这种字段意外暴露给模板</text>
+</svg>
+<figcaption>图 10-2　页面模型（DTO）的价值</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/page/UserProfilePage.java">
+<pre>
+package com.example.javalinky.web.page;
+
+import com.example.javalinky.model.User;
+import com.example.javalinky.util.Gravatar;
+import java.time.Instant;
+
+public record UserProfilePage(
+    long id,
+    String username,
+    String name,            // 保证非 null，没填就是空串
+    String location,
+    String aboutMe,
+    String email,           // 只有管理员能看到，否则是空串
+    Instant memberSince,
+    Instant lastSeen,
+    String avatarUrl,
+    long postCount,
+    long commentCount,
+    long followerCount,
+    long followingCount,
+    boolean isSelf,         // 看的是自己的主页吗
+    boolean canFollow,      // 当前访客能不能关注这个人
+    boolean isFollowing,    // 当前访客已经关注了吗
+    boolean followsYou      // 这个人关注了当前访客吗
+) {
+
+    public static UserProfilePage of(User user, boolean viewerIsAdmin, boolean isSelf,
+                                     long postCount, long commentCount,
+                                     long followerCount, long followingCount,
+                                     boolean canFollow, boolean isFollowing,
+                                     boolean followsYou) {
+        return new UserProfilePage(
+            user.getId(),
+            user.getUsername(),
+            orEmpty(user.getName()),
+            orEmpty(user.getLocation()),
+            orEmpty(user.getAboutMe()),
+            viewerIsAdmin ? user.getEmail() : "",
+            user.getMemberSince(),
+            user.getLastSeen(),
+            Gravatar.url(user.avatarHash(), 256),
+            postCount, commentCount, followerCount, followingCount,
+            isSelf, canFollow, isFollowing, followsYou);
+    }
+
+    public boolean hasName()     { return !name.isEmpty(); }
+    public boolean hasLocation() { return !location.isEmpty(); }
+    public boolean hasAboutMe()  { return !aboutMe.isEmpty(); }
+    public boolean hasEmail()    { return !email.isEmpty(); }
+
+    private static String orEmpty(String s) {
+        return s == null ? "" : s;
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+private void userProfile(Context ctx) {
+    var users = services.users(ctx);
+    User user = users.findByUsername(ctx.pathParam("username"))
+        .orElseThrow(() -&gt; new NotFoundResponse("没有这个用户"));
+
+    User viewer = CurrentUser.get(ctx);
+    var posts = services.postRepo(ctx);
+
+    var page = UserProfilePage.of(
+        user,
+        viewer != null &amp;&amp; viewer.isAdministrator(),
+        viewer != null &amp;&amp; viewer.getId().equals(user.getId()),
+        posts.countByAuthor(user),
+        services.commentRepo(ctx).countByAuthor(user),
+        0, 0,                       // 关注数，第 12 章填上
+        viewer != null &amp;&amp; viewer.can(Permission.FOLLOW)
+            &amp;&amp; !viewer.getId().equals(user.getId()),
+        false, false);              // 关注状态，第 12 章填上
+
+    View.render(ctx, "user.jte", user.getUsername(), "page", page);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/user.jte">
+<pre>
+@import com.example.javalinky.web.*
+@import com.example.javalinky.web.page.UserProfilePage
+
+@param Layout layout
+@param UserProfilePage page
+
+@template.layout.base(layout = layout, content = @`
+  &lt;div class="d-flex gap-4 pb-4 mb-4 border-bottom flex-wrap"&gt;
+
+    &lt;img class="rounded" src="${page.avatarUrl()}" width="128" height="128"
+         alt="${page.username()} 的头像"&gt;
+
+    &lt;div class="flex-grow-1"&gt;
+      &lt;h1 class="h3"&gt;${page.username()}&lt;/h1&gt;
+
+      @if(page.hasName() || page.hasLocation())
+        &lt;p class="text-secondary mb-2"&gt;
+          @if(page.hasName())${page.name()}@endif
+          @if(page.hasName() &amp;&amp; page.hasLocation()) · @endif
+          @if(page.hasLocation())
+            &lt;a class="link-secondary"
+               href="https://www.openstreetmap.org/search?query=${page.location()}"&gt;
+              ${page.location()}
+            &lt;/a&gt;
+          @endif
+        &lt;/p&gt;
+      @endif
+
+      @if(page.hasEmail())
+        &lt;p class="small"&gt;&lt;a href="mailto:${page.email()}"&gt;${page.email()}&lt;/a&gt;
+           &lt;span class="badge text-bg-danger"&gt;仅管理员可见&lt;/span&gt;&lt;/p&gt;
+      @endif
+
+      @if(page.hasAboutMe())
+        &lt;p&gt;${page.aboutMe()}&lt;/p&gt;
+      @endif
+
+      &lt;p class="text-secondary small mb-2"&gt;
+        注册于 @template.tag.timeago(at = page.memberSince(), relative = false)
+        · 最后活跃 @template.tag.timeago(at = page.lastSeen())
+      &lt;/p&gt;
+
+      &lt;p class="small"&gt;
+        &lt;strong&gt;${page.postCount()}&lt;/strong&gt; 篇文章 ·
+        &lt;strong&gt;${page.commentCount()}&lt;/strong&gt; 条评论
+      &lt;/p&gt;
+
+      &lt;div class="d-flex gap-2 flex-wrap"&gt;
+        @if(page.isSelf())
+          &lt;a class="btn btn-sm btn-outline-secondary" href="${Routes.EDIT_PROFILE}"&gt;编辑资料&lt;/a&gt;
+        @endif
+        @if(layout.isAdmin())
+          &lt;a class="btn btn-sm btn-outline-danger"
+             href="${Routes.adminEditProfile(page.id())}"&gt;编辑资料（管理员）&lt;/a&gt;
+        @endif
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;h2 class="h5"&gt;${page.username()} 的文章&lt;/h2&gt;
+  &lt;%-- 第 11 章在这里放文章列表 --%&gt;
+`)
+</pre>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 10a / 10b</b>（资料字段、资料页）。</div>
+</div>
+
+<h2 id="editors">两级资料编辑器</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="用户级与管理员级资料编辑器的字段差异">
+  <rect class="bx-b" x="30" y="30" width="330" height="200" rx="10"/>
+  <text class="ttl on-b" x="195" y="54" text-anchor="middle">用户级　/edit-profile</text>
+  <text class="sm" x="195" y="72" text-anchor="middle">Access.AUTHENTICATED　只能改自己</text>
+  <rect class="bx" x="50" y="84" width="290" height="24" rx="4"/><text class="sm" x="64" y="101">name　真名</text>
+  <rect class="bx" x="50" y="112" width="290" height="24" rx="4"/><text class="sm" x="64" y="129">location　所在地</text>
+  <rect class="bx" x="50" y="140" width="290" height="24" rx="4"/><text class="sm" x="64" y="157">aboutMe　自我介绍</text>
+  <rect class="bx-d" x="50" y="172" width="290" height="48" rx="4"/>
+  <text class="sm" x="64" y="190">改邮箱要走 /auth/change-email（需确认）</text>
+  <text class="sm" x="64" y="208">改用户名、角色、确认状态：<tspan class="on-r">不允许</tspan></text>
+
+  <rect class="bx-r" x="400" y="30" width="330" height="200" rx="10"/>
+  <text class="ttl on-r" x="565" y="54" text-anchor="middle">管理员级　/admin/edit-profile/{id}</text>
+  <text class="sm" x="565" y="72" text-anchor="middle">Permission.ADMIN　能改任何人</text>
+  <rect class="bx" x="420" y="84" width="290" height="24" rx="4"/><text class="sm" x="434" y="101">上面三项，全部有</text>
+  <rect class="bx-r" x="420" y="112" width="290" height="24" rx="4"/><text class="sm on-r" x="434" y="129">email　直接改，不需要邮件确认</text>
+  <rect class="bx-r" x="420" y="140" width="290" height="24" rx="4"/><text class="sm on-r" x="434" y="157">username　改用户名</text>
+  <rect class="bx-r" x="420" y="168" width="290" height="24" rx="4"/><text class="sm on-r" x="434" y="185">confirmed　手动标记为已确认</text>
+  <rect class="bx-r" x="420" y="196" width="290" height="24" rx="4"/><text class="sm on-r" x="434" y="213">role　改角色（下拉框）</text>
+
+  <rect class="bx-d" x="60" y="244" width="640" height="24" rx="6"/>
+  <text class="sm" x="380" y="261" text-anchor="middle">两套编辑器复用同一个模板，用一个布尔参数控制显示哪些字段</text>
+</svg>
+<figcaption>图 10-3　两级编辑器的字段差异</figcaption>
+</figure>
+
+<h3>用户级</h3>
+
+<div class="code" data-lang="java" data-file="web/form/EditProfileForm.java">
+<pre>
+package com.example.javalinky.web.form;
+
+import jakarta.validation.constraints.Size;
+
+public record EditProfileForm(
+    @Size(max = 64, message = "真名最长 64 个字符") String name,
+    @Size(max = 64, message = "所在地最长 64 个字符") String location,
+    @Size(max = 2000, message = "自我介绍最长 2000 个字符") String aboutMe
+) {}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+private void editProfileForm(Context ctx) {
+    User user = CurrentUser.require(ctx);
+    // GET 时把当前值回填进表单
+    var values = new HashMap&lt;String, String&gt;();
+    values.put("name", orEmpty(user.getName()));
+    values.put("location", orEmpty(user.getLocation()));
+    values.put("aboutMe", orEmpty(user.getAboutMe()));
+
+    View.render(ctx, "edit_profile.jte", "编辑资料",
+                "form", new FormView(values, Map.of()),
+                "admin", false,
+                "targetUser", null);
+}
+
+private void editProfile(Context ctx) {
+    User user = CurrentUser.require(ctx);
+    var form = new EditProfileForm(
+        ctx.formParam("name"),
+        ctx.formParam("location"),
+        ctx.formParam("aboutMe"));
+
+    var errors = Forms.validate(form);
+    if (!errors.isEmpty()) {
+        View.render(ctx, "edit_profile.jte", "编辑资料",
+                    "form", new FormView(formValues(form), errors),
+                    "admin", false, "targetUser", null);
+        return;
+    }
+
+    user.setName(blankToNull(form.name()));
+    user.setLocation(blankToNull(form.location()));
+    user.setAboutMe(blankToNull(form.aboutMe()));
+    // 不需要 save() —— 托管对象，事务提交时自动 UPDATE
+
+    Flash.success(ctx, "资料已更新。");
+    ctx.redirect(Routes.user(user.getUsername()));
+}
+
+/** 空字符串存成 null，保持"没填"的语义统一 */
+private static String blankToNull(String s) {
+    return (s == null || s.isBlank()) ? null : s.trim();
+}
+</pre>
+</div>
+
+<h3>管理员级</h3>
+
+<div class="code" data-lang="java" data-file="web/form/AdminEditProfileForm.java">
+<pre>
+package com.example.javalinky.web.form;
+
+import jakarta.validation.constraints.*;
+
+public record AdminEditProfileForm(
+    @NotBlank(message = "请填写邮箱")
+    @Size(max = 64) @Email(message = "邮箱格式不正确")
+    String email,
+
+    @NotBlank(message = "请填写用户名")
+    @Size(max = 64)
+    @Pattern(regexp = "^[A-Za-z][A-Za-z0-9_.]*$",
+             message = "用户名必须以字母开头，只能包含字母、数字、点和下划线")
+    String username,
+
+    boolean confirmed,
+
+    @NotNull(message = "请选择角色")
+    Long roleId,
+
+    @Size(max = 64) String name,
+    @Size(max = 64) String location,
+    @Size(max = 2000) String aboutMe
+) {}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+private void adminEditProfile(Context ctx) {
+    long targetId = ctx.pathParamAsClass("id", Long.class).get();
+    var users = services.users(ctx);
+    var roles = services.roles(ctx);
+
+    User target = users.findById(targetId)
+        .orElseThrow(() -&gt; new NotFoundResponse("没有这个用户"));
+
+    var form = new AdminEditProfileForm(
+        ctx.formParam("email"),
+        ctx.formParam("username"),
+        ctx.formParam("confirmed") != null,
+        ctx.formParamAsClass("roleId", Long.class).allowNullable().get(),
+        ctx.formParam("name"),
+        ctx.formParam("location"),
+        ctx.formParam("aboutMe"));
+
+    var errors = new LinkedHashMap&lt;String, List&lt;String&gt;&gt;(Forms.validate(form));
+
+    // 唯一性检查：排除"自己"（原书的 validate_email 也是这个逻辑）
+    String email = form.email() == null ? "" : form.email().toLowerCase();
+    if (!errors.containsKey("email")
+            &amp;&amp; !email.equalsIgnoreCase(target.getEmail())
+            &amp;&amp; users.emailExists(email)) {
+        errors.put("email", List.of("这个邮箱已被其他账号使用"));
+    }
+    if (!errors.containsKey("username")
+            &amp;&amp; !form.username().equals(target.getUsername())
+            &amp;&amp; users.usernameExists(form.username())) {
+        errors.put("username", List.of("这个用户名已被占用"));
+    }
+
+    if (!errors.isEmpty()) {
+        renderAdminForm(ctx, target, errors, roles.findAll());
+        return;
+    }
+
+    boolean emailChanged = !email.equalsIgnoreCase(target.getEmail());
+    target.setEmail(email);
+    target.setUsername(form.username());
+    target.setConfirmed(form.confirmed());
+    target.setRole(roles.findById(form.roleId())
+        .orElseThrow(() -&gt; new BadRequestResponse("角色不存在")));
+    target.setName(blankToNull(form.name()));
+    target.setLocation(blankToNull(form.location()));
+    target.setAboutMe(blankToNull(form.aboutMe()));
+
+    if (emailChanged) {
+        target.setAvatarHash(null);   // 头像哈希要按新邮箱重算
+    }
+
+    Flash.success(ctx, "已更新 " + target.getUsername() + " 的资料。");
+    ctx.redirect(Routes.user(target.getUsername()));
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 改用户名会让旧链接失效</div>
+  <p>
+    我们的资料页 URL 是 <code>/user/{username}</code>。
+    管理员一改用户名，所有指向旧地址的链接（包括搜索引擎收录的）就全部 404 了。
+  </p>
+  <p>
+    真实项目里的常见做法：
+  </p>
+  <ul>
+    <li>URL 用不可变的 id（<code>/user/42</code>）—— 最稳，但不好看、不好记；</li>
+    <li>或者 <code>/user/42-john</code>（id + 用户名），只用 id 查询，用户名部分只是装饰；</li>
+    <li>或者保留一张“旧用户名 → 用户”的表，访问旧地址时 301 重定向。</li>
+  </ul>
+  <p>本教程跟原书保持一致用用户名，但你应该知道这个取舍。</p>
+</div>
+
+<h3>两套编辑器共用一个模板</h3>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/edit_profile.jte">
+<pre>
+@import com.example.javalinky.model.Role
+@import com.example.javalinky.model.User
+@import com.example.javalinky.web.*
+@import java.util.List
+
+@param Layout layout
+@param FormView form
+@param boolean admin
+@param User targetUser = null
+@param List&lt;Role&gt; roles = List.of()
+
+@template.layout.base(layout = layout, content = @`
+  &lt;div class="col-lg-7"&gt;
+    &lt;h1 class="h3 mb-4"&gt;
+      @if(admin)
+        编辑 ${targetUser.getUsername()} 的资料
+        &lt;span class="badge text-bg-danger align-middle"&gt;管理员&lt;/span&gt;
+      @else
+        编辑我的资料
+      @endif
+    &lt;/h1&gt;
+
+    &lt;form method="post" novalidate&gt;
+      @template.tag.csrf(token = layout.csrfToken())
+
+      @if(admin)
+        @template.tag.field(form = form, name = "email", label = "邮箱",
+                            type = "email", required = true,
+                            help = "管理员修改邮箱不需要邮件确认")
+        @template.tag.field(form = form, name = "username", label = "用户名",
+                            required = true)
+        @template.tag.checkbox(form = form, name = "confirmed",
+                               label = "已确认邮箱")
+
+        &lt;div class="mb-3"&gt;
+          &lt;label class="form-label" for="f-roleId"&gt;角色&lt;/label&gt;
+          &lt;select class="form-select" id="f-roleId" name="roleId"&gt;
+            @for(var role : roles)
+              &lt;option value="${role.getId()}"
+                      @if(String.valueOf(role.getId()).equals(form.value("roleId")))selected@endif&gt;
+                ${role.getName()}
+              &lt;/option&gt;
+            @endfor
+          &lt;/select&gt;
+        &lt;/div&gt;
+      @endif
+
+      @template.tag.field(form = form, name = "name", label = "真名")
+      @template.tag.field(form = form, name = "location", label = "所在地")
+      @template.tag.textarea(form = form, name = "aboutMe", label = "自我介绍",
+                             rows = 5)
+
+      &lt;button class="btn btn-primary" type="submit"&gt;保存&lt;/button&gt;
+      &lt;a class="btn btn-link"
+         href="${admin ? Routes.user(targetUser.getUsername()) : Routes.user(layout.currentUser().getUsername())}"&gt;
+        取消
+      &lt;/a&gt;
+    &lt;/form&gt;
+  &lt;/div&gt;
+`)
+</pre>
+</div>
+
+<p>顺便补上第 4 章没做的多行文本框片段：</p>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/tag/textarea.jte">
+<pre>
+@import com.example.javalinky.web.FormView
+
+@param FormView form
+@param String name
+@param String label
+@param int rows = 4
+@param String help = null
+
+&lt;div class="mb-3"&gt;
+  &lt;label class="form-label" for="f-${name}"&gt;${label}&lt;/label&gt;
+  &lt;textarea class="form-control ${form.hasError(name) ? "is-invalid" : ""}"
+            id="f-${name}" name="${name}" rows="${rows}"&gt;${form.value(name)}&lt;/textarea&gt;
+  @if(form.hasError(name))
+    &lt;div class="invalid-feedback"&gt;${form.error(name)}&lt;/div&gt;
+  @elseif(help != null)
+    &lt;div class="form-text"&gt;${help}&lt;/div&gt;
+  @endif
+&lt;/div&gt;
+</pre>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 10c</b>（两级资料编辑器）。</div>
+</div>
+
+<h2 id="gravatar">头像：Gravatar</h2>
+
+<p>
+  <strong>Gravatar</strong>（Globally Recognized Avatar）是一个很老但依然好用的服务：
+  用户在 gravatar.com 上传一次头像，任何网站都能用他的<strong>邮箱哈希</strong>取到。
+  好处是我们完全不用处理文件上传、图片裁剪和存储。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="Gravatar URL 的构成">
+  <rect class="bx-a" x="20" y="24" width="720" height="54" rx="9"/>
+  <text class="mono" x="40" y="48">https://www.gravatar.com/avatar/</text>
+  <text class="mono on-a" x="310" y="48">d4c74594d841139328695756648b6bd6</text>
+  <text class="mono on-b" x="560" y="48">?s=128&amp;d=identicon&amp;r=g</text>
+  <text class="sm" x="40" y="68">固定前缀</text>
+  <text class="sm on-a" x="310" y="68">邮箱小写后的 MD5</text>
+  <text class="sm on-b" x="560" y="68">查询参数</text>
+
+  <rect class="bx" x="20" y="98" width="720" height="104" rx="9"/>
+  <text class="ttl" x="40" y="120">三个查询参数</text>
+  <text class="mono on-b" x="40" y="144">s=128</text>
+  <text class="sm" x="150" y="144">尺寸（像素）。1–2048。页面上用多大就取多大，省流量</text>
+  <text class="mono on-b" x="40" y="166">d=identicon</text>
+  <text class="sm" x="150" y="166">用户没设头像时的兜底：identicon（几何图案）/ mp（灰色人像）/ retro / robohash / 404</text>
+  <text class="mono on-b" x="40" y="188">r=g</text>
+  <text class="sm" x="150" y="188">内容分级，g 表示只要"全年龄"的图（类似电影分级）</text>
+
+  <rect class="bx-r" x="20" y="218" width="720" height="62" rx="9"/>
+  <text class="ttl on-r" x="40" y="240">一个隐私问题，必须知道</text>
+  <text class="sm" x="40" y="260">MD5 是<tspan class="on-r">可枚举</tspan>的：拿着一份常见邮箱列表算哈希，就能反查出"某个邮箱在用哪些网站"。</text>
+  <text class="sm" x="40" y="276">所以你是在把用户邮箱的哈希交给第三方。注重隐私的项目应该改成自托管头像上传（见下面的说明）。</text>
+</svg>
+<figcaption>图 10-4　Gravatar URL 的构成</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/util/Gravatar.java">
+<pre>
+package com.example.javalinky.util;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+
+public final class Gravatar {
+
+    private static final String BASE = "https://www.gravatar.com/avatar/";
+
+    /** 邮箱 → MD5 哈希（小写、去空格，这是 Gravatar 规定的） */
+    public static String hash(String email) {
+        if (email == null) return "";
+        try {
+            byte[] digest = MessageDigest.getInstance("MD5")
+                .digest(email.trim().toLowerCase().getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("JVM 居然没有 MD5", e);
+        }
+    }
+
+    public static String url(String hash, int size) {
+        return url(hash, size, "identicon");
+    }
+
+    public static String url(String hash, int size, String fallback) {
+        return BASE + (hash == null ? "" : hash)
+             + "?s=" + size + "&amp;d=" + fallback + "&amp;r=g";
+    }
+
+    private Gravatar() {}
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 这里用 MD5 不是安全问题</div>
+  <p>
+    MD5 作为<strong>密码</strong>哈希已经被彻底淘汰（第 8 章讲过）。
+    但这里用它不是为了保密，而是因为<strong>Gravatar 的接口规定就是 MD5</strong>——
+    它只是一个"把邮箱变成固定字符串"的编码方式。
+  </p>
+  <p>
+    判断"能不能用 MD5"的标准是：<strong>你是在防谁？</strong>
+    防攻击者 → 不能用；只是要一个确定性的标识符 → 没问题。
+  </p>
+</div>
+
+<h3>缓存哈希</h3>
+
+<p>
+  一个页面可能显示 20 个用户的头像，每个都算一次 MD5 虽然不贵，但完全没必要 ——
+  邮箱不变，哈希就不变。原书的做法是把哈希存进 <code>avatar_hash</code> 列：
+</p>
+
+<div class="code" data-lang="java" data-file="model/User.java（新增）">
+<pre>
+/**
+ * 取 Gravatar 哈希。没有缓存就算一次并存下来。
+ * 第 8 章的"改邮箱"会把这个字段置 null，这里就会重算。
+ */
+public String avatarHash() {
+    if (avatarHash == null || avatarHash.isBlank()) {
+        avatarHash = Gravatar.hash(email);
+    }
+    return avatarHash;
+}
+
+public void setAvatarHash(String hash) {
+    this.avatarHash = hash;
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 注意这个方法有个“副作用”</div>
+  <p>
+    <code>avatarHash()</code> 看起来像个 getter，但它会修改字段 ——
+    而对一个<strong>托管实体</strong>来说，改字段意味着事务提交时会发 UPDATE。
+  </p>
+  <p>
+    这正是我们要的（哈希被持久化了，下次不用再算）。
+    但这也是 Hibernate 容易让人困惑的地方：
+    <strong>调用一个 getter 居然产生了数据库写入。</strong>
+    写这种"惰性初始化"代码时要心里有数。
+  </p>
+</div>
+
+<h3>按尺寸取图</h3>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/tag/avatar.jte">
+<pre>
+@import com.example.javalinky.model.User
+@import com.example.javalinky.util.Gravatar
+
+@param User user
+@param int size = 40
+@param String cssClass = "rounded"
+
+&lt;img class="${cssClass}"
+     src="${Gravatar.url(user.avatarHash(), size)}"
+     srcset="${Gravatar.url(user.avatarHash(), size * 2)} 2x"
+     width="${size}" height="${size}"
+     alt="${user.getUsername()} 的头像"
+     loading="lazy"&gt;
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 三个小细节，但都有用</div>
+  <ul>
+    <li><code>srcset="… 2x"</code>：高清屏取双倍尺寸的图，普通屏不浪费流量。</li>
+    <li><code>width</code> / <code>height</code>：浏览器在图片加载前就知道占多大空间，
+        避免页面加载时内容乱跳（CLS）。</li>
+    <li><code>loading="lazy"</code>：列表里下方的头像滚动到才加载。
+        列 50 篇文章的首页上，这能省掉几十个请求。</li>
+  </ul>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：不想用 Gravatar 怎么办</div>
+  <p>
+    Gravatar 的问题是：依赖外部服务（挂了你的头像就全没了）、泄露邮箱哈希、国内访问慢。
+    自己做头像上传的话，需要处理：
+  </p>
+  <ol>
+    <li><strong>接收上传</strong>：<code>ctx.uploadedFile("avatar")</code>，
+        配 <code>config.jetty.multipartConfig.maxFileSize(2, SizeUnit.MB)</code>。</li>
+    <li><strong>校验</strong>：不能信 <code>Content-Type</code>（客户端可以乱填），
+        要读文件头的魔术字节（PNG 是 <code>89 50 4E 47</code>，JPEG 是 <code>FF D8 FF</code>）。</li>
+    <li><strong>处理</strong>：用 <code>javax.imageio</code> 或 Thumbnailator 裁剪成正方形并缩放成几档尺寸。
+        这一步<strong>顺便去掉了原图的 EXIF</strong>（里面可能有拍照位置）。</li>
+    <li><strong>存储</strong>：不要存在应用服务器的本地磁盘（第 17 章会讲为什么）——
+        用对象存储（S3 / 阿里云 OSS），数据库只存一个 key。</li>
+    <li><strong>兜底</strong>：没上传的用户显示什么？用用户名首字母 + 按 id 算出的背景色，
+        几行代码就能生成，而且永远不会挂。</li>
+  </ol>
+  <p>这是一个完整的小项目，很适合当本章的扩展练习。</p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 10d</b>（用户头像）。</div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>注册一个账号，填上真名、所在地和自我介绍，访问自己的资料页确认都显示了。
+        然后清空所有字段再保存，确认页面上那几行<strong>整块消失</strong>（而不是显示空白行）——
+        这是 <code>hasName()</code> 这些方法的作用。</li>
+    <li>在自我介绍里输入 <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> 保存。
+        确认页面上显示的是文字而不是弹窗 —— JTE 的自动转义在工作。</li>
+    <li>用管理员账号打开别人的管理员编辑页，把他的角色改成"协管员"。
+        然后用那个账号登录，确认导航栏多出了"协管评论"（第 13 章才有实际页面，
+        现在至少链接会出现）。</li>
+    <li>把 <code>PING_INTERVAL</code> 改成 <code>Duration.ZERO</code>，
+        打开 <code>hibernate.show_sql</code>，刷新页面几次，
+        数一数发了多少条 <code>update users</code>。改回 5 分钟再数一次。</li>
+    <li>在 JShell 里执行 <code>Gravatar.hash("someone@example.com")</code>，
+        把结果拼成 URL 在浏览器里打开。
+        然后把 <code>d=identicon</code> 换成 <code>d=retro</code> 和 <code>d=robohash</code>，看看区别。</li>
+    <li>修改自己的邮箱（走 <code>/auth/change-email</code> 的完整流程），
+        确认头像<strong>变了</strong>——验证 <code>avatarHash</code> 被正确重置了。</li>
+    <li>（进阶）按上面「深入」里的五步，实现自托管的头像上传。
+        至少做到前三步：接收、校验魔术字节、缩放成 256px 的正方形 PNG。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

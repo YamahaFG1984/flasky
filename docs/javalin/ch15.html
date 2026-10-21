@@ -1,0 +1,995 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 15 章 · 测试 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="15">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 15 章 · 第三部分开始</span>
+<h1>测试</h1>
+<p class="lede">
+  前面每一章我们都零散写了几个测试。这一章把它系统化：
+  三层测试怎么分工、怎么用 JaCoCo 看覆盖率、
+  怎么用 <code>JavalinTest</code> 测完整的 HTTP 请求、怎么用 Playwright 驱动真实浏览器。
+  最后回答原书那个问题：<strong>这么折腾值得吗？</strong>
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解测试金字塔，知道每一层该测什么</li>
+    <li>用 JUnit 5 + AssertJ 写清晰的断言</li>
+    <li>做好测试数据隔离，让测试之间互不影响</li>
+    <li>用 JaCoCo 生成覆盖率报告，并正确解读它</li>
+    <li>用 <code>JavalinTest</code> 测登录、表单、重定向、API</li>
+    <li>用 Playwright 做端到端测试</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">为什么测试</h2>
+
+<p>原书给了两个理由，第二个才是关键：</p>
+
+<ol>
+  <li>确认新写的代码按预期工作 —— 手动点一遍也能达到同样效果；</li>
+  <li><strong>确认改动没有破坏旧功能</strong>——这个<em>没法</em>手动做，
+      因为每改一行都要重测全部功能，人类做不到。</li>
+</ol>
+
+<div class="box key">
+  <div class="t">&#9728; 测试真正买到的东西：改代码的勇气</div>
+  <p>
+    没有测试的项目，改动大一点你就会犹豫："这个重构会不会弄坏什么？"
+    于是代码越来越不敢动，只能一层层往上加补丁。
+  </p>
+  <p>
+    有一套能在 30 秒内跑完的测试，你可以放心大改 ——
+    跑一遍就知道有没有坏。<strong>这是测试最大的价值，而不是"找到 bug"。</strong>
+  </p>
+</div>
+
+<h2 id="pyramid">测试金字塔</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 390" role="img" aria-label="测试金字塔：三层测试的数量、速度与覆盖范围">
+  <!-- pyramid -->
+  <path class="bx-r" d="M330 30 L430 30 L470 100 L290 100 Z"/>
+  <text class="ttl on-r" x="380" y="58" text-anchor="middle">端到端</text>
+  <text class="sm" x="380" y="76" text-anchor="middle">几个</text>
+  <text class="sm" x="380" y="92" text-anchor="middle">几十秒</text>
+
+  <path class="bx-a" d="M290 104 L470 104 L520 184 L240 184 Z"/>
+  <text class="ttl on-a" x="380" y="134" text-anchor="middle">集成测试（HTTP 层）</text>
+  <text class="sm" x="380" y="154" text-anchor="middle">几十个</text>
+  <text class="sm" x="380" y="172" text-anchor="middle">几秒</text>
+
+  <path class="bx-g" d="M240 188 L520 188 L580 290 L180 290 Z"/>
+  <text class="ttl on-g" x="380" y="222" text-anchor="middle">单元测试</text>
+  <text class="sm" x="380" y="244" text-anchor="middle">几百个</text>
+  <text class="sm" x="380" y="262" text-anchor="middle">毫秒级</text>
+  <text class="sm" x="380" y="280" text-anchor="middle">不碰数据库、不碰 HTTP</text>
+
+  <!-- left labels -->
+  <text class="sm" x="30" y="60">测什么：</text>
+  <text class="sm on-r" x="30" y="80">真实浏览器里的完整用户流程</text>
+  <text class="sm on-a" x="30" y="140">一个请求进 → 一个响应出</text>
+  <text class="sm on-g" x="30" y="226">一个方法、一个纯逻辑</text>
+
+  <!-- right labels -->
+  <text class="sm" x="600" y="60">定位问题：</text>
+  <text class="sm on-r" x="600" y="80">难（哪一层坏了？）</text>
+  <text class="sm on-a" x="600" y="140">中等</text>
+  <text class="sm on-g" x="600" y="226">非常容易</text>
+
+  <rect class="bx-d" x="40" y="310" width="680" height="72" rx="10"/>
+  <text class="ttl" x="60" y="332">为什么是金字塔而不是倒金字塔</text>
+  <text class="lbl" x="60" y="356">单元测试又快又准，所以要多；端到端测试慢又脆（改个 CSS 类名就红），所以要少 ——</text>
+  <text class="lbl" x="60" y="374">但<tspan class="on-r">不能没有</tspan>：只有它能验证"所有零件装起来真的能跑"。</text>
+</svg>
+<figcaption>图 15-1　测试金字塔</figcaption>
+</figure>
+
+<p>对应到 Javalinky：</p>
+
+<div class="tw">
+<table>
+<tr><th>层</th><th>工具</th><th>测什么</th><th>例子</th></tr>
+<tr><td>单元</td><td>JUnit 5 + AssertJ</td><td>权限位运算、分页算法、Markdown 清洗、令牌签发、密码哈希</td><td>第 9 章的 <code>PermissionTest</code></td></tr>
+<tr><td>集成</td><td>+ <code>JavalinTest</code> + H2 内存库</td><td>路由、表单校验、会话、权限拦截、API 响应</td><td>登录流程、API 返回 401</td></tr>
+<tr><td>端到端</td><td>+ Playwright</td><td>浏览器里的真实交互（含 JavaScript）</td><td>登录后发一篇文章并看到它</td></tr>
+</table>
+</div>
+
+<h2 id="junit">JUnit 5 与 AssertJ</h2>
+
+<div class="code" data-lang="java">
+<pre>
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import static org.assertj.core.api.Assertions.*;
+
+class 分页算法测试 {
+
+    @Test
+    void 空列表也要显示第一页() {
+        var page = Page.of(List.of(), 1, 20, 0);
+        assertThat(page.totalPages()).isEqualTo(1);
+        assertThat(page.hasPrevious()).isFalse();
+        assertThat(page.hasNext()).isFalse();
+    }
+
+    @Test
+    void 省略号出现在该出现的位置() {
+        var page = Page.of(List.of(), 7, 20, 400);   // 第 7 页，共 20 页
+        assertThat(page.pageNumbers())
+            .containsExactly(1, 0, 5, 6, 7, 8, 9, 0, 20);  // 0 代表省略号
+    }
+
+    @ParameterizedTest                       // 一个方法跑多组数据
+    @ValueSource(ints = {-100, -1, 0})
+    void 非法页码一律当成第一页(int bad) {
+        assertThat(Page.clampPage(bad)).isEqualTo(1);
+    }
+
+    @Test
+    void 越界访问会抛异常() {
+        assertThatThrownBy(() -&gt; Passwords.hash("x".repeat(100)))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("72 字节");
+    }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; AssertJ 为什么比 JUnit 自带的断言好</div>
+  <div class="vs">
+    <div class="old">
+      <div class="h">JUnit 的 Assertions</div>
+      <div class="code" data-lang="java">
+<pre>
+assertEquals(3, list.size());
+assertTrue(list.contains("a"));
+assertTrue(s.startsWith("Hello"));
+// 失败信息：expected: &lt;3&gt; but was: &lt;2&gt;
+</pre>
+      </div>
+    </div>
+    <div class="new">
+      <div class="h">AssertJ</div>
+      <div class="code" data-lang="java">
+<pre>
+assertThat(list).hasSize(3).contains("a");
+assertThat(s).startsWith("Hello");
+// 失败信息会打印出整个 list 的内容
+// 和具体哪里不匹配
+</pre>
+      </div>
+    </div>
+  </div>
+  <p>
+    AssertJ 是链式的（一个对象上连着断言多个条件），
+    而且<strong>失败信息详细得多</strong>——这在 CI 上只能看日志时非常重要。
+  </p>
+</div>
+
+<h2 id="fixtures">测试数据隔离</h2>
+
+<p>
+  这是集成测试最容易踩坑的地方：<strong>测试之间必须互不影响</strong>。
+  如果测试 A 建了一个用户 john，测试 B 又建一个 john，第二个会因为唯一约束失败 ——
+  而且失败与否取决于<strong>执行顺序</strong>，这是最难排查的那种问题。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="三种测试数据隔离策略">
+  <rect class="bx-r" x="20" y="24" width="230" height="146" rx="9"/>
+  <text class="ttl on-r" x="135" y="46" text-anchor="middle">✗ 共用一个库</text>
+  <text class="sm" x="36" y="70">所有测试连同一个数据库</text>
+  <text class="sm on-r" x="36" y="92">· 数据互相污染</text>
+  <text class="sm on-r" x="36" y="110">· 失败与顺序有关</text>
+  <text class="sm on-r" x="36" y="128">· 不能并行跑</text>
+  <text class="sm on-r" x="36" y="146">· 跑完还留着垃圾数据</text>
+
+  <rect class="bx-a" x="266" y="24" width="230" height="146" rx="9"/>
+  <text class="ttl on-a" x="381" y="46" text-anchor="middle">○ 每个测试后回滚</text>
+  <text class="sm" x="282" y="70">每个测试包在一个事务里，</text>
+  <text class="sm" x="282" y="86">结束时 rollback</text>
+  <text class="sm on-g" x="282" y="108">· 很快</text>
+  <text class="sm on-r" x="282" y="126">· 测不了"跨事务"的行为</text>
+  <text class="sm on-r" x="282" y="144">· 和真实请求的事务边界不同</text>
+
+  <rect class="bx-g" x="512" y="24" width="228" height="146" rx="9"/>
+  <text class="ttl on-g" x="626" y="46" text-anchor="middle">✓ 每个测试一个新库</text>
+  <text class="sm" x="528" y="70">H2 内存库，库名带 UUID</text>
+  <text class="mono" x="528" y="90">jdbc:h2:mem:test-&lt;uuid&gt;</text>
+  <text class="sm on-g" x="528" y="112">· 完全隔离</text>
+  <text class="sm on-g" x="528" y="130">· 可以并行</text>
+  <text class="sm on-r" x="528" y="148">· 每次要跑一遍 Flyway（约 0.2 秒）</text>
+
+  <rect class="bx-d" x="60" y="194" width="640" height="76" rx="10"/>
+  <text class="ttl" x="80" y="216">本教程选第三种</text>
+  <text class="lbl" x="80" y="240">第 7 章的 <tspan class="mono">AppConfig.test()</tspan> 里那个 <tspan class="mono">UUID.randomUUID()</tspan> 就是为此准备的。</text>
+  <text class="sm" x="80" y="260">它也顺便验证了"迁移脚本能在空库上从零跑通"——这是部署前最该验证的事之一。</text>
+</svg>
+<figcaption>图 15-2　测试数据隔离</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/TestFixtures.java">
+<pre>
+package com.example.javalinky;
+
+import com.example.javalinky.config.AppConfig;
+import com.example.javalinky.config.Profile;
+import com.example.javalinky.db.Db;
+import com.example.javalinky.mail.MailConfig;
+import com.example.javalinky.model.*;
+import com.example.javalinky.service.SeedService;
+import jakarta.persistence.EntityManager;
+
+import java.util.UUID;
+
+/** 测试用的配置和数据构造器 */
+public final class TestFixtures {
+
+    /** 每次调用都给出一个全新的内存数据库 */
+    public static AppConfig config() {
+        return new AppConfig(
+            Profile.TEST,
+            0,                                  // 端口 0 = 让系统分配
+            "http://localhost",
+            "jdbc:h2:mem:test-" + UUID.randomUUID() + ";MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
+            "sa", "",
+            "test-secret-key-at-least-32-chars-long",
+            false,
+            MailConfig.disabled(),              // 测试不发真邮件
+            "admin@example.com",
+            20, 50, 30,
+            Long.MAX_VALUE,
+            false, false, true);
+    }
+
+    /** 在给定的 EntityManager 里建好角色 */
+    public static void seedRoles(EntityManager em) {
+        SeedService.use(em);
+        SeedService.insertRoles();
+    }
+
+    /** 建一个已确认的普通用户，密码统一是 "cat12345" */
+    public static User user(EntityManager em, String username) {
+        var roles = new com.example.javalinky.db.RoleRepository(em);
+        var user = new User(username + "@example.com", username);
+        user.setPassword("cat12345");
+        user.setConfirmed(true);
+        user.setRole(roles.defaultRole());
+        em.persist(user);
+        return user;
+    }
+
+    /** 建一个管理员 */
+    public static User admin(EntityManager em, String username) {
+        var user = user(em, username);
+        user.setRole(new com.example.javalinky.db.RoleRepository(em)
+            .findByName("管理员").orElseThrow());
+        return user;
+    }
+
+    /** 在一个独立事务里准备数据（给集成测试用） */
+    public static void withTransaction(java.util.function.Consumer&lt;EntityManager&gt; work) {
+        EntityManager em = Db.emf().createEntityManager();
+        try {
+            em.getTransaction().begin();
+            work.accept(em);
+            em.getTransaction().commit();
+        } catch (RuntimeException e) {
+            if (em.getTransaction().isActive()) em.getTransaction().rollback();
+            throw e;
+        } finally {
+            em.close();
+        }
+    }
+
+    private TestFixtures() {}
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>DB_CLOSE_DELAY=-1</code> 很关键</div>
+  <p>
+    H2 内存库默认在<strong>最后一个连接关闭时就销毁</strong>。
+    而 HikariCP 连接池会回收空闲连接 ——
+    结果是测试跑到一半数据库突然"消失"，报 <code>Table not found</code>。
+  </p>
+  <p>
+    <code>DB_CLOSE_DELAY=-1</code> 让库在 JVM 退出前一直存在。
+    这是用 H2 做测试时的必备参数，几乎每个人都会踩一次这个坑。
+  </p>
+</div>
+
+<h2 id="coverage">代码覆盖率：JaCoCo</h2>
+
+<p>
+  原书用 Python 的 coverage 工具，给 <code>flask test</code> 加了一个 <code>--coverage</code> 选项。
+  Java 的对应工具是 <strong>JaCoCo</strong>，配成 Maven 插件就行，不需要改代码：
+</p>
+
+<div class="code" data-lang="xml" data-file="pom.xml（新增插件）">
+<pre>
+&lt;plugin&gt;
+  &lt;groupId&gt;org.jacoco&lt;/groupId&gt;
+  &lt;artifactId&gt;jacoco-maven-plugin&lt;/artifactId&gt;
+  &lt;version&gt;0.8.13&lt;/version&gt;
+  &lt;executions&gt;
+    &lt;!-- 测试前挂上探针 --&gt;
+    &lt;execution&gt;
+      &lt;id&gt;prepare-agent&lt;/id&gt;
+      &lt;goals&gt;&lt;goal&gt;prepare-agent&lt;/goal&gt;&lt;/goals&gt;
+    &lt;/execution&gt;
+    &lt;!-- 测试后生成报告 --&gt;
+    &lt;execution&gt;
+      &lt;id&gt;report&lt;/id&gt;
+      &lt;phase&gt;verify&lt;/phase&gt;
+      &lt;goals&gt;&lt;goal&gt;report&lt;/goal&gt;&lt;/goals&gt;
+    &lt;/execution&gt;
+    &lt;!-- 可选：覆盖率低于阈值就让构建失败 --&gt;
+    &lt;execution&gt;
+      &lt;id&gt;check&lt;/id&gt;
+      &lt;phase&gt;verify&lt;/phase&gt;
+      &lt;goals&gt;&lt;goal&gt;check&lt;/goal&gt;&lt;/goals&gt;
+      &lt;configuration&gt;
+        &lt;rules&gt;
+          &lt;rule&gt;
+            &lt;element&gt;BUNDLE&lt;/element&gt;
+            &lt;limits&gt;
+              &lt;limit&gt;
+                &lt;counter&gt;LINE&lt;/counter&gt;
+                &lt;value&gt;COVEREDRATIO&lt;/value&gt;
+                &lt;minimum&gt;0.50&lt;/minimum&gt;
+              &lt;/limit&gt;
+            &lt;/limits&gt;
+          &lt;/rule&gt;
+        &lt;/rules&gt;
+      &lt;/configuration&gt;
+    &lt;/execution&gt;
+  &lt;/executions&gt;
+  &lt;configuration&gt;
+    &lt;excludes&gt;
+      &lt;!-- 生成的模板类、入口类不计入 --&gt;
+      &lt;exclude&gt;gg/jte/generated/**&lt;/exclude&gt;
+      &lt;exclude&gt;**/App.class&lt;/exclude&gt;
+      &lt;exclude&gt;**/Cli.class&lt;/exclude&gt;
+    &lt;/excludes&gt;
+  &lt;/configuration&gt;
+&lt;/plugin&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+APP_PROFILE=test mvn clean verify
+
+# 报告在这里，用浏览器打开
+open target/site/jacoco/index.html
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="行覆盖率与分支覆盖率的区别">
+  <text class="ttl" x="20" y="20">同一段代码，两种覆盖率</text>
+
+  <rect class="bx" x="20" y="30" width="330" height="128" rx="9"/>
+  <text class="mono" x="40" y="54">boolean canEdit(User u, Post p) {</text>
+  <text class="mono" x="40" y="74">　　if (u == null) return false;</text>
+  <text class="mono" x="40" y="94">　　return u.getId().equals(</text>
+  <text class="mono" x="40" y="114">　　　　p.getAuthor().getId())</text>
+  <text class="mono" x="40" y="134">　　　　|| u.can(ADMIN);</text>
+  <text class="mono" x="40" y="152">}</text>
+
+  <rect class="bx-a" x="390" y="30" width="350" height="128" rx="9"/>
+  <text class="ttl on-a" x="410" y="52">只写了一个测试：</text>
+  <text class="mono" x="410" y="74">canEdit(作者本人, 他的文章) == true</text>
+  <text class="sm on-g" x="410" y="100">行覆盖率：<tspan class="ttl">100%</tspan>　每一行都执行过了</text>
+  <text class="sm on-r" x="410" y="124">分支覆盖率：<tspan class="ttl">33%</tspan>　只走了一条路</text>
+  <text class="sm" x="410" y="146">没测：u 为 null、不是作者、是管理员</text>
+
+  <rect class="bx-r" x="20" y="176" width="720" height="60" rx="9"/>
+  <text class="ttl on-r" x="40" y="198">所以：只看行覆盖率会严重高估测试质量</text>
+  <text class="sm" x="40" y="222">JaCoCo 的报告里同时有 Line 和 Branch 两栏。<tspan class="on-a">看 Branch 那一栏。</tspan>条件判断密集的代码尤其要看。</text>
+
+  <rect class="bx-d" x="20" y="252" width="720" height="60" rx="9"/>
+  <text class="ttl" x="40" y="274">更重要的提醒：覆盖率是一个"找漏洞"的工具，不是一个"打分"的指标</text>
+  <text class="sm" x="40" y="298">用法是：打开报告，找那些<tspan class="on-r">红色的重要代码</tspan>，给它补测试。而不是为了把数字刷到 80% 去测 getter。</text>
+</svg>
+<figcaption>图 15-3　行覆盖率 vs 分支覆盖率</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 该优先给哪些代码补测试</div>
+  <p>看着 JaCoCo 报告，按这个顺序挑：</p>
+  <ol>
+    <li><strong>安全相关</strong>：权限判断、归属检查、令牌校验、HTML 清洗。
+        这些出错的后果最严重。</li>
+    <li><strong>算法性质的纯逻辑</strong>：分页、权限位、时间计算。
+        这些最好测（不需要任何环境），性价比最高。</li>
+    <li><strong>容易写错的边界</strong>：空列表、第一页/最后一页、null、超长输入。</li>
+    <li><strong>修过 bug 的地方</strong>：每修一个 bug 就补一个测试，保证它不再出现。</li>
+  </ol>
+  <p>
+    <strong>不值得测的</strong>：getter / setter、<code>toString()</code>、
+    只是转发一下的方法、以及配置类。
+  </p>
+</div>
+
+<h2 id="javalintest">集成测试：JavalinTest</h2>
+
+<p>
+  原书用 Flask 的测试客户端，它模拟一个请求环境而不真的起服务器。
+  Javalin 的 <code>JavalinTest</code> 更彻底：它<strong>真的在一个随机端口上启动服务器</strong>，
+  然后给你一个 HTTP 客户端。
+</p>
+
+<div class="code" data-lang="xml">
+<pre>
+&lt;dependency&gt;
+  &lt;groupId&gt;io.javalin&lt;/groupId&gt;
+  &lt;artifactId&gt;javalin-testtools&lt;/artifactId&gt;
+  &lt;version&gt;${javalin.version}&lt;/version&gt;
+  &lt;scope&gt;test&lt;/scope&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/web/MainRoutesTest.java">
+<pre>
+package com.example.javalinky.web;
+
+import com.example.javalinky.JavalinkyApp;
+import com.example.javalinky.TestFixtures;
+import io.javalin.testtools.JavalinTest;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class MainRoutesTest {
+
+    @Test
+    void 匿名访客能看到首页() {
+        var app = JavalinkyApp.create(TestFixtures.config());
+
+        JavalinTest.test(app, (server, client) -&gt; {
+            var response = client.get("/");
+            assertThat(response.code()).isEqualTo(200);
+
+            String html = response.body().string();
+            assertThat(html).contains("陌生人");      // 未登录时的问候语
+            assertThat(html).doesNotContain("登出");  // 不该有登出按钮
+        });
+    }
+
+    @Test
+    void 未登录访问编辑资料页会被重定向到登录页() {
+        var app = JavalinkyApp.create(TestFixtures.config());
+
+        JavalinTest.test(app, (server, client) -&gt; {
+            var response = client.get("/edit-profile");
+            // OkHttp 默认不跟随重定向，所以能直接断言 302
+            assertThat(response.code()).isEqualTo(302);
+            assertThat(response.header("Location")).contains("/auth/login");
+        });
+    }
+
+    @Test
+    void 不存在的页面返回404页面() {
+        JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -&gt; {
+            var response = client.get("/这个页面不存在");
+            assertThat(response.code()).isEqualTo(404);
+            assertThat(response.body().string()).contains("这个页面不存在");
+        });
+    }
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>JavalinTest.test()</code> 替代了原书的 <code>/shutdown</code> 路由</div>
+  <p>
+    原书为了做 Selenium 测试，不得不在应用里加一条
+    <strong>只在测试配置下生效的 <code>/shutdown</code> 路由</strong>——
+    因为 Werkzeug 开发服务器只能靠一个 HTTP 请求来优雅关闭。
+  </p>
+  <p>
+    这是个无奈的妥协：生产代码里出现了一条专门给测试用的路由。
+    <code>JavalinTest</code> 帮我们避开了它 ——
+    <strong>它自己管服务器的启动和关闭</strong>，测完立刻 <code>app.stop()</code>。
+    所以我们的应用里没有任何测试专用代码。
+  </p>
+</div>
+
+<h3>测带会话的流程</h3>
+
+<p>
+  登录之后的测试需要保持 Cookie。原书的做法是
+  <code>app.test_client(use_cookies=True)</code>。
+  <code>JavalinTest</code> 的客户端基于 OkHttp，默认<strong>不</strong>自动管理 Cookie，
+  所以我们自己记一下：
+</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/web/LoginFlowTest.java">
+<pre>
+package com.example.javalinky.web;
+
+import com.example.javalinky.JavalinkyApp;
+import com.example.javalinky.TestFixtures;
+import com.example.javalinky.db.Db;
+import io.javalin.testtools.HttpClient;
+import io.javalin.testtools.JavalinTest;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class LoginFlowTest {
+
+    /** 从 HTML 里抠出 CSRF 隐藏字段的值 */
+    private static final Pattern CSRF =
+        Pattern.compile("name=\"_csrf\"\\s+value=\"([^\"]+)\"");
+
+    @Test
+    void 登录成功后首页显示用户名() {
+        var app = JavalinkyApp.create(TestFixtures.config());
+
+        JavalinTest.test(app, (server, client) -&gt; {
+            // 准备数据：建角色和一个用户
+            TestFixtures.withTransaction(em -&gt; {
+                TestFixtures.seedRoles(em);
+                TestFixtures.user(em, "john");
+            });
+
+            // ① GET 登录页，拿到 CSRF 令牌和会话 Cookie
+            var loginPage = client.get("/auth/login");
+            String cookie = loginPage.header("Set-Cookie");
+            String token = extractCsrf(loginPage.body().string());
+
+            // ② POST 登录
+            var login = client.post("/auth/login",
+                Map.of("email", "john@example.com",
+                       "password", "cat12345",
+                       "_csrf", token),
+                builder -&gt; builder.header("Cookie", sessionOf(cookie)));
+
+            assertThat(login.code()).isEqualTo(302);
+            assertThat(login.header("Location")).isEqualTo("/");
+
+            // ③ 带着会话访问首页
+            var home = client.get("/", builder -&gt;
+                builder.header("Cookie", sessionOf(cookie)));
+
+            assertThat(home.body().string())
+                .contains("john")
+                .contains("登出");
+        });
+    }
+
+    private static String extractCsrf(String html) {
+        Matcher m = CSRF.matcher(html);
+        assertThat(m.find()).as("页面里应该有 CSRF 隐藏字段").isTrue();
+        return m.group(1);
+    }
+
+    /** 从 Set-Cookie 头里取出 name=value 部分，丢掉 Path/HttpOnly 等属性 */
+    private static String sessionOf(String setCookieHeader) {
+        return setCookieHeader.split(";", 2)[0];
+    }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 更省事的办法：给测试配置加一个 CSRF 开关</div>
+  <p>
+    上面那段抠令牌、传 Cookie 的代码写一次还行，写二十次就太烦了。
+    原书直接在测试配置里关掉 CSRF（<code>WTF_CSRF_ENABLED = False</code>）。
+  </p>
+  <p>我们可以做得更好一点：给 <code>AppConfig</code> 加一个开关，</p>
+  <div class="code" data-lang="java">
+<pre>
+// AppConfig 新增字段
+boolean csrfEnabled
+
+// Csrf.install 里
+if (!config.csrfEnabled()) return;   // 测试时整个跳过校验
+</pre>
+  </div>
+  <p>
+    然后：<strong>绝大多数测试用 <code>csrfEnabled=false</code>，
+    另外专门写两三个测试用 <code>true</code> 来验证 CSRF 防护本身有效。</strong>
+    这样既省事，又没有漏测安全机制。
+  </p>
+</div>
+
+<h3>测 API</h3>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/api/ApiTest.java">
+<pre>
+package com.example.javalinky.api;
+
+import com.example.javalinky.JavalinkyApp;
+import com.example.javalinky.TestFixtures;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.javalin.testtools.JavalinTest;
+import org.junit.jupiter.api.Test;
+
+import java.util.Base64;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class ApiTest {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    @Test
+    void 没有令牌时返回401() {
+        JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -&gt; {
+            var response = client.get("/api/v1/posts", b -&gt;
+                b.header("Accept", "application/json"));
+
+            assertThat(response.code()).isEqualTo(401);
+            assertThat(response.body().string()).contains("Bearer");
+        });
+    }
+
+    @Test
+    void 发文章并读回来() {
+        JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -&gt; {
+            TestFixtures.withTransaction(em -&gt; {
+                TestFixtures.seedRoles(em);
+                TestFixtures.user(em, "john");
+            });
+
+            // ① 换令牌
+            String basic = Base64.getEncoder().encodeToString(
+                "john@example.com:cat12345".getBytes());
+            var tokenResponse = client.post("/api/v1/tokens", null, b -&gt;
+                b.header("Authorization", "Basic " + basic));
+
+            assertThat(tokenResponse.code()).isEqualTo(200);
+            String token = JSON.readTree(tokenResponse.body().string())
+                               .get("token").asText();
+            assertThat(token).isNotBlank();
+
+            // ② 发文章
+            var created = client.post("/api/v1/posts",
+                Map.of("body", "这是 **API** 发的文章"),
+                b -&gt; b.header("Authorization", "Bearer " + token));
+
+            assertThat(created.code()).isEqualTo(201);
+            String location = created.header("Location");
+            assertThat(location).isNotNull().contains("/api/v1/posts/");
+
+            // ③ 按 Location 读回来
+            var fetched = client.get(location.replace("http://localhost", ""), b -&gt;
+                b.header("Authorization", "Bearer " + token));
+
+            assertThat(fetched.code()).isEqualTo(200);
+            var json = JSON.readTree(fetched.body().string());
+            assertThat(json.get("body").asText()).isEqualTo("这是 **API** 发的文章");
+            // 验证 Markdown 被渲染并清洗了
+            assertThat(json.get("bodyHtml").asText())
+                .contains("&lt;strong&gt;API&lt;/strong&gt;");
+            // 验证敏感字段没有泄露
+            assertThat(fetched.body().string()).doesNotContain("passwordHash");
+        });
+    }
+
+    @Test
+    void 不能修改别人的文章() {
+        JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -&gt; {
+            // 建两个用户，john 发一篇文章，susan 去改它 → 应该 403
+            // （完整代码略，思路和上面一样）
+        });
+    }
+}
+</pre>
+</div>
+
+<h2 id="e2e">端到端测试：Playwright</h2>
+
+<p>
+  原书用 Selenium。今天更推荐 <strong>Playwright</strong>，原因是：
+</p>
+
+<div class="tw">
+<table>
+<tr><th></th><th>Selenium</th><th>Playwright</th></tr>
+<tr><td>浏览器驱动</td><td>要单独下载 chromedriver，版本必须匹配</td><td><code>mvn</code> 一条命令自动装好浏览器</td></tr>
+<tr><td>等待元素</td><td>要手写 <code>WebDriverWait</code>，否则随机失败</td><td><strong>自动等待</strong>，几乎不会出现"偶尔红"的测试</td></tr>
+<tr><td>调试</td><td>看日志</td><td>自带追踪查看器，能回放每一步的截图和网络请求</td></tr>
+<tr><td>生态</td><td>老牌，什么都支持</td><td>较新，但主流浏览器都覆盖</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="xml">
+<pre>
+&lt;dependency&gt;
+  &lt;groupId&gt;com.microsoft.playwright&lt;/groupId&gt;
+  &lt;artifactId&gt;playwright&lt;/artifactId&gt;
+  &lt;version&gt;1.57.0&lt;/version&gt;
+  &lt;scope&gt;test&lt;/scope&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+# 第一次要装浏览器（约 300 MB，只需一次）
+mvn exec:java -Dexec.mainClass=com.microsoft.playwright.CLI \
+              -Dexec.classpathScope=test -Dexec.args="install chromium"
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/e2e/EndToEndTest.java">
+<pre>
+package com.example.javalinky.e2e;
+
+import com.example.javalinky.JavalinkyApp;
+import com.example.javalinky.TestFixtures;
+import com.microsoft.playwright.*;
+import io.javalin.Javalin;
+import org.junit.jupiter.api.*;
+
+import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat;
+
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class EndToEndTest {
+
+    private Javalin app;
+    private int port;
+    private Playwright playwright;
+    private Browser browser;
+
+    @BeforeAll
+    void startEverything() {
+        // 端到端测试比较贵，所以整个类共用一个应用和一个浏览器
+        app = JavalinkyApp.create(TestFixtures.config());
+        app.start(0);                       // 0 = 随机空闲端口
+        port = app.port();
+
+        TestFixtures.withTransaction(em -&gt; {
+            TestFixtures.seedRoles(em);
+            TestFixtures.user(em, "john");
+        });
+
+        playwright = Playwright.create();
+        browser = playwright.chromium().launch(
+            new BrowserType.LaunchOptions().setHeadless(true));
+    }
+
+    @AfterAll
+    void stopEverything() {
+        if (browser != null) browser.close();
+        if (playwright != null) playwright.close();
+        if (app != null) app.stop();
+    }
+
+    private String url(String path) {
+        return "http://localhost:" + port + path;
+    }
+
+    @Test
+    void 用户能登录并发一篇文章() {
+        try (BrowserContext context = browser.newContext()) {   // 每个测试一个干净的浏览器上下文
+            Page page = context.newPage();
+
+            // ① 打开首页
+            page.navigate(url("/"));
+            assertThat(page.locator("h1")).containsText("陌生人");
+
+            // ② 点"登录"
+            page.getByRole(com.microsoft.playwright.options.AriaRole.LINK,
+                new Page.GetByRoleOptions().setName("登录")).click();
+
+            // ③ 填表单。Playwright 会自动等元素出现，不需要 sleep
+            page.getByLabel("邮箱").fill("john@example.com");
+            page.getByLabel("密码").fill("cat12345");
+            page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("登录")).click();
+
+            // ④ 确认登录成功
+            assertThat(page.locator("h1")).containsText("john");
+
+            // ⑤ 发一篇文章（这一步会用到 EasyMDE，纯 JS，只有真浏览器能测）
+            page.locator("textarea[name=body]").fill("端到端测试发的文章");
+            page.getByRole(com.microsoft.playwright.options.AriaRole.BUTTON,
+                new Page.GetByRoleOptions().setName("发布")).click();
+
+            // ⑥ 确认文章出现在列表里
+            assertThat(page.locator(".post-list")).containsText("端到端测试发的文章");
+        }
+    }
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 端到端测试该测什么、不该测什么</div>
+  <p><strong>该测</strong>（只有它能测的）：</p>
+  <ul>
+    <li>涉及 JavaScript 的交互：Markdown 编辑器、时间本地化、Bootstrap 下拉菜单；</li>
+    <li>跨页面的完整流程：注册 → 收邮件 → 确认 → 登录 → 发文章；</li>
+    <li>"页面真的能打开"这种最基本的健康检查。</li>
+  </ul>
+  <p><strong>不该测</strong>（放到下面两层去）：</p>
+  <ul>
+    <li>表单校验的每一种错误组合 —— 用集成测试，快一百倍；</li>
+    <li>权限的每一种组合 —— 用集成测试；</li>
+    <li>算法边界 —— 用单元测试。</li>
+  </ul>
+  <p>
+    一条经验：<strong>端到端测试超过 20 个就该反思了</strong>——
+    大概有一半的内容可以下移到更快的层。
+  </p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本章对应原书 <b>git checkout 15a / 15b / 15c / 15d</b>（覆盖率、测试客户端、测 API、Selenium）。</div>
+</div>
+
+<h2 id="ci">把测试接进 CI</h2>
+
+<p>
+  测试只有<strong>每次提交都自动跑</strong>才有价值。GitHub Actions 的最小配置：
+</p>
+
+<div class="code" data-lang="yaml" data-file=".github/workflows/test.yml">
+<pre>
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven          # 缓存 ~/.m2，能省掉大部分下载时间
+
+      - name: 跑测试并生成覆盖率
+        run: mvn --batch-mode clean verify
+        env:
+          APP_PROFILE: test
+
+      - name: 上传覆盖率报告
+        if: always()            # 即使测试失败也上传，方便排查
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: target/site/jacoco/
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么端到端测试通常不进 CI 的主流程</div>
+  <p>
+    Playwright 要下载浏览器、启动真实渲染，在 CI 上可能要几分钟。
+    常见的做法是分开：
+  </p>
+  <ul>
+    <li><strong>每次提交</strong>：单元 + 集成测试（目标：3 分钟内出结果）；</li>
+    <li><strong>合并到主分支 / 每晚</strong>：加上端到端测试。</li>
+  </ul>
+  <p>
+    Maven 里用 <code>maven-failsafe-plugin</code> 可以把
+    <code>*Test</code>（单元）和 <code>*IT</code>（集成/端到端）分开跑。
+  </p>
+</div>
+
+<h2 id="worth">值得吗</h2>
+
+<p>
+  原书的回答很实在，这里原样转述并补充：
+</p>
+
+<div class="box key">
+  <div class="t">&#9728; 原书的结论</div>
+  <p>
+    “<strong>不管你喜不喜欢，你的应用都会被测试。</strong>
+    如果你不自己测，那么你的用户就会成为不情愿的测试者 ——
+    他们会发现 bug，然后你得在压力下修。”
+  </p>
+  <p>
+    “像数据库模型这种能脱离应用环境执行的测试，<strong>总是应该写</strong>，
+    因为成本很低。端到端测试有时必要，但因为写起来复杂，
+    <strong>只应该用于那些无法隔离测试的功能</strong>。”
+  </p>
+  <p>
+    “应用代码应该组织成：把业务逻辑推进独立于应用上下文的模块，这样更容易测试。
+    视图函数里的代码应该简单，<strong>只做一层薄薄的转接</strong>——
+    接收请求，然后调用封装了业务逻辑的类或函数。”
+  </p>
+</div>
+
+<p>
+  最后那段话值得对照一下我们的代码。回看第 2 章的建议：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+// 处理器只做三件事：取参数 → 调服务 → 设响应
+config.routes.post("/posts", ctx -&gt; {
+    String body = ctx.formParam("body");
+    long userId = ctx.sessionAttribute("userId");
+    Post post = postService.publish(userId, body);   // &#8592; 业务逻辑在这里
+    ctx.redirect("/post/" + post.getId());
+});
+</pre>
+</div>
+
+<p>
+  <code>postService.publish()</code> 不知道 HTTP 的存在，
+  所以它可以用最快的单元测试来覆盖所有边界情况；
+  处理器那三行只需要一个集成测试确认"接线正确"就够了。
+</p>
+
+<p>
+  <strong>可测试性不是测试工具带来的，是代码结构带来的。</strong>
+  如果你发现某段逻辑很难测，那通常不是测试的问题 —— 是那段代码该拆了。
+</p>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>跑 <code>APP_PROFILE=test mvn clean verify</code>，打开
+        <code>target/site/jacoco/index.html</code>。
+        按包排序，找出覆盖率最低的那个包。
+        然后看 <strong>Branch</strong> 那一栏，找出"行覆盖高但分支覆盖低"的类。</li>
+    <li>给第 11 章的 <code>Markdown.toSafeHtml()</code> 写一组测试，
+        每个攻击载荷一个用例：<code>&lt;script&gt;</code>、
+        <code>onerror=</code>、<code>javascript:</code> 链接、
+        <code>&lt;iframe&gt;</code>、<code>&lt;style&gt;</code>。
+        确认它们全部被清洗。这是整个项目最该有测试的地方。</li>
+    <li>按正文的建议给 <code>AppConfig</code> 加 <code>csrfEnabled</code> 开关，
+        然后把 <code>LoginFlowTest</code> 简化掉抠令牌那部分。
+        <strong>另外保留一个测试</strong>，用 <code>csrfEnabled=true</code>
+        验证"不带令牌的 POST 会收到 403"。</li>
+    <li>写一个测试验证第 12 章的时间线查询：建 3 个用户、几篇文章、几条关注关系，
+        断言 A 的时间线里有 B 和 C 的文章、没有 D 的。</li>
+    <li>故意改坏一处代码（比如把 <code>Authorization.check()</code> 里的
+        <code>!user.can(permission)</code> 的叹号删掉），跑测试。
+        确认<strong>有测试变红了</strong>。如果全绿，说明你的权限测试还不够。</li>
+    <li>配好 Playwright 并跑通正文里那个端到端测试。
+        然后故意把登录按钮的文字改成"登陆"，看测试怎么失败、报错信息够不够清楚。</li>
+    <li>把 CI 配置加进仓库，推一个分支，看 GitHub Actions 跑起来。
+        然后故意提交一个失败的测试，确认 CI 变红并阻止合并。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

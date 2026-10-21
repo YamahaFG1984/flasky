@@ -1,0 +1,745 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 6 章 · 电子邮件 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="6">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 6 章</span>
+<h1>电子邮件</h1>
+<p class="lede">
+  第 8 章的“注册后发确认邮件”“忘记密码”都需要先有发邮件的能力。
+  这一章用 Jakarta Mail 把它搭起来，用 JTE 渲染邮件正文，
+  并且解决一个性能问题：发邮件很慢，不能让用户的浏览器干等着。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>搞清楚 SMTP 在整条邮件链路里的位置</li>
+    <li>配好 Jakarta Mail，会发一封纯文本 + HTML 的双版本邮件</li>
+    <li>用本地假 SMTP 服务器做开发（比用真邮箱更快更安全）</li>
+    <li>用 JTE 渲染邮件正文，复用第 3 章的模板能力</li>
+    <li>把发送丢到后台线程，不阻塞请求</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="smtp">SMTP 在哪一环</h2>
+
+<p>
+  先把概念理清楚：<strong>你的应用不"发送"邮件，它只是把邮件交给一台 SMTP 服务器</strong>，
+  剩下的投递工作由邮件系统接力完成。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="邮件从应用到收件人的完整链路">
+  <rect class="bx-a" x="20" y="60" width="140" height="62" rx="9"/>
+  <text class="ttl on-a" x="90" y="82" text-anchor="middle">Javalinky</text>
+  <text class="sm" x="90" y="100" text-anchor="middle">Jakarta Mail</text>
+  <text class="sm" x="90" y="114" text-anchor="middle">（SMTP 客户端）</text>
+
+  <rect class="bx-b" x="215" y="60" width="160" height="62" rx="9"/>
+  <text class="ttl on-b" x="295" y="82" text-anchor="middle">发信 SMTP 服务器</text>
+  <text class="sm" x="295" y="100" text-anchor="middle">Mailpit（开发）</text>
+  <text class="sm" x="295" y="114" text-anchor="middle">SES / Resend（生产）</text>
+
+  <rect class="bx" x="430" y="60" width="150" height="62" rx="9"/>
+  <text class="ttl" x="505" y="82" text-anchor="middle">收信方服务器</text>
+  <text class="sm" x="505" y="100" text-anchor="middle">按 MX 记录投递</text>
+  <text class="sm" x="505" y="114" text-anchor="middle">查 SPF/DKIM/DMARC</text>
+
+  <rect class="bx-g" x="630" y="60" width="110" height="62" rx="9"/>
+  <text class="ttl on-g" x="685" y="82" text-anchor="middle">收件人</text>
+  <text class="sm" x="685" y="100" text-anchor="middle">用 IMAP</text>
+  <text class="sm" x="685" y="114" text-anchor="middle">读邮件</text>
+
+  <path class="ln-a" d="M162 91 H211" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="186" y="54" text-anchor="middle">SMTP</text>
+  <text class="sm" x="186" y="140" text-anchor="middle">587/TLS</text>
+
+  <path class="ln-b" d="M377 91 H426" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="401" y="54" text-anchor="middle">SMTP</text>
+  <text class="sm" x="401" y="140" text-anchor="middle">25</text>
+
+  <path class="ln-g" d="M582 91 H626" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="604" y="54" text-anchor="middle">IMAP</text>
+
+  <rect class="bx-d" x="20" y="176" width="720" height="92" rx="10"/>
+  <text class="ttl" x="40" y="198">你的应用只负责最左边那一跳</text>
+  <text class="lbl" x="40" y="222">· 连上 SMTP 服务器，认证，把邮件内容交出去 —— 这一步成功只代表"交付成功"，不代表"用户收到了"</text>
+  <text class="lbl" x="40" y="242">· “进不进垃圾箱”由 SPF / DKIM / DMARC 这些域名级配置决定，和代码无关</text>
+  <text class="lbl on-r" x="40" y="262">· 所以生产环境别用个人邮箱发信：用专业的发信服务（SES、Resend、Postmark），它们帮你搞定送达率</text>
+</svg>
+<figcaption>图 6-1　邮件链路：代码只管最左边那一跳</figcaption>
+</figure>
+
+<h2 id="deps">Jakarta Mail</h2>
+
+<p>
+  Python 标准库自带 <code>smtplib</code>，原书用 Flask-Mail 把它包了一层。
+  Java 的情况是：<strong>标准只定义了接口</strong>（<code>jakarta.mail</code>），
+  实现要另外加（Eclipse 的 <strong>Angus Mail</strong>，前身是 JavaMail）。
+</p>
+
+<div class="code" data-lang="xml" data-file="pom.xml（新增）">
+<pre>
+&lt;!-- Jakarta Mail 的 API + 实现（Angus Mail 自带 API，加一个就够） --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;org.eclipse.angus&lt;/groupId&gt;
+  &lt;artifactId&gt;angus-mail&lt;/artifactId&gt;
+  &lt;version&gt;2.0.3&lt;/version&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<h3>配置项对照</h3>
+
+<div class="tw">
+<table>
+<tr><th>Flask-Mail 配置键</th><th>Jakarta Mail 属性</th><th>说明</th></tr>
+<tr><td><code>MAIL_SERVER</code></td><td><code>mail.smtp.host</code></td><td>SMTP 主机名</td></tr>
+<tr><td><code>MAIL_PORT</code></td><td><code>mail.smtp.port</code></td><td>25（明文）/ 587（STARTTLS）/ 465（SSL）</td></tr>
+<tr><td><code>MAIL_USE_TLS</code></td><td><code>mail.smtp.starttls.enable</code></td><td>先明文连接再升级到 TLS（配 587 端口）</td></tr>
+<tr><td><code>MAIL_USE_SSL</code></td><td><code>mail.smtp.ssl.enable</code></td><td>直接建 TLS 连接（配 465 端口）</td></tr>
+<tr><td><code>MAIL_USERNAME</code> / <code>MAIL_PASSWORD</code></td><td><code>mail.smtp.auth</code> + <code>Authenticator</code></td><td>认证凭据</td></tr>
+<tr><td><code>FLASKY_MAIL_SENDER</code></td><td><code>message.setFrom(...)</code></td><td>发件人</td></tr>
+<tr><td><code>FLASKY_MAIL_SUBJECT_PREFIX</code></td><td>自己拼在主题前面</td><td>如 <code>[Javalinky]</code></td></tr>
+</table>
+</div>
+
+<h2 id="dev">开发环境：用本地假 SMTP 服务器</h2>
+
+<p>
+  原书让读者配 Gmail，还要去开“允许不够安全的应用”。
+  今天 Gmail 已经关掉了这个开关（必须用应用专用密码或 OAuth2），而且用真邮箱开发有几个实际问题：
+  发信慢、有频率限制、测试邮件可能真的发给了别人、密码容易误提交到 Git。
+</p>
+
+<div class="box key">
+  <div class="t">&#9728; 强烈推荐：Mailpit</div>
+  <p>
+    <strong>Mailpit</strong>（或它的前辈 MailHog）是一个“假” SMTP 服务器：
+    它接收邮件但<strong>从不真的投递</strong>，而是存下来给你在网页上看。
+    一个命令就能跑起来：
+  </p>
+  <div class="code" data-lang="bash">
+<pre>
+docker run -d --name mailpit -p 1025:1025 -p 8025:8025 axllent/mailpit
+</pre>
+  </div>
+  <ul>
+    <li><strong>1025</strong> 是 SMTP 端口 —— 应用往这里发，不需要认证、不需要 TLS</li>
+    <li><strong>8025</strong> 是网页界面 —— 打开 <code>http://localhost:8025</code> 就能看到所有邮件，
+        包括 HTML 版、纯文本版和原始源码</li>
+  </ul>
+  <p>
+    开发第 8 章的“注册确认邮件”时，这东西会让你省下大量时间 ——
+    点一下注册，立刻在网页上看到邮件，直接复制确认链接。
+  </p>
+</div>
+
+<p>如果你坚持用 Gmail，现在的正确做法是：开启两步验证，然后生成一个<strong>应用专用密码</strong>（16 位），用它代替账号密码。</p>
+
+<h2 id="mailer">Mailer 类</h2>
+
+<p>先把配置抽成一个 record（第 7 章会统一管配置）：</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/mail/MailConfig.java">
+<pre>
+package com.example.javalinky.mail;
+
+public record MailConfig(
+    String host,
+    int port,
+    boolean startTls,
+    String username,       // 不需要认证时传 null
+    String password,
+    String from,           // 如 "Javalinky &lt;no-reply@javalinky.example&gt;"
+    String subjectPrefix   // 如 "[Javalinky] "
+) {
+    /** 开发默认值：对准本地 Mailpit */
+    public static MailConfig fromEnv() {
+        var env = System.getenv();
+        return new MailConfig(
+            env.getOrDefault("MAIL_HOST", "localhost"),
+            Integer.parseInt(env.getOrDefault("MAIL_PORT", "1025")),
+            Boolean.parseBoolean(env.getOrDefault("MAIL_STARTTLS", "false")),
+            env.get("MAIL_USERNAME"),
+            env.get("MAIL_PASSWORD"),
+            env.getOrDefault("MAIL_FROM", "Javalinky &lt;no-reply@javalinky.example&gt;"),
+            env.getOrDefault("MAIL_SUBJECT_PREFIX", "[Javalinky] ")
+        );
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/mail/Mailer.java">
+<pre>
+package com.example.javalinky.mail;
+
+import jakarta.mail.*;
+import jakarta.mail.internet.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Properties;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class Mailer {
+
+    private static final Logger log = LoggerFactory.getLogger(Mailer.class);
+
+    private final MailConfig config;
+    private final Session session;
+    private final ExecutorService executor;
+
+    public Mailer(MailConfig config) {
+        this.config = config;
+        this.session = buildSession(config);
+        // Java 21 的虚拟线程：每封邮件一个线程，廉价到可以随便创建
+        this.executor = Executors.newVirtualThreadPerTaskExecutor();
+    }
+
+    private static Session buildSession(MailConfig c) {
+        Properties props = new Properties();
+        props.put("mail.smtp.host", c.host());
+        props.put("mail.smtp.port", String.valueOf(c.port()));
+        props.put("mail.smtp.starttls.enable", String.valueOf(c.startTls()));
+        props.put("mail.smtp.connectiontimeout", "10000");  // 别让它无限期挂着
+        props.put("mail.smtp.timeout", "10000");
+        props.put("mail.smtp.writetimeout", "10000");
+
+        if (c.username() == null || c.username().isBlank()) {
+            props.put("mail.smtp.auth", "false");
+            return Session.getInstance(props);
+        }
+
+        props.put("mail.smtp.auth", "true");
+        return Session.getInstance(props, new Authenticator() {
+            @Override
+            protected PasswordAuthentication getPasswordAuthentication() {
+                return new PasswordAuthentication(c.username(), c.password());
+            }
+        });
+    }
+
+    /** 同步发送：会阻塞到 SMTP 服务器返回（几百毫秒到几秒） */
+    public void sendNow(String to, String subject, String textBody, String htmlBody) {
+        try {
+            var message = new MimeMessage(session);
+            message.setFrom(new InternetAddress(config.from()));
+            message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(to));
+            message.setSubject(config.subjectPrefix() + subject, "UTF-8");
+
+            // multipart/alternative：同一封信的两个版本，客户端自己挑
+            var textPart = new MimeBodyPart();
+            textPart.setText(textBody, StandardCharsets.UTF_8.name());
+
+            var htmlPart = new MimeBodyPart();
+            htmlPart.setContent(htmlBody, "text/html; charset=UTF-8");
+
+            var multipart = new MimeMultipart("alternative");
+            multipart.addBodyPart(textPart);   // 顺序重要：后面的优先级更高
+            multipart.addBodyPart(htmlPart);
+            message.setContent(multipart);
+
+            Transport.send(message);
+            log.info("邮件已投递给 SMTP：to={} subject={}", to, subject);
+
+        } catch (MessagingException e) {
+            // 故意不往上抛：发邮件失败不该让用户的注册流程失败
+            log.error("发送邮件失败：to={} subject={}", to, subject, e);
+        }
+    }
+
+    /** 异步发送：立刻返回，真正的发送在后台线程里跑 */
+    public void send(String to, String subject, String textBody, String htmlBody) {
+        executor.submit(() -&gt; sendNow(to, subject, textBody, htmlBody));
+    }
+
+    public void close() {
+        executor.close();   // Java 19+：等待已提交的任务跑完
+    }
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么要发两个版本</div>
+  <p>
+    <code>multipart/alternative</code> 里放纯文本和 HTML 两份<strong>内容相同</strong>的正文，
+    邮件客户端挑自己能显示的那个。
+  </p>
+  <ul>
+    <li>纯文本版服务于命令行邮件客户端、屏幕阅读器、以及“关闭了图片和 HTML”的用户。</li>
+    <li>而且<strong>只有 HTML 没有纯文本的邮件更容易被判为垃圾邮件</strong>。</li>
+  </ul>
+  <p>加上纯文本版的成本就是多写一个模板，很值。</p>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="multipart/alternative 邮件的结构">
+  <rect class="bx-a" x="180" y="20" width="400" height="36" rx="8"/>
+  <text class="ttl on-a" x="380" y="43" text-anchor="middle">MimeMessage（一封邮件）</text>
+
+  <rect class="bx" x="180" y="66" width="400" height="30" rx="6"/>
+  <text class="sm" x="196" y="86">头部：From / To / Subject / Date / Message-ID</text>
+
+  <rect class="bx-b" x="180" y="104" width="400" height="34" rx="6"/>
+  <text class="lbl on-b" x="380" y="126" text-anchor="middle">MimeMultipart("alternative")</text>
+
+  <rect class="bx-g" x="150" y="152" width="200" height="54" rx="7"/>
+  <text class="lbl on-g" x="250" y="172" text-anchor="middle">text/plain</text>
+  <text class="sm" x="250" y="189" text-anchor="middle">confirm.txt.jte</text>
+  <text class="sm" x="250" y="202" text-anchor="middle">兜底版本</text>
+
+  <rect class="bx-g" x="410" y="152" width="200" height="54" rx="7"/>
+  <text class="lbl on-g" x="510" y="172" text-anchor="middle">text/html</text>
+  <text class="sm" x="510" y="189" text-anchor="middle">confirm.html.jte</text>
+  <text class="sm" x="510" y="202" text-anchor="middle">优先显示（放在后面）</text>
+
+  <path class="ln-a" d="M380 56 V64" marker-end="url(#ar-a)"/>
+  <path class="ln-b" d="M300 140 L255 148" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M460 140 L505 148" marker-end="url(#ar-b)"/>
+</svg>
+<figcaption>图 6-2　一封双版本邮件的结构</figcaption>
+</figure>
+
+<h2 id="templates">用 JTE 渲染邮件正文</h2>
+
+<p>
+  原书用 <code>render_template('auth/email/confirm.txt', user=user, token=token)</code>
+  渲染邮件，和渲染网页用的是同一套模板引擎。我们也一样 —— 但有个细节要处理：
+  <strong>纯文本邮件不能做 HTML 转义</strong>（否则用户名里的 <code>&amp;</code> 会变成 <code>&amp;amp;</code>）。
+</p>
+
+<p>
+  JTE 的转义策略由 <code>ContentType</code> 决定，所以要建<strong>两个</strong> <code>TemplateEngine</code>：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Templates.java">
+<pre>
+package com.example.javalinky.web;
+
+import gg.jte.ContentType;
+import gg.jte.TemplateEngine;
+import gg.jte.output.StringOutput;
+import gg.jte.resolve.DirectoryCodeResolver;
+
+import java.nio.file.Path;
+import java.util.Map;
+
+public final class Templates {
+
+    private static final Path JTE_ROOT = Path.of("src", "main", "jte");
+
+    /** 网页和 HTML 邮件用：会做按上下文的 HTML 转义 */
+    public static final TemplateEngine HTML = TemplateEngine.create(
+        new DirectoryCodeResolver(JTE_ROOT),
+        Path.of("jte-classes", "html"),
+        ContentType.Html);
+
+    /** 纯文本邮件用：不做任何转义 */
+    public static final TemplateEngine TEXT = TemplateEngine.create(
+        new DirectoryCodeResolver(JTE_ROOT),
+        Path.of("jte-classes", "text"),
+        ContentType.Plain);
+
+    /** 渲染成字符串（而不是直接写进 HTTP 响应） */
+    public static String render(TemplateEngine engine, String template, Map&lt;String, Object&gt; model) {
+        var output = new StringOutput();
+        engine.render(template, model, output);
+        return output.toString();
+    }
+
+    private Templates() {}
+}
+</pre>
+</div>
+
+<p>然后让 Javalin 用同一个 HTML 引擎，而不是自己再建一个：</p>
+
+<div class="code" data-lang="java" data-file="App.java">
+<pre>
+config.fileRenderer(new JavalinJte(Templates.HTML));
+</pre>
+</div>
+
+<h3>两个邮件模板</h3>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/mail/confirm.txt.jte">
+<pre>
+@param String username
+@param String confirmUrl
+
+你好 ${username}，
+
+欢迎加入 Javalinky！
+
+请点击下面的链接确认你的账号：
+
+${confirmUrl}
+
+如果你没有注册过 Javalinky，请忽略这封邮件。
+
+这封邮件由系统自动发送，请不要回复。
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/mail/confirm.html.jte">
+<pre>
+@param String username
+@param String confirmUrl
+
+&lt;div style="font-family: -apple-system, 'Segoe UI', sans-serif;
+            max-width: 520px; margin: 0 auto; line-height: 1.7; color: #222"&gt;
+  &lt;h2 style="font-size: 20px"&gt;你好 ${username}，&lt;/h2&gt;
+
+  &lt;p&gt;欢迎加入 Javalinky！请点击下面的按钮确认你的账号：&lt;/p&gt;
+
+  &lt;p style="margin: 28px 0"&gt;
+    &lt;a href="${confirmUrl}"
+       style="background: #0d6efd; color: #fff; padding: 11px 22px;
+              border-radius: 6px; text-decoration: none; display: inline-block"&gt;
+      确认账号
+    &lt;/a&gt;
+  &lt;/p&gt;
+
+  &lt;p style="font-size: 13px; color: #666"&gt;
+    按钮打不开？把这个链接复制到浏览器地址栏：&lt;br&gt;
+    &lt;span style="word-break: break-all"&gt;${confirmUrl}&lt;/span&gt;
+  &lt;/p&gt;
+
+  &lt;hr style="border: none; border-top: 1px solid #eee; margin: 24px 0"&gt;
+  &lt;p style="font-size: 12px; color: #888"&gt;
+    如果你没有注册过 Javalinky，请忽略这封邮件。这封邮件由系统自动发送，请不要回复。
+  &lt;/p&gt;
+&lt;/div&gt;
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么 HTML 邮件里全是 <code>style=""</code></div>
+  <p>
+    邮件客户端对 CSS 的支持停留在二十年前：
+    Outlook 会丢掉 <code>&lt;style&gt;</code> 块、Gmail 会重写类名、几乎没人支持 flex 和 grid。
+    所以 HTML 邮件的通行做法是<strong>行内样式 + 表格布局</strong>。
+    不要试图在邮件里复用网页的 CSS。
+  </p>
+</div>
+
+<h3>把它包成一个服务</h3>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/mail/MailService.java">
+<pre>
+package com.example.javalinky.mail;
+
+import com.example.javalinky.web.Templates;
+import java.util.Map;
+
+/** 业务语义的邮件发送入口。处理器只调这里的方法，不碰 Mailer。 */
+public class MailService {
+
+    private final Mailer mailer;
+    private final String siteBaseUrl;   // 如 "http://localhost:7070"
+
+    public MailService(Mailer mailer, String siteBaseUrl) {
+        this.mailer = mailer;
+        this.siteBaseUrl = siteBaseUrl;
+    }
+
+    public void sendConfirmation(String to, String username, String token) {
+        var model = Map.&lt;String, Object&gt;of(
+            "username", username,
+            "confirmUrl", siteBaseUrl + "/auth/confirm/" + token
+        );
+        mailer.send(to, "确认你的账号",
+            Templates.render(Templates.TEXT, "mail/confirm.txt.jte", model),
+            Templates.render(Templates.HTML, "mail/confirm.html.jte", model));
+    }
+
+    public void sendPasswordReset(String to, String username, String token) {
+        var model = Map.&lt;String, Object&gt;of(
+            "username", username,
+            "resetUrl", siteBaseUrl + "/auth/reset/" + token
+        );
+        mailer.send(to, "重置你的密码",
+            Templates.render(Templates.TEXT, "mail/reset.txt.jte", model),
+            Templates.render(Templates.HTML, "mail/reset.html.jte", model));
+    }
+
+    /** 第 17 章：有新用户注册时通知管理员 */
+    public void notifyAdminNewUser(String adminEmail, String username) {
+        var model = Map.&lt;String, Object&gt;of("username", username);
+        mailer.send(adminEmail, "新用户注册",
+            Templates.render(Templates.TEXT, "mail/new_user.txt.jte", model),
+            Templates.render(Templates.HTML, "mail/new_user.html.jte", model));
+    }
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 邮件里的链接必须是绝对 URL</div>
+  <p>
+    第 3 章说过：站内链接用相对路径，但<strong>邮件是唯一必须用绝对 URL 的场景</strong> ——
+    邮件客户端没有“当前站点”这个概念。
+  </p>
+  <p>
+    所以 <code>siteBaseUrl</code> 必须从配置来（第 7 章会把它放进 <code>AppConfig</code>），
+    不能从请求里猜。原书用 <code>_external=True</code> 让 Flask 自动拼，
+    但那依赖 <code>SERVER_NAME</code> 配置，本质上也是同一件事。
+  </p>
+</div>
+
+<h2 id="async">异步发送：为什么必须这么做</h2>
+
+<p>
+  原书也遇到了这个问题：“如果你发了几封测试邮件，大概注意到 <code>mail.send()</code> 会阻塞几秒，
+  浏览器在这段时间里看起来没反应。”
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="同步发送与异步发送的请求耗时对比">
+  <text class="ttl on-r" x="20" y="20">同步：用户等着 SMTP</text>
+  <rect class="bx-d" x="20" y="30" width="720" height="68" rx="9"/>
+
+  <rect class="bx" x="36" y="44" width="80" height="40" rx="5"/>
+  <text class="sm" x="76" y="62" text-anchor="middle">校验表单</text>
+  <text class="sm" x="76" y="77" text-anchor="middle">2 ms</text>
+
+  <rect class="bx" x="120" y="44" width="100" height="40" rx="5"/>
+  <text class="sm" x="170" y="62" text-anchor="middle">写数据库</text>
+  <text class="sm" x="170" y="77" text-anchor="middle">8 ms</text>
+
+  <rect class="bx-r" x="224" y="44" width="420" height="40" rx="5"/>
+  <text class="lbl on-r" x="434" y="62" text-anchor="middle">连 SMTP、TLS 握手、认证、传输、等确认</text>
+  <text class="sm on-r" x="434" y="77" text-anchor="middle">800 ~ 3000 ms &mdash;&mdash; 这段时间 Jetty 的那个线程完全被占住</text>
+
+  <rect class="bx" x="648" y="44" width="80" height="40" rx="5"/>
+  <text class="sm" x="688" y="62" text-anchor="middle">302 重定向</text>
+  <text class="sm" x="688" y="77" text-anchor="middle">1 ms</text>
+
+  <text class="ttl on-g" x="20" y="130">异步：立刻响应</text>
+  <rect class="bx-d" x="20" y="140" width="720" height="92" rx="9"/>
+
+  <rect class="bx" x="36" y="154" width="80" height="40" rx="5"/>
+  <text class="sm" x="76" y="172" text-anchor="middle">校验表单</text>
+  <text class="sm" x="76" y="187" text-anchor="middle">2 ms</text>
+
+  <rect class="bx" x="120" y="154" width="100" height="40" rx="5"/>
+  <text class="sm" x="170" y="172" text-anchor="middle">写数据库</text>
+  <text class="sm" x="170" y="187" text-anchor="middle">8 ms</text>
+
+  <rect class="bx-g" x="224" y="154" width="130" height="40" rx="5"/>
+  <text class="sm on-g" x="289" y="172" text-anchor="middle">submit() 任务</text>
+  <text class="sm" x="289" y="187" text-anchor="middle">&lt; 1 ms</text>
+
+  <rect class="bx" x="358" y="154" width="90" height="40" rx="5"/>
+  <text class="sm" x="403" y="172" text-anchor="middle">302 重定向</text>
+  <text class="sm" x="403" y="187" text-anchor="middle">总共 ~12 ms</text>
+
+  <rect class="bx-b" x="470" y="154" width="258" height="40" rx="5"/>
+  <text class="sm on-b" x="599" y="172" text-anchor="middle">后台虚拟线程慢慢发</text>
+  <text class="sm" x="599" y="187" text-anchor="middle">和用户的请求已经没关系了</text>
+
+  <path class="ln-g" d="M289 196 C289 214 460 214 540 198" marker-end="url(#ar-g)"/>
+  <text class="sm" x="410" y="226" text-anchor="middle">提交任务后请求立刻结束，用户感觉"秒开"</text>
+</svg>
+<figcaption>图 6-3　同步 vs 异步发送</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 这里 Javalin 比 Flask 省事</div>
+  <p>
+    原书在这一节踩了一个坑：把发送挪到后台线程之后，<code>mail.send()</code> 用到了
+    <code>current_app</code>，而新线程里<strong>没有应用上下文</strong>，于是必须手动
+    <code>with app.app_context():</code>，还得把 <code>app</code> 当参数传进线程。
+  </p>
+  <p>
+    Javalin 没有这个问题 —— 因为它压根没有“上下文”这种线程局部状态。
+    <code>Mailer</code> 就是一个普通对象，在哪个线程调都一样。
+    这就是第 2 章说的“显式传参”带来的好处之一。
+  </p>
+</div>
+
+<h3>虚拟线程还是线程池？</h3>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">传统线程池（固定大小）</div>
+    <div class="code" data-lang="java">
+<pre>
+// 并发发信上限 = 4
+Executors.newFixedThreadPool(4);
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">虚拟线程（Java 21）</div>
+    <div class="code" data-lang="java">
+<pre>
+// 每个任务一个虚拟线程，无上限
+Executors.newVirtualThreadPerTaskExecutor();
+</pre>
+    </div>
+  </div>
+</div>
+
+<p>
+  发邮件是典型的 IO 阻塞任务，虚拟线程正好对症。
+  但注意：<strong>“无上限”在这里未必是好事</strong> ——
+  如果某一刻涌入一万个注册请求，你会同时开一万个 SMTP 连接，服务商会直接限流封你。
+  真要上量，就该换成下一节说的队列。
+</p>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：后台线程发邮件的三个固有缺陷</div>
+  <p>原书在这一节末尾提了一句“量大的话应该用 Celery 任务队列”。具体缺陷是：</p>
+  <ol>
+    <li><strong>进程一死就丢。</strong>部署重启、崩溃、容器被杀 —— 排队中的邮件没了，没人知道。</li>
+    <li><strong>失败没有重试。</strong>SMTP 服务器临时抽风，这封邮件就永远发不出去了。
+        我们的 <code>Mailer</code> 只是记了条日志。</li>
+    <li><strong>无法观测。</strong>“有多少封在排队、哪些失败了”没有任何地方能查。</li>
+  </ol>
+  <p>
+    正确的做法是<strong>持久化队列</strong>：把“要发的邮件”写进数据库表（或 Redis、SQS），
+    由一个独立的 worker 进程取出来发，失败则按指数退避重试。
+    Java 生态可以用 Quartz、JobRunr、db-scheduler，或者最简单的 ——
+    自己建一张 <code>outbox</code> 表 + 一个定时任务。
+  </p>
+  <p>
+    教程里不做这一步（会偏离主线），但<strong>上线前请认真考虑</strong>：
+    “确认邮件没发出去”意味着用户永远无法完成注册。
+  </p>
+</div>
+
+<h2 id="wire">接到应用里</h2>
+
+<div class="code" data-lang="java" data-file="App.java">
+<pre>
+public static void main(String[] args) {
+    Db.init(/* ... */);
+
+    var mailer = new Mailer(MailConfig.fromEnv());
+    var mail = new MailService(mailer,
+        System.getenv().getOrDefault("SITE_BASE_URL", "http://localhost:7070"));
+
+    Runtime.getRuntime().addShutdownHook(new Thread(() -&gt; {
+        mailer.close();   // 等待排队中的邮件发完
+        Db.close();
+    }));
+
+    Javalin.create(config -&gt; {
+        config.fileRenderer(new JavalinJte(Templates.HTML));
+        // ...
+
+        // 临时的试验路由，第 8 章会换成真正的注册流程
+        config.routes.post("/", ctx -&gt; {
+            // ... 第 5 章的建用户逻辑 ...
+            if (!known) {
+                mail.notifyAdminNewUser(
+                    System.getenv().getOrDefault("ADMIN_EMAIL", "admin@example.com"),
+                    form.name());
+            }
+            ctx.redirect(Routes.INDEX);
+        });
+    }).start(port);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+# 1. 起一个 Mailpit
+docker run -d --name mailpit -p 1025:1025 -p 8025:8025 axllent/mailpit
+
+# 2. 起应用（默认配置就指向 localhost:1025）
+mvn -q compile exec:java
+
+# 3. 在页面上提交一个新名字，然后打开 http://localhost:8025
+</pre>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本章对应原书 <b>git checkout 6a / 6b</b>（邮件支持、异步发送）。</div>
+</div>
+
+<h2 id="secrets">顺便说说密钥管理</h2>
+
+<p>
+  原书反复强调“绝不要把账号密码写进脚本”。这是本教程第一次真正需要密钥，
+  所以把规矩定下来 —— 第 7 章会把它做成系统：
+</p>
+
+<div class="code" data-lang="env" data-file=".env（这个文件绝对不能进 Git）">
+<pre>
+# 本地开发：Mailpit，不需要认证
+MAIL_HOST=localhost
+MAIL_PORT=1025
+MAIL_STARTTLS=false
+
+# 如果要用真 SMTP，大概是这样
+# MAIL_HOST=smtp.example.com
+# MAIL_PORT=587
+# MAIL_STARTTLS=true
+# MAIL_USERNAME=apikey
+# MAIL_PASSWORD=xxxxxxxxxxxx
+
+MAIL_FROM=Javalinky &lt;no-reply@javalinky.example&gt;
+SITE_BASE_URL=http://localhost:7070
+ADMIN_EMAIL=you@example.com
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 三条底线</div>
+  <ol>
+    <li><code>.env</code> 必须在 <code>.gitignore</code> 里（第 1 章已经加了）。</li>
+    <li>仓库里放一份 <code>.env.example</code>，列出需要哪些变量但<strong>不填真值</strong>，方便新同事。</li>
+    <li>密码一旦提交过就算泄露了，<strong>必须换新的</strong> ——
+        删掉那次提交没用，Git 历史里还在，而且可能已经被爬虫抓走。</li>
+  </ol>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>跑起 Mailpit，发一封测试邮件。在 Mailpit 的网页界面里切换 HTML / Text / Raw 三个标签页，
+        看看一封 <code>multipart/alternative</code> 邮件的原始样子。</li>
+    <li>把 <code>Mailer.send()</code> 临时换成 <code>sendNow()</code>，
+        在 <code>sendNow</code> 开头加一句 <code>Thread.sleep(3000)</code> 模拟慢 SMTP，
+        然后提交表单 —— 亲自感受一下那三秒。改回异步再试一次。</li>
+    <li>把 <code>MAIL_PORT</code> 改成一个没人监听的端口（比如 1099），再发一次。
+        确认<strong>用户的请求照常成功</strong>，而错误只出现在日志里。
+        思考：这个设计在什么场景下是对的，什么场景下是错的？</li>
+    <li>写一个 <code>mail/reset.txt.jte</code> 和 <code>mail/reset.html.jte</code>
+        （第 8 章会用到）。注意纯文本版里不要出现 HTML 标签。</li>
+    <li>在纯文本模板里写一个包含 <code>&amp;</code> 和 <code>&lt;</code> 的用户名，
+        确认它<strong>没有</strong>被转义成 <code>&amp;amp;</code>。
+        然后故意用 <code>Templates.HTML</code> 去渲染那个 <code>.txt.jte</code>，
+        对比结果 —— 这就是为什么要两个引擎。</li>
+    <li>给 <code>MailService</code> 加一个开关：当环境变量 <code>MAIL_ENABLED=false</code> 时，
+        只把邮件内容打到日志而不真发。这在跑自动化测试时很有用（第 15 章）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

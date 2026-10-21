@@ -1,0 +1,1050 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 12 章 · 关注 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="12">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 12 章</span>
+<h1>关注</h1>
+<p class="lede">
+  “关注”让 Javalinky 从博客变成社交网络。这一章的技术含量集中在数据建模上：
+  我们需要一个<strong>多对多、自引用、还带额外字段</strong>的关系 ——
+  这三个修饰词叠在一起，正好把关系型建模的几个关键概念都覆盖了。
+  最后那个“查出我关注的人的全部文章”的 JOIN，值得你反复读几遍。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>分清一对多、多对多、自引用三种关系</li>
+    <li>理解为什么多对多需要关联表，以及什么时候关联表必须升级成实体</li>
+    <li>会写 JPA 的复合主键（<code>@IdClass</code>）</li>
+    <li>彻底搞懂那条 JOIN 查询是怎么工作的</li>
+    <li>实现关注/取关、关注者列表、以及首页的“只看关注”</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="kinds">关系回顾</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 420" role="img" aria-label="一对多、多对多、自引用三种关系">
+  <!-- one to many -->
+  <text class="ttl on-b" x="20" y="20">① 一对多：一个角色 → 多个用户（第 5 章）</text>
+  <rect class="bx-d" x="20" y="30" width="720" height="96" rx="9"/>
+  <rect class="bx-b" x="60" y="48" width="120" height="58" rx="7"/>
+  <text class="lbl on-b" x="120" y="70" text-anchor="middle">roles</text>
+  <text class="mono" x="120" y="90" text-anchor="middle">id</text>
+
+  <rect class="bx-b" x="330" y="48" width="140" height="58" rx="7"/>
+  <text class="lbl on-b" x="400" y="70" text-anchor="middle">users</text>
+  <text class="mono on-a" x="400" y="90" text-anchor="middle">role_id ← 外键</text>
+
+  <path class="ln-a" d="M182 77 H326" marker-end="url(#ar-a)"/>
+  <text class="sm" x="254" y="68" text-anchor="middle">1 对 多</text>
+  <text class="sm on-g" x="560" y="72">外键放在"多"的那一侧</text>
+  <text class="sm" x="560" y="90">不需要额外的表</text>
+
+  <!-- many to many -->
+  <text class="ttl on-p" x="20" y="156">② 多对多：学生 ↔ 课程</text>
+  <rect class="bx-d" x="20" y="166" width="720" height="100" rx="9"/>
+  <rect class="bx-p" x="60" y="184" width="120" height="58" rx="7"/>
+  <text class="lbl on-p" x="120" y="206" text-anchor="middle">students</text>
+  <text class="mono" x="120" y="226" text-anchor="middle">id</text>
+
+  <rect class="bx-a" x="290" y="184" width="180" height="58" rx="7"/>
+  <text class="lbl on-a" x="380" y="204" text-anchor="middle">enrollments（关联表）</text>
+  <text class="mono" x="380" y="222" text-anchor="middle">student_id</text>
+  <text class="mono" x="380" y="238" text-anchor="middle">course_id</text>
+
+  <rect class="bx-p" x="580" y="184" width="120" height="58" rx="7"/>
+  <text class="lbl on-p" x="640" y="206" text-anchor="middle">courses</text>
+  <text class="mono" x="640" y="226" text-anchor="middle">id</text>
+
+  <path class="ln-a" d="M182 213 H286" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M472 213 H576" marker-end="url(#ar-a)"/>
+  <text class="sm on-g" x="380" y="260" text-anchor="middle">必须有第三张表，每一行代表"某学生选了某课"</text>
+
+  <!-- self referential -->
+  <text class="ttl on-r" x="20" y="296">③ 自引用多对多：用户 ↔ 用户（本章）</text>
+  <rect class="bx-d" x="20" y="306" width="720" height="108" rx="9"/>
+
+  <rect class="bx-r" x="90" y="326" width="140" height="70" rx="7"/>
+  <text class="lbl on-r" x="160" y="348" text-anchor="middle">users</text>
+  <text class="mono" x="160" y="368" text-anchor="middle">id</text>
+  <text class="sm" x="160" y="386" text-anchor="middle">同一张表，两个角色</text>
+
+  <rect class="bx-a" x="330" y="320" width="200" height="82" rx="7"/>
+  <text class="lbl on-a" x="430" y="340" text-anchor="middle">follows（关联表）</text>
+  <text class="mono" x="430" y="358" text-anchor="middle">follower_id → users.id</text>
+  <text class="mono" x="430" y="374" text-anchor="middle">followed_id → users.id</text>
+  <text class="mono on-g" x="430" y="392" text-anchor="middle">timestamp ← 额外字段！</text>
+
+  <path class="ln-a" d="M232 346 H326" marker-end="url(#ar-a)"/>
+  <text class="sm" x="279" y="340" text-anchor="middle">作为"关注者"</text>
+  <path class="ln-a" d="M232 380 H326" marker-end="url(#ar-a)"/>
+  <text class="sm" x="279" y="374" text-anchor="middle">作为"被关注者"</text>
+
+  <text class="sm on-r" x="560" y="346">两个外键都指向 users</text>
+  <text class="sm on-r" x="560" y="364">这叫自引用（self-referential）</text>
+  <text class="sm on-g" x="560" y="386">有了额外字段，关联表就必须升级成实体</text>
+</svg>
+<figcaption>图 12-1　三种关系</figcaption>
+</figure>
+
+<h3>为什么关联表必须升级成实体</h3>
+
+<p>
+  如果 <code>follows</code> 表只有两个外键，JPA 可以用 <code>@ManyToMany</code> 自动帮你管，
+  你甚至看不到那张表的存在：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+// 纯粹的多对多：JPA 自动维护 follows 表，代码里看不到它
+@ManyToMany
+@JoinTable(name = "follows",
+    joinColumns = @JoinColumn(name = "follower_id"),
+    inverseJoinColumns = @JoinColumn(name = "followed_id"))
+private Set&lt;User&gt; following = new HashSet&lt;&gt;();
+</pre>
+</div>
+
+<p>
+  但我们想记录<strong>“什么时候关注的”</strong>。
+  一旦关联表需要额外的列，<code>@ManyToMany</code> 就不够用了 ——
+  因为它管理的是"用户的集合"，没地方放时间戳。
+</p>
+
+<div class="box key">
+  <div class="t">&#9728; 这是一个必须记住的建模规则</div>
+  <p>
+    <strong>多对多关系一旦需要记录"关系本身的属性"，就要把关联表建成独立实体，
+    然后用两个一对多代替一个多对多。</strong>
+  </p>
+  <p>
+    而且现实中这种需求几乎总会出现：关注时间、是否特别关注、是否屏蔽动态……
+    所以很多人的经验是：<strong>一开始就建成实体</strong>，省得以后改。
+    原书也是这么做的（<code>Follow</code> 模型）。
+  </p>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="一个多对多拆成两个一对多">
+  <text class="ttl on-r" x="20" y="20">改造前：一个 @ManyToMany</text>
+  <rect class="bx-d" x="20" y="30" width="330" height="80" rx="9"/>
+  <rect class="bx-p" x="50" y="48" width="120" height="44" rx="6"/>
+  <text class="lbl on-p" x="110" y="74" text-anchor="middle">User</text>
+  <rect class="bx-p" x="200" y="48" width="120" height="44" rx="6"/>
+  <text class="lbl on-p" x="260" y="74" text-anchor="middle">User</text>
+  <path class="ln-p" d="M172 70 H196" marker-end="url(#ar-p)"/>
+  <path class="ln-p" d="M196 62 H176" marker-end="url(#ar-p)"/>
+  <text class="sm on-r" x="185" y="104" text-anchor="middle">没地方放 timestamp</text>
+
+  <text class="ttl on-g" x="410" y="20">改造后：两个 @OneToMany + @ManyToOne</text>
+  <rect class="bx-d" x="410" y="30" width="330" height="80" rx="9"/>
+  <rect class="bx-p" x="426" y="48" width="86" height="44" rx="6"/>
+  <text class="lbl on-p" x="469" y="74" text-anchor="middle">User</text>
+  <rect class="bx-a" x="542" y="44" width="110" height="52" rx="6"/>
+  <text class="lbl on-a" x="597" y="64" text-anchor="middle">Follow</text>
+  <text class="sm" x="597" y="82" text-anchor="middle">timestamp ✓</text>
+  <rect class="bx-p" x="668" y="48" width="60" height="44" rx="6"/>
+  <text class="lbl on-p" x="698" y="74" text-anchor="middle">User</text>
+  <path class="ln-a" d="M514 70 H538" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M654 70 H664" marker-end="url(#ar-a)"/>
+
+  <rect class="bx" x="100" y="136" width="560" height="92" rx="10"/>
+  <text class="ttl" x="120" y="158">User 上出现两个集合，很容易搞混，所以命名要讲究</text>
+  <text class="mono on-b" x="120" y="182">List&lt;Follow&gt; following　</text>
+  <text class="sm" x="330" y="182">我作为 follower 的那些记录 = <tspan class="on-b">我关注了谁</tspan></text>
+  <text class="mono on-g" x="120" y="204">List&lt;Follow&gt; followers　</text>
+  <text class="sm" x="330" y="204">我作为 followed 的那些记录 = <tspan class="on-g">谁关注了我</tspan></text>
+  <text class="sm on-r" x="120" y="222">（原书用的是 followed / followers，本教程用 following / followers，中文读起来不容易反）</text>
+</svg>
+<figcaption>图 12-2　把多对多拆成两个一对多</figcaption>
+</figure>
+
+<h2 id="schema">建表与建模</h2>
+
+<div class="code" data-lang="sql" data-file="src/main/resources/db/migration/V6__create_follows.sql">
+<pre>
+CREATE TABLE follows (
+    follower_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    followed_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    timestamp   TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+
+    -- 复合主键：保证"同一对关系"只能有一条记录
+    PRIMARY KEY (follower_id, followed_id)
+);
+
+-- 主键索引已经覆盖了"我关注了谁"的查询（最左前缀是 follower_id）
+-- 但"谁关注了我"需要另一个索引
+CREATE INDEX ix_follows_followed ON follows (followed_id);
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 复合主键顺便解决了两个问题</div>
+  <ol>
+    <li><strong>防重复关注。</strong>同一对 (follower, followed) 插第二次会违反主键约束，
+        数据库直接拒绝 —— 不用靠应用逻辑保证。</li>
+    <li><strong>查询加速。</strong>主键自带索引，而 <code>(follower_id, followed_id)</code>
+        这个顺序正好能加速"我关注了谁"的查询。</li>
+  </ol>
+  <p>
+    <code>ON DELETE CASCADE</code> 则保证删用户时它的关注记录一起消失，
+    不会留下指向不存在用户的脏数据。
+  </p>
+</div>
+
+<h3>复合主键：<code>@IdClass</code></h3>
+
+<p>
+  JPA 表达复合主键有两种方式（<code>@IdClass</code> 和 <code>@EmbeddedId</code>）。
+  这里用 <code>@IdClass</code>，因为它让实体的字段声明保持直观：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/model/FollowId.java">
+<pre>
+package com.example.javalinky.model;
+
+import java.io.Serializable;
+import java.util.Objects;
+
+/**
+ * Follow 的复合主键。
+ * 规则：字段名必须和 Follow 里标了 @Id 的字段同名，
+ *      类型是对应实体的主键类型（User 的主键是 Long）。
+ * 另外必须有公开的无参构造器，并正确实现 equals/hashCode。
+ */
+public class FollowId implements Serializable {
+
+    private Long follower;
+    private Long followed;
+
+    public FollowId() {}
+
+    public FollowId(Long follower, Long followed) {
+        this.follower = follower;
+        this.followed = followed;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof FollowId other)) return false;
+        return Objects.equals(follower, other.follower)
+            &amp;&amp; Objects.equals(followed, other.followed);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(follower, followed);
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/model/Follow.java">
+<pre>
+package com.example.javalinky.model;
+
+import jakarta.persistence.*;
+import java.time.Instant;
+
+@Entity
+@Table(name = "follows")
+@IdClass(FollowId.class)
+public class Follow {
+
+    /** 关注的发起者 */
+    @Id
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "follower_id", nullable = false)
+    private User follower;
+
+    /** 被关注的人 */
+    @Id
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "followed_id", nullable = false)
+    private User followed;
+
+    @Column(name = "timestamp", nullable = false)
+    private Instant timestamp = Instant.now();
+
+    protected Follow() {}
+
+    public Follow(User follower, User followed) {
+        this.follower = follower;
+        this.followed = followed;
+    }
+
+    public User getFollower() { return follower; }
+    public User getFollowed() { return followed; }
+    public Instant getTimestamp() { return timestamp; }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 更简单的替代方案：代理主键</div>
+  <p>
+    复合主键在 JPA 里写起来比较啰嗦（要多一个类、要手写 equals/hashCode）。
+    很多团队的做法是给关联实体一个普通的自增 id，再加唯一约束：
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+@Entity
+@Table(name = "follows", uniqueConstraints =
+    @UniqueConstraint(columnNames = {"follower_id", "followed_id"}))
+public class Follow {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    // ... follower / followed / timestamp
+}
+</pre>
+  </div>
+  <p>
+    效果几乎一样（唯一约束同样防重复），代码少一半。
+    本教程用复合主键是为了跟原书的表结构一致，也为了让你见过这种写法。
+    <strong>实际项目里代理主键更省事，推荐。</strong>
+  </p>
+</div>
+
+<h3>User 上的两个集合</h3>
+
+<div class="code" data-lang="java" data-file="model/User.java（新增）">
+<pre>
+/** 我关注了谁（我是 follower） */
+@OneToMany(mappedBy = "follower", fetch = FetchType.LAZY,
+           cascade = CascadeType.ALL, orphanRemoval = true)
+private List&lt;Follow&gt; following = new ArrayList&lt;&gt;();
+
+/** 谁关注了我（我是 followed） */
+@OneToMany(mappedBy = "followed", fetch = FetchType.LAZY,
+           cascade = CascadeType.ALL, orphanRemoval = true)
+private List&lt;Follow&gt; followers = new ArrayList&lt;&gt;();
+
+public List&lt;Follow&gt; getFollowing() { return following; }
+public List&lt;Follow&gt; getFollowers() { return followers; }
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>cascade</code> 和 <code>orphanRemoval</code> 分别管什么</div>
+  <div class="tw">
+  <table>
+  <tr><th>设置</th><th>含义</th><th>这里为什么要</th></tr>
+  <tr><td><code>cascade = ALL</code></td><td>对 User 做的操作（persist / remove / merge）传播到它的 Follow 记录</td><td>删用户时它的关注记录一起删</td></tr>
+  <tr><td><code>orphanRemoval = true</code></td><td>从集合里移除一个 Follow，就意味着删除它</td><td>取关时直接 <code>following.remove(f)</code> 即可</td></tr>
+  </table>
+  </div>
+  <p>
+    注意数据库层面我们也写了 <code>ON DELETE CASCADE</code>。两层都配是有意的：
+    <strong>JPA 的 cascade 只在"通过 JPA 删除"时生效</strong>，
+    而数据库约束对任何途径（包括手写 SQL、别的服务）都生效。
+  </p>
+</div>
+
+<h2 id="repo">关注操作</h2>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/db/FollowRepository.java">
+<pre>
+package com.example.javalinky.db;
+
+import com.example.javalinky.model.Follow;
+import com.example.javalinky.model.FollowId;
+import com.example.javalinky.model.User;
+import jakarta.persistence.EntityManager;
+
+import java.util.List;
+
+public class FollowRepository {
+
+    private final EntityManager em;
+
+    public FollowRepository(EntityManager em) {
+        this.em = em;
+    }
+
+    public boolean isFollowing(User follower, User followed) {
+        if (follower == null || followed == null) return false;
+        return em.find(Follow.class,
+            new FollowId(follower.getId(), followed.getId())) != null;
+    }
+
+    public void follow(User follower, User followed) {
+        if (isFollowing(follower, followed)) return;      // 幂等
+        em.persist(new Follow(follower, followed));
+    }
+
+    public void unfollow(User follower, User followed) {
+        Follow follow = em.find(Follow.class,
+            new FollowId(follower.getId(), followed.getId()));
+        if (follow != null) em.remove(follow);
+    }
+
+    /**
+     * 关注数 / 粉丝数。
+     * 注意要减去 1，因为每个人都关注了自己（见本章最后一节）。
+     */
+    public long countFollowing(User user) {
+        return count("f.follower", user);
+    }
+
+    public long countFollowers(User user) {
+        return count("f.followed", user);
+    }
+
+    private long count(String side, User user) {
+        return em.createQuery(
+                "select count(f) from Follow f where " + side + " = :u", Long.class)
+            .setParameter("u", user)
+            .getSingleResult();
+    }
+
+    /** 粉丝列表（分页）。join fetch 关注者本人，避免 N+1 */
+    public Page&lt;Follow&gt; followersOf(User user, int page, int size) {
+        long total = countFollowers(user);
+        var items = em.createQuery("""
+                select f from Follow f
+                  join fetch f.follower
+                 where f.followed = :u
+                 order by f.timestamp desc
+                """, Follow.class)
+            .setParameter("u", user)
+            .setFirstResult((page - 1) * size)
+            .setMaxResults(size)
+            .getResultList();
+        return Page.of(items, page, size, total);
+    }
+
+    /** 关注列表（分页） */
+    public Page&lt;Follow&gt; followingOf(User user, int page, int size) {
+        long total = countFollowing(user);
+        var items = em.createQuery("""
+                select f from Follow f
+                  join fetch f.followed
+                 where f.follower = :u
+                 order by f.timestamp desc
+                """, Follow.class)
+            .setParameter("u", user)
+            .setFirstResult((page - 1) * size)
+            .setMaxResults(size)
+            .getResultList();
+        return Page.of(items, page, size, total);
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+private void follow(Context ctx) {
+    User me = CurrentUser.require(ctx);
+    User target = services.users(ctx).findByUsername(ctx.pathParam("username"))
+        .orElseThrow(() -&gt; new NotFoundResponse("没有这个用户"));
+
+    if (me.getId().equals(target.getId())) {
+        Flash.warning(ctx, "你不能关注自己。");
+        ctx.redirect(Routes.user(target.getUsername()));
+        return;
+    }
+
+    var follows = services.follows(ctx);
+    if (follows.isFollowing(me, target)) {
+        Flash.info(ctx, "你已经关注了 " + target.getUsername() + "。");
+    } else {
+        follows.follow(me, target);
+        Flash.success(ctx, "已关注 " + target.getUsername() + "。");
+    }
+    ctx.redirect(Routes.user(target.getUsername()));
+}
+
+private void unfollow(Context ctx) {
+    User me = CurrentUser.require(ctx);
+    User target = services.users(ctx).findByUsername(ctx.pathParam("username"))
+        .orElseThrow(() -&gt; new NotFoundResponse("没有这个用户"));
+
+    services.follows(ctx).unfollow(me, target);
+    Flash.info(ctx, "已取消关注 " + target.getUsername() + "。");
+    ctx.redirect(Routes.user(target.getUsername()));
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 关注/取关必须用 POST</div>
+  <p>
+    原书用的是 <code>GET /follow/&lt;username&gt;</code>。这有两个问题：
+  </p>
+  <ol>
+    <li>违反 GET 必须安全的原则 —— 别人在聊天里贴一个
+        <code>你的站/follow/spammer</code>，谁点开谁就关注了那个人。</li>
+    <li>GET 没有 CSRF 保护，攻击者可以用 <code>&lt;img&gt;</code> 标签批量刷关注。</li>
+  </ol>
+  <p>
+    所以我们用带 CSRF 令牌的 POST 表单（第 9 章的路由声明里已经是 <code>post</code> 了）。
+  </p>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/user.jte（关注按钮部分）">
+<pre>
+@if(page.canFollow())
+  @if(page.isFollowing())
+    &lt;form method="post" action="${Routes.unfollow(page.username())}"&gt;
+      @template.tag.csrf(token = layout.csrfToken())
+      &lt;button class="btn btn-sm btn-outline-secondary" type="submit"&gt;取消关注&lt;/button&gt;
+    &lt;/form&gt;
+  @else
+    &lt;form method="post" action="${Routes.follow(page.username())}"&gt;
+      @template.tag.csrf(token = layout.csrfToken())
+      &lt;button class="btn btn-sm btn-primary" type="submit"&gt;关注&lt;/button&gt;
+    &lt;/form&gt;
+  @endif
+@endif
+
+&lt;a class="btn btn-sm btn-link" href="${Routes.followers(page.username())}"&gt;
+  粉丝 &lt;span class="badge text-bg-secondary"&gt;${page.followerCount()}&lt;/span&gt;
+&lt;/a&gt;
+&lt;a class="btn btn-sm btn-link" href="${Routes.following(page.username())}"&gt;
+  关注 &lt;span class="badge text-bg-secondary"&gt;${page.followingCount()}&lt;/span&gt;
+&lt;/a&gt;
+
+@if(page.followsYou())
+  &lt;span class="badge text-bg-light border align-self-center"&gt;关注了你&lt;/span&gt;
+@endif
+</pre>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 12a / 12b</b>（关系建模、资料页上的关注）。</div>
+</div>
+
+<h2 id="join">核心：查出“我关注的人的文章”</h2>
+
+<p>
+  这是本章真正的难点，也是原书花了最多篇幅解释的地方。
+  需求是：首页能切换成“只看我关注的人发的文章”，而且要能分页。
+</p>
+
+<h3>错误做法：N+1</h3>
+
+<div class="code" data-lang="java">
+<pre>
+// ✗ 千万别这么写
+List&lt;Post&gt; timeline = new ArrayList&lt;&gt;();
+for (Follow f : me.getFollowing()) {                // 1 条查询
+    timeline.addAll(postRepo.findByAuthor(f.getFollowed()));   // 每个人 1 条
+}
+timeline.sort(comparing(Post::getTimestamp).reversed());       // 在内存里排序
+</pre>
+</div>
+
+<p>原书把这个问题叫 <strong>N+1 问题</strong>：1 次查关注列表 + N 次查每个人的文章。它的致命缺陷不止是慢：</p>
+
+<ul>
+  <li>关注 500 个人就是 501 条 SQL；</li>
+  <li><strong>没法分页</strong>——你必须把所有人的所有文章全查出来才能排序，
+      然后取前 20 条。关注的人越多，查出来的数据越多，内存越爆；</li>
+  <li>排序和分页在应用内存里做，数据库的索引完全用不上。</li>
+</ul>
+
+<p>正确答案是：<strong>用一条带 JOIN 的查询，让数据库一次搞定过滤、排序和分页。</strong></p>
+
+<h3>JOIN 到底在干什么</h3>
+
+<p>
+  原书用一组小表格把 JOIN 讲得非常清楚，这里完整复现一遍。
+  假设数据是这样的：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 500" role="img" aria-label="JOIN 操作的分步演示">
+  <!-- users -->
+  <text class="ttl" x="20" y="18">users</text>
+  <rect class="bx-b" x="20" y="26" width="160" height="104" rx="7"/>
+  <rect class="bx-b" x="20" y="26" width="160" height="24" rx="7"/>
+  <text class="sm on-b" x="34" y="43">id</text><text class="sm on-b" x="90" y="43">username</text>
+  <text class="mono" x="34" y="68">1</text><text class="sm" x="90" y="68">john</text>
+  <text class="mono" x="34" y="90">2</text><text class="sm" x="90" y="90">susan</text>
+  <text class="mono" x="34" y="112">3</text><text class="sm" x="90" y="112">david</text>
+
+  <!-- posts -->
+  <text class="ttl" x="210" y="18">posts</text>
+  <rect class="bx-b" x="210" y="26" width="250" height="126" rx="7"/>
+  <rect class="bx-b" x="210" y="26" width="250" height="24" rx="7"/>
+  <text class="sm on-b" x="224" y="43">id</text>
+  <text class="sm on-b" x="264" y="43">author_id</text>
+  <text class="sm on-b" x="346" y="43">body</text>
+  <text class="mono" x="224" y="68">1</text><text class="mono" x="284" y="68">2</text><text class="sm" x="346" y="68">susan 的文章</text>
+  <text class="mono" x="224" y="90">2</text><text class="mono" x="284" y="90">1</text><text class="sm" x="346" y="90">john 的文章</text>
+  <text class="mono" x="224" y="112">3</text><text class="mono" x="284" y="112">3</text><text class="sm" x="346" y="112">david 的文章</text>
+  <text class="mono" x="224" y="134">4</text><text class="mono" x="284" y="134">1</text><text class="sm" x="346" y="134">john 的第二篇</text>
+
+  <!-- follows -->
+  <text class="ttl" x="490" y="18">follows</text>
+  <rect class="bx-b" x="490" y="26" width="250" height="104" rx="7"/>
+  <rect class="bx-b" x="490" y="26" width="250" height="24" rx="7"/>
+  <text class="sm on-b" x="504" y="43">follower_id</text>
+  <text class="sm on-b" x="610" y="43">followed_id</text>
+  <text class="mono" x="520" y="68">1</text><text class="mono" x="630" y="68">3</text><text class="sm" x="680" y="68">john→david</text>
+  <text class="mono on-a" x="520" y="90">2</text><text class="mono on-a" x="630" y="90">1</text><text class="sm on-a" x="680" y="90">susan→john</text>
+  <text class="mono on-a" x="520" y="112">2</text><text class="mono on-a" x="630" y="112">3</text><text class="sm on-a" x="680" y="112">susan→david</text>
+
+  <text class="sm on-a" x="490" y="148">目标：查出 susan（id=2）关注的人发的全部文章</text>
+
+  <path class="ln-a" d="M615 156 V186" marker-end="url(#ar-a)"/>
+
+  <!-- step 1 -->
+  <text class="ttl on-a" x="420" y="204">第一步：过滤 follows，只留 follower_id = 2 的行</text>
+  <rect class="bx-a" x="490" y="212" width="250" height="78" rx="7"/>
+  <rect class="bx-a" x="490" y="212" width="250" height="24" rx="7"/>
+  <text class="sm on-a" x="504" y="229">follower_id</text><text class="sm on-a" x="610" y="229">followed_id</text>
+  <text class="mono" x="520" y="254">2</text><text class="mono on-g" x="630" y="254">1</text>
+  <text class="mono" x="520" y="276">2</text><text class="mono on-g" x="630" y="276">3</text>
+  <text class="sm on-g" x="490" y="306">susan 关注了 id=1 和 id=3</text>
+
+  <!-- step 2 -->
+  <text class="ttl on-a" x="20" y="204">第二步：把 posts 和上面的结果做 JOIN</text>
+  <text class="sm" x="20" y="222">连接条件：posts.author_id = follows.followed_id</text>
+  <rect class="bx-g" x="20" y="232" width="430" height="126" rx="7"/>
+  <rect class="bx-g" x="20" y="232" width="430" height="24" rx="7"/>
+  <text class="sm on-g" x="34" y="249">post.id</text>
+  <text class="sm on-g" x="100" y="249">author_id *</text>
+  <text class="sm on-g" x="200" y="249">body</text>
+  <text class="sm on-g" x="340" y="249">followed_id *</text>
+
+  <text class="mono" x="40" y="276">2</text><text class="mono" x="124" y="276">1</text>
+  <text class="sm" x="200" y="276">john 的文章</text><text class="mono" x="370" y="276">1</text>
+  <text class="mono" x="40" y="300">4</text><text class="mono" x="124" y="300">1</text>
+  <text class="sm" x="200" y="300">john 的第二篇</text><text class="mono" x="370" y="300">1</text>
+  <text class="mono" x="40" y="324">3</text><text class="mono" x="124" y="324">3</text>
+  <text class="sm" x="200" y="324">david 的文章</text><text class="mono" x="370" y="324">3</text>
+
+  <text class="sm on-r" x="34" y="348">susan 自己的那篇（post.id=1）没出现 —— 因为她没关注自己</text>
+
+  <text class="sm" x="20" y="376">带 * 的两列是 JOIN 的连接列。结果正好是"susan 关注的人发的全部文章"。</text>
+
+  <path class="ln-g" d="M235 386 V410" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-a" x="60" y="412" width="640" height="78" rx="9"/>
+  <text class="ttl on-a" x="80" y="434">第三步：排序 + 分页，全部交给数据库</text>
+  <text class="mono" x="80" y="458">order by posts.timestamp desc　limit 20 offset 0</text>
+  <text class="sm on-g" x="80" y="480">关键：整个过程是<tspan class="on-g">一条 SQL</tspan>。不管 susan 关注了 5 个人还是 5000 个人，都是一条。</text>
+</svg>
+<figcaption>图 12-3　JOIN 的分步演示（数据取自原书）</figcaption>
+</figure>
+
+<h3>写成 JPQL</h3>
+
+<div class="code" data-lang="java" data-file="db/PostRepository.java（新增）">
+<pre>
+/**
+ * 查出某用户关注的人发的全部文章（他的"时间线"）。
+ *
+ * 对应的 SQL 大致是：
+ *   select p.* from posts p
+ *     join follows f on f.followed_id = p.author_id
+ *    where f.follower_id = ?
+ *    order by p.timestamp desc
+ *    limit ? offset ?
+ */
+public Page&lt;Post&gt; findTimeline(User user, int page, int size) {
+    long total = em.createQuery("""
+            select count(p)
+              from Post p
+              join Follow f on f.followed = p.author
+             where f.follower = :me
+            """, Long.class)
+        .setParameter("me", user)
+        .getSingleResult();
+
+    var items = em.createQuery("""
+            select p
+              from Post p
+              join fetch p.author
+              join Follow f on f.followed = p.author
+             where f.follower = :me
+             order by p.timestamp desc
+            """, Post.class)
+        .setParameter("me", user)
+        .setFirstResult((page - 1) * size)
+        .setMaxResults(size)
+        .getResultList();
+
+    return Page.of(items, page, size, total);
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 注意这里有两种 join，别混了</div>
+  <div class="tw">
+  <table>
+  <tr><th>写法</th><th>作用</th><th>影响结果集吗</th></tr>
+  <tr><td><code>join fetch p.author</code></td><td>顺便把作者一起查出来，避免后面访问 <code>post.getAuthor()</code> 时 N+1</td><td>不影响（只是多取了列）</td></tr>
+  <tr><td><code>join Follow f on f.followed = p.author</code></td><td><strong>用来过滤</strong>：只保留那些作者被我关注了的文章</td><td><strong>影响</strong>（这是筛选条件）</td></tr>
+  </table>
+  </div>
+  <p>
+    JPQL 支持 <code>join … on …</code> 这种"显式连接任意实体"的写法
+    （Jakarta Persistence 2.1 开始），正好对应原书那条
+    <code>Post.query.join(Follow, Follow.followed_id == Post.author_id)</code>。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; JOIN 可能产生重复行</div>
+  <p>
+    如果一个作者在 <code>follows</code> 里对应多行（我们的复合主键保证了不会），
+    JOIN 之后同一篇文章会出现多次。
+    遇到这种情况要加 <code>select distinct p</code>。
+  </p>
+  <p>
+    但 <code>distinct</code> 和 <code>join fetch</code> 一起用时要小心：
+    Hibernate 6+ 默认会在 Java 层面去重，不会把 <code>distinct</code> 发给数据库（这正是我们想要的）。
+    老版本需要 <code>.setHint("hibernate.query.passDistinctThrough", false)</code>。
+  </p>
+</div>
+
+<h2 id="selffollow">一个巧妙的技巧：让每个人关注自己</h2>
+
+<p>
+  上面的查询有个问题：<strong>我自己的文章不在我的时间线里</strong>。
+  这不符合直觉 —— 刷社交网站首页时你肯定希望看到自己刚发的内容。
+</p>
+
+<p>
+  怎么解决？最直接的想法是改查询：<code>where f.follower = :me or p.author = :me</code>。
+  但原书用了一个更漂亮的办法：<strong>注册时让每个用户自动关注自己。</strong>
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="自己关注自己的技巧">
+  <text class="ttl on-r" x="20" y="20">方案 A：改查询加 OR</text>
+  <rect class="bx-r" x="20" y="30" width="340" height="110" rx="9"/>
+  <text class="mono" x="40" y="54">where f.follower = :me</text>
+  <text class="mono" x="40" y="72">   or p.author   = :me</text>
+  <text class="sm on-r" x="40" y="96">· 查询变复杂，OR 常常让索引失效</text>
+  <text class="sm on-r" x="40" y="114">· 粉丝数、关注数的统计也要跟着加判断</text>
+  <text class="sm on-r" x="40" y="132">· 每个相关查询都要记得写这个 OR</text>
+
+  <text class="ttl on-g" x="400" y="20">方案 B：注册时自己关注自己</text>
+  <rect class="bx-g" x="400" y="30" width="340" height="110" rx="9"/>
+  <text class="mono" x="420" y="54">follows.follow(user, user);</text>
+  <text class="sm on-g" x="420" y="78">· 查询一个字都不用改</text>
+  <text class="sm on-g" x="420" y="96">· 任何"和关注有关"的逻辑自动包含自己</text>
+  <text class="sm on-r" x="420" y="118">· 代价：粉丝数/关注数要减 1</text>
+  <text class="sm on-r" x="420" y="134">· 代价：要给已有用户补一次数据</text>
+
+  <rect class="bx-d" x="100" y="166" width="560" height="56" rx="9"/>
+  <text class="lbl" x="120" y="188">这是一个典型的<tspan class="on-a">用数据换代码简洁</tspan>的设计。</text>
+  <text class="sm" x="120" y="210">值不值得取决于项目：如果"关注"还有别的语义（比如推送通知），自己关注自己就会带来麻烦。</text>
+</svg>
+<figcaption>图 12-4　两种让自己的文章进时间线的方案</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java（注册时）">
+<pre>
+users.save(user);
+Db.em(ctx).flush();
+services.follows(ctx).follow(user, user);    // &#8592; 自己关注自己
+</pre>
+</div>
+
+<p>已有用户需要补数据。写成一个幂等的任务，放进 <code>Cli deploy</code>：</p>
+
+<div class="code" data-lang="java" data-file="service/SeedService.java（新增）">
+<pre>
+/**
+ * 确保每个用户都关注了自己。幂等，可以反复执行。
+ * 相当于原书的 User.add_self_follows()。
+ */
+public static void addSelfFollows() {
+    var follows = new FollowRepository(em);
+    var users = em.createQuery("select u from User u", User.class).getResultList();
+
+    int added = 0;
+    for (User user : users) {
+        if (!follows.isFollowing(user, user)) {
+            follows.follow(user, user);
+            added++;
+        }
+    }
+    System.out.printf("为 %d 个用户补上了自关注%n", added);
+}
+</pre>
+</div>
+
+<p>然后把计数减 1，别让用户看到奇怪的数字：</p>
+
+<div class="code" data-lang="java" data-file="db/FollowRepository.java（修正计数）">
+<pre>
+/** 对外展示的关注数：减掉"自己关注自己"那一条 */
+public long countFollowingVisible(User user) {
+    return Math.max(0, countFollowing(user) - 1);
+}
+
+public long countFollowersVisible(User user) {
+    return Math.max(0, countFollowers(user) - 1);
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 别忘了把自己从列表里过滤掉</div>
+  <p>
+    粉丝列表和关注列表也会出现自己。原书没处理这一点（列表里会看到自己），
+    我们在查询里加个条件：
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+where f.followed = :u and f.follower &lt;&gt; :u
+</pre>
+  </div>
+  <p>这也顺便说明了方案 B 的代价：<strong>每一处用到关注数据的地方都要记得排除自己。</strong></p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 12c / 12d</b>（JOIN 查询、自关注）。</div>
+</div>
+
+<h2 id="tabs">首页的“全部 / 关注”切换</h2>
+
+<p>
+  原书用一个 Cookie 记住用户的选择（而不是会话）——
+  这样即使会话过期，偏好还在。我们照做：
+</p>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+private static final String COOKIE_SHOW_FOLLOWED = "show_followed";
+
+private void index(Context ctx) {
+    int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class)
+                                 .allowNullable().get());
+    User me = CurrentUser.get(ctx);
+
+    // 只有登录用户才可能选"只看关注"
+    boolean showFollowed = me != null
+        &amp;&amp; "1".equals(ctx.cookie(COOKIE_SHOW_FOLLOWED));
+
+    var repo = services.postRepo(ctx);
+    Page&lt;Post&gt; posts = showFollowed
+        ? repo.findTimeline(me, page, cfg.postsPerPage())
+        : repo.findAll(page, cfg.postsPerPage());
+
+    View.render(ctx, "index.jte", "首页",
+                "form", FormView.empty(),
+                "posts", PostListPage.of(posts, me),
+                "showFollowed", showFollowed);
+}
+
+/** 切换到"全部" */
+private void showAll(Context ctx) {
+    CurrentUser.require(ctx);
+    ctx.cookie(COOKIE_SHOW_FOLLOWED, "", 0);     // maxAge=0 就是删除
+    ctx.redirect(Routes.INDEX);
+}
+
+/** 切换到"只看关注" */
+private void showFollowed(Context ctx) {
+    CurrentUser.require(ctx);
+    ctx.cookie(COOKIE_SHOW_FOLLOWED, "1", 30 * 24 * 60 * 60);   // 30 天
+    ctx.redirect(Routes.INDEX);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/index.jte（标签页部分）">
+<pre>
+@if(layout.isAuthenticated())
+  &lt;ul class="nav nav-tabs mb-3"&gt;
+    &lt;li class="nav-item"&gt;
+      &lt;form method="post" action="/show-all"&gt;
+        @template.tag.csrf(token = layout.csrfToken())
+        &lt;button class="nav-link border-0 bg-transparent ${showFollowed ? "" : "active"}"
+                type="submit"&gt;全部文章&lt;/button&gt;
+      &lt;/form&gt;
+    &lt;/li&gt;
+    &lt;li class="nav-item"&gt;
+      &lt;form method="post" action="/show-followed"&gt;
+        @template.tag.csrf(token = layout.csrfToken())
+        &lt;button class="nav-link border-0 bg-transparent ${showFollowed ? "active" : ""}"
+                type="submit"&gt;我关注的&lt;/button&gt;
+      &lt;/form&gt;
+    &lt;/li&gt;
+  &lt;/ul&gt;
+@endif
+
+@template.tag.posts(layout = layout, posts = posts)
+@template.tag.pagination(page = posts.page(), baseUrl = "/")
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么是 Cookie 而不是会话或数据库</div>
+  <div class="tw">
+  <table>
+  <tr><th>存法</th><th>生存期</th><th>适合</th></tr>
+  <tr><td>Cookie</td><td>自己设（我们设了 30 天）</td><td>纯界面偏好，丢了也没事</td></tr>
+  <tr><td>会话</td><td>登出就没了</td><td>临时状态（比如多步表单的中间数据）</td></tr>
+  <tr><td>数据库</td><td>永久，跨设备</td><td>真正的用户设置（语言、通知偏好）</td></tr>
+  </table>
+  </div>
+  <p>
+    “首页默认看哪个标签”属于第一类。注意 Cookie 里存的是
+    <strong>非敏感的界面偏好</strong>，所以不需要签名 ——
+    用户自己改成 <code>show_followed=1</code> 也没有任何危害。
+  </p>
+</div>
+
+<h2 id="followlists">粉丝 / 关注列表页</h2>
+
+<div class="code" data-lang="java" data-file="web/page/FollowListPage.java">
+<pre>
+package com.example.javalinky.web.page;
+
+import com.example.javalinky.db.Page;
+import com.example.javalinky.model.Follow;
+import java.time.Instant;
+import java.util.List;
+
+public record FollowListPage(
+    String title,              // "xxx 的粉丝" / "xxx 关注的人"
+    String ownerUsername,
+    String baseUrl,
+    Page&lt;Item&gt; page
+) {
+    public record Item(String username, String name, String avatarHash, Instant since) {}
+
+    /** showFollower=true 表示列"关注者"，false 表示列"被关注者" */
+    public static FollowListPage of(String title, String ownerUsername, String baseUrl,
+                                    Page&lt;Follow&gt; source, boolean showFollower) {
+        List&lt;Item&gt; items = source.items().stream()
+            .map(f -&gt; showFollower ? f.getFollower() : f.getFollowed())
+            .map(u -&gt; new Item(u.getUsername(),
+                               u.getName() == null ? "" : u.getName(),
+                               u.avatarHash(),
+                               null))
+            .toList();
+        return new FollowListPage(title, ownerUsername, baseUrl,
+            Page.of(items, source.page(), source.size(), source.total()));
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/routes/MainRoutes.java">
+<pre>
+private void followers(Context ctx) {
+    User user = loadUserByUsername(ctx);
+    int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class)
+                                 .allowNullable().get());
+
+    var source = services.follows(ctx)
+        .followersOf(user, page, cfg.followersPerPage());
+
+    View.render(ctx, "follow_list.jte", user.getUsername() + " 的粉丝",
+        "page", FollowListPage.of(
+            user.getUsername() + " 的粉丝",
+            user.getUsername(),
+            Routes.followers(user.getUsername()),
+            source, true));
+}
+
+private void following(Context ctx) {
+    User user = loadUserByUsername(ctx);
+    int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class)
+                                 .allowNullable().get());
+
+    var source = services.follows(ctx)
+        .followingOf(user, page, cfg.followersPerPage());
+
+    View.render(ctx, "follow_list.jte", user.getUsername() + " 关注的人",
+        "page", FollowListPage.of(
+            user.getUsername() + " 关注的人",
+            user.getUsername(),
+            Routes.following(user.getUsername()),
+            source, false));
+}
+</pre>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 12e</b>（首页显示关注的文章）。</div>
+</div>
+
+<h2 id="scale">关于“时间线”的现实</h2>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：这套做法能支撑多大规模</div>
+  <p>
+    我们的时间线是<strong>读时聚合</strong>（read fanout）：每次打开首页，
+    现场 JOIN 算出结果。它的特点是：
+  </p>
+  <ul>
+    <li><strong>写很便宜</strong>：发文章就是一条 INSERT；</li>
+    <li><strong>读比较贵</strong>：每次都要 JOIN + 排序。</li>
+  </ul>
+  <p>
+    对中小型站点（几万用户、人均关注几百）这完全够用 ——
+    配上 <code>ix_posts_author_timestamp</code> 索引，这条查询是毫秒级的。
+  </p>
+  <p>
+    但如果某个用户被<strong>一千万人关注</strong>（明星账号），情况就不同了。
+    大型社交网络改用<strong>写时扩散</strong>（write fanout）：
+    发一条内容时，立刻把它推进所有粉丝的"收件箱"（一张预先算好的表或 Redis 列表）。
+    读首页变成一次简单的范围查询，但发一条内容可能要写一千万次。
+  </p>
+  <p>
+    真实系统往往是混合的：普通用户写时扩散，大 V 读时聚合。
+    这个话题超出本教程范围，但你应该知道
+    <strong>“时间线”是整个社交产品里最难做的技术点</strong>，
+    而我们这条 JOIN 是它最朴素也最正确的起点。
+  </p>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>造一批假数据，然后在 JShell 里手动建几条关注关系。
+        用 <code>show_sql</code> 打开 SQL 日志，访问"我关注的"标签页，
+        确认<strong>只发了两条 SQL</strong>（一条 count，一条取数据）。</li>
+    <li>按上面"错误做法"那段代码写一个 N+1 版本的时间线，
+        对比两者在关注 50 个人时的 SQL 条数和耗时。</li>
+    <li>试着重复关注同一个人（直接调两次 <code>follows.follow(a, b)</code> 并提交），
+        确认数据库的主键约束把它挡住了。
+        然后把 <code>follow()</code> 里的 <code>isFollowing</code> 判断去掉，看看异常长什么样。</li>
+    <li>把 <code>addSelfFollows()</code> 连着跑两次，确认第二次输出"为 0 个用户补上了自关注"——
+        这验证了幂等。</li>
+    <li>检查粉丝列表里<strong>有没有</strong>出现自己。如果有，按正文里的提示加上
+        <code>f.follower &lt;&gt; :u</code> 的过滤。</li>
+    <li>关掉"自己关注自己"的设计，改成在查询里加 <code>or p.author = :me</code>。
+        然后用 <code>EXPLAIN</code>（第 16 章会讲怎么用）对比两条查询的执行计划，
+        看看 OR 是不是真的影响了索引使用。</li>
+    <li>（进阶）给 <code>Follow</code> 加一个 <code>boolean muted</code> 字段（“关注但不看他的动态”），
+        写好迁移，并在时间线查询里加上 <code>and f.muted = false</code>。
+        体会一下"关联实体"相比"纯多对多"的扩展性优势。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

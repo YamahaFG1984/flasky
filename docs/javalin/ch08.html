@@ -1,0 +1,1330 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 8 章 · 用户认证 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="8">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 8 章 · 第二部分开始</span>
+<h1>用户认证</h1>
+<p class="lede">
+  第二部分开始真正建设 Javalinky。第一件事是用户系统：注册、登录、登出、邮件确认、找回密码。
+  这一章的内容安全性最强，每一个决定背后都有真实的攻击场景 ——
+  所以我们不只讲怎么做，还讲为什么必须这么做。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解为什么密码必须用“慢哈希 + 盐”存储，会用 bcrypt</li>
+    <li>实现基于会话的登录和登出</li>
+    <li>用 <code>before</code> 过滤器把“当前用户”加载到每个请求里</li>
+    <li>认识并避免开放重定向漏洞</li>
+    <li>用签名令牌（JWT）实现邮件确认、密码重置、换邮箱</li>
+    <li>拦住未确认账号的访问</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="options">先看看有哪些选择</h2>
+
+<p>
+  原书一开始列了几个 Flask 认证扩展（Flask-Login、Werkzeug、itsdangerous），
+  然后选择“用这些零件自己拼一套”。Java 这边的选项：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>方案</th><th>特点</th><th>适合</th></tr>
+<tr><td><strong>Spring Security</strong></td><td>功能最全（OAuth2、LDAP、SAML、RBAC），但必须接受 Spring 全家桶，学习曲线陡</td><td>企业项目</td></tr>
+<tr><td><strong>Pac4j</strong></td><td>框架中立的认证库，有 <code>javalin-pac4j</code> 适配，支持几十种认证方式</td><td>需要接第三方登录</td></tr>
+<tr><td><strong>Keycloak / Auth0</strong></td><td>把认证整个外包给一个身份服务</td><td>多个应用共享用户体系</td></tr>
+<tr><td><strong>自己拼</strong>（本教程）</td><td>bcrypt + 会话 + JWT，大约 200 行代码</td><td>学习；以及中小型自有用户体系</td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; “自己写认证”不是在教你造轮子</div>
+  <p>
+    网上常见的建议是“认证千万别自己写”。这个建议针对的是<strong>密码哈希算法</strong>和
+    <strong>加密协议</strong>——那些确实必须用成熟实现（我们也在用：bcrypt 和 java-jwt 都是现成库）。
+  </p>
+  <p>
+    而“把哈希、会话、令牌这几个成熟零件组装成登录流程”是每个后端开发都该亲手做一遍的事。
+    做完你才能判断 Spring Security 的某个配置到底在保护什么。
+  </p>
+</div>
+
+<h2 id="password">密码安全</h2>
+
+<p>
+  这是整章最重要的一节。假设你的数据库被导出了（这比你想象的常见：
+  SQL 注入、备份文件放错位置、员工离职带走数据），用户的密码会怎样？
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 350" role="img" aria-label="三种密码存储方式在数据库泄露后的后果">
+  <text class="ttl on-r" x="20" y="20">&#10007; 方式一：明文</text>
+  <rect class="bx-r" x="20" y="30" width="720" height="62" rx="9"/>
+  <text class="mono" x="40" y="52">password = "hunter2"</text>
+  <text class="lbl on-r" x="300" y="52">泄露后果：全部账号立刻失守。</text>
+  <text class="sm" x="40" y="74">更糟的是：很多人在多个网站用同一个密码，所以你泄露的是用户的<tspan class="on-r">邮箱 + 银行 + 社交账号</tspan>。</text>
+
+  <text class="ttl on-r" x="20" y="124">&#10007; 方式二：MD5 / SHA-256（快哈希，无盐）</text>
+  <rect class="bx-r" x="20" y="134" width="720" height="82" rx="9"/>
+  <text class="mono" x="40" y="156">hash = sha256("hunter2") = "f52fbd32b2b3b86ff88ef6c490628285…"</text>
+  <text class="lbl on-r" x="40" y="178">泄露后果：几乎和明文一样。两个原因：</text>
+  <text class="sm" x="56" y="196">① <tspan class="on-r">没有盐</tspan> → 相同密码得到相同哈希，直接查彩虹表（预先算好的几十亿条对照表）</text>
+  <text class="sm" x="56" y="212">② <tspan class="on-r">算得太快</tspan> → 一块消费级显卡每秒能算上百亿次 SHA-256，8 位密码几小时暴力破完</text>
+
+  <text class="ttl on-g" x="20" y="248">&#10003; 方式三：bcrypt（慢哈希 + 每个密码独立随机盐）</text>
+  <rect class="bx-g" x="20" y="258" width="720" height="82" rx="9"/>
+  <text class="mono" x="40" y="280">hash = "$2a$12$N9qo8uLOickgx2ZMRZoMye.IjdQmpk/lQ9Lq1lP5ZkTkJ8Uy1ZQMi"</text>
+  <text class="sm" x="40" y="300">　　　　 └┬┘└┬┘└──────┬──────┘└──────────────┬───────────────┘</text>
+  <text class="sm" x="40" y="316">　　　　 算法 <tspan class="on-a">代价因子</tspan>　　随机盐（22 字符）　　　　　哈希值（31 字符）</text>
+  <text class="sm on-g" x="40" y="334">代价因子 12 表示内部循环 2¹² 次 → 算一次约 0.25 秒 → 同样的显卡每秒只能试几千次。盐让彩虹表彻底失效。</text>
+</svg>
+<figcaption>图 8-1　三种密码存储方式与泄露后果</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 三条必须记住的规则</div>
+  <ol>
+    <li><strong>永远不存明文，也永远不"加密"密码。</strong>
+        加密是可逆的 —— 能解密就意味着你（或拿到密钥的人）能看到原始密码。要用<strong>单向哈希</strong>。</li>
+    <li><strong>必须用专门为密码设计的慢哈希算法。</strong>
+        bcrypt、scrypt、Argon2 都行。MD5、SHA-1、SHA-256、SHA-512 <strong>都不行</strong>——
+        它们是为"快"设计的。</li>
+    <li><strong>盐必须每个密码独立随机。</strong>
+        好消息：bcrypt 自动生成盐并存进结果字符串，你不用操心。</li>
+  </ol>
+</div>
+
+<h3>加 bcrypt 依赖</h3>
+
+<div class="code" data-lang="xml" data-file="pom.xml（新增）">
+<pre>
+&lt;!-- 纯 Java 实现的 bcrypt，没有本地库依赖 --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;at.favre.lib&lt;/groupId&gt;
+  &lt;artifactId&gt;bcrypt&lt;/artifactId&gt;
+  &lt;version&gt;0.10.2&lt;/version&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/util/Passwords.java">
+<pre>
+package com.example.javalinky.util;
+
+import at.favre.lib.crypto.bcrypt.BCrypt;
+
+public final class Passwords {
+
+    /**
+     * 代价因子。每加 1，计算时间翻倍。
+     * 12 在 2026 年的服务器上约 0.2–0.3 秒，是个合理的平衡点：
+     * 用户登录时感觉不到，攻击者暴力破解的成本高得离谱。
+     */
+    private static final int COST = 12;
+
+    /** bcrypt 只处理前 72 字节，超长的部分会被静默忽略 */
+    private static final int MAX_BYTES = 72;
+
+    public static String hash(String plaintext) {
+        checkLength(plaintext);
+        return BCrypt.withDefaults().hashToString(COST, plaintext.toCharArray());
+    }
+
+    public static boolean verify(String plaintext, String hash) {
+        if (plaintext == null || hash == null || hash.isBlank()) return false;
+        try {
+            return BCrypt.verifyer().verify(plaintext.toCharArray(), hash).verified;
+        } catch (IllegalArgumentException e) {
+            return false;   // 哈希格式不对（比如数据库里是脏数据）
+        }
+    }
+
+    private static void checkLength(String plaintext) {
+        if (plaintext.getBytes(java.nio.charset.StandardCharsets.UTF_8).length &gt; MAX_BYTES) {
+            throw new IllegalArgumentException("密码过长（bcrypt 上限为 72 字节）");
+        }
+    }
+
+    private Passwords() {}
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; bcrypt 的 72 字节上限是真实的坑</div>
+  <p>
+    bcrypt 只看密码的前 72 字节，后面的直接丢掉。
+    这意味着一个 100 字符的密码和它的前 72 字节<strong>会被当成同一个密码</strong>。
+    如果你允许超长密码（比如来自密码管理器的随机串），必须显式处理 ——
+    上面的代码选择报错，另一种常见做法是先 SHA-256 再交给 bcrypt。
+  </p>
+  <p>
+    想完全避开这个问题，可以改用 <strong>Argon2id</strong>
+    （<code>de.mkammerer:argon2-jvm</code>），它是现在的首选推荐。
+    本教程用 bcrypt 是因为它纯 Java、无原生依赖、部署最省心。
+  </p>
+</div>
+
+<h3>User 实体加上密码</h3>
+
+<div class="code" data-lang="java" data-file="model/User.java（新增方法）">
+<pre>
+/** 设置密码。注意：参数是明文，但存进字段的是哈希 */
+public void setPassword(String plaintext) {
+    this.passwordHash = Passwords.hash(plaintext);
+}
+
+/** 校验密码 */
+public boolean checkPassword(String plaintext) {
+    return Passwords.verify(plaintext, this.passwordHash);
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 原书的一个巧妙设计，Java 里怎么表达</div>
+  <p>
+    原书给 <code>User</code> 定义了一个 <code>password</code> 属性：
+    写它会自动哈希，<strong>读它会抛 <code>AttributeError</code></strong>——
+    用语言机制保证"没人能把密码读回来"。
+  </p>
+  <p>
+    Java 的等价做法更简单：<strong>只提供 <code>setPassword()</code>，不提供 getter。</strong>
+    <code>passwordHash</code> 字段是 private 的，外界根本没有读明文的途径。
+  </p>
+  <p>
+    另外注意：<code>User.toString()</code> 里<strong>绝对不要</strong>包含 <code>passwordHash</code>——
+    否则某天一条调试日志就把全站哈希打进日志文件了。
+  </p>
+</div>
+
+<h2 id="session-login">会话登录</h2>
+
+<p>
+  原书用 Flask-Login 管理登录状态，并专门有一节“理解 Flask-Login 是怎么工作的”。
+  我们直接实现，所以这一节就是那一节的内容：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 400" role="img" aria-label="基于会话的登录完整流程">
+  <!-- step 1 -->
+  <text class="ttl on-a" x="20" y="20">① 登录请求</text>
+  <rect class="bx-d" x="20" y="30" width="720" height="104" rx="10"/>
+
+  <rect class="bx-b" x="38" y="46" width="130" height="38" rx="6"/>
+  <text class="sm on-b" x="103" y="62" text-anchor="middle">POST /auth/login</text>
+  <text class="sm" x="103" y="77" text-anchor="middle">email + password</text>
+
+  <path class="ln-a" d="M170 65 H196" marker-end="url(#ar-a)"/>
+  <rect class="bx" x="200" y="46" width="150" height="38" rx="6"/>
+  <text class="sm" x="275" y="62" text-anchor="middle">按邮箱查用户</text>
+  <text class="sm" x="275" y="77" text-anchor="middle">查不到 → 失败</text>
+
+  <path class="ln-a" d="M352 65 H378" marker-end="url(#ar-a)"/>
+  <rect class="bx" x="382" y="46" width="180" height="38" rx="6"/>
+  <text class="sm" x="472" y="62" text-anchor="middle">bcrypt 校验密码</text>
+  <text class="sm" x="472" y="77" text-anchor="middle">不匹配 → 失败</text>
+
+  <path class="ln-g" d="M564 65 H590" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="594" y="46" width="130" height="38" rx="6"/>
+  <text class="sm on-g" x="659" y="62" text-anchor="middle">写入会话</text>
+  <text class="mono" x="659" y="77" text-anchor="middle">userId = 7</text>
+
+  <rect class="bx-r" x="200" y="94" width="362" height="30" rx="6"/>
+  <text class="sm on-r" x="381" y="113" text-anchor="middle">失败时只说"邮箱或密码错误"——不要说"这个邮箱不存在"（会泄露用户是否注册过）</text>
+
+  <!-- step 2 -->
+  <text class="ttl on-a" x="20" y="162">② 服务器响应里带上会话 Cookie</text>
+  <rect class="bx-d" x="20" y="172" width="720" height="60" rx="10"/>
+  <text class="mono" x="40" y="196">Set-Cookie: JAVALINKY_SESSION=a1b2c3…; HttpOnly; SameSite=Lax; Path=/</text>
+  <text class="sm" x="40" y="218">Cookie 里只有一个随机 ID；真正的 userId 存在服务器内存里（第 4 章的图 4-3）</text>
+
+  <!-- step 3 -->
+  <text class="ttl on-a" x="20" y="260">③ 之后每个请求</text>
+  <rect class="bx-d" x="20" y="270" width="720" height="118" rx="10"/>
+
+  <rect class="bx-b" x="38" y="286" width="150" height="38" rx="6"/>
+  <text class="sm on-b" x="113" y="302" text-anchor="middle">浏览器自动带 Cookie</text>
+  <text class="sm" x="113" y="317" text-anchor="middle">GET /edit-profile</text>
+
+  <path class="ln-a" d="M190 305 H216" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="220" y="280" width="220" height="50" rx="6"/>
+  <text class="lbl on-a" x="330" y="298" text-anchor="middle">before 过滤器</text>
+  <text class="sm" x="330" y="314" text-anchor="middle">读 session.userId → 查数据库</text>
+  <text class="sm" x="330" y="326" text-anchor="middle">放进 ctx.attribute("currentUser")</text>
+
+  <path class="ln-a" d="M442 305 H468" marker-end="url(#ar-a)"/>
+  <rect class="bx" x="472" y="286" width="252" height="38" rx="6"/>
+  <text class="sm" x="598" y="302" text-anchor="middle">处理器和模板用 CurrentUser.get(ctx)</text>
+  <text class="sm" x="598" y="317" text-anchor="middle">拿到 User 对象（或 null = 未登录）</text>
+
+  <rect class="bx-g" x="220" y="340" width="504" height="36" rx="6"/>
+  <text class="sm on-g" x="472" y="363" text-anchor="middle">这个 before 过滤器就是 Flask-Login 的 user_loader 回调；ctx.attribute 就是 Flask 的 current_user</text>
+</svg>
+<figcaption>图 8-2　基于会话的登录：三个阶段</figcaption>
+</figure>
+
+<h3>CurrentUser：相当于 Flask 的 <code>current_user</code></h3>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/CurrentUser.java">
+<pre>
+package com.example.javalinky.web;
+
+import com.example.javalinky.db.Db;
+import com.example.javalinky.db.UserRepository;
+import com.example.javalinky.model.User;
+import io.javalin.config.JavalinConfig;
+import io.javalin.http.Context;
+import io.javalin.http.UnauthorizedResponse;
+
+public final class CurrentUser {
+
+    private static final String SESSION_KEY = "userId";
+    private static final String CTX_KEY = "currentUser";
+
+    /** 装一个 before 过滤器，把当前用户加载进每个请求 */
+    public static void install(JavalinConfig config) {
+        config.routes.before(ctx -&gt; {
+            Long userId = ctx.sessionAttribute(SESSION_KEY);
+            if (userId == null) return;                 // 未登录，留 null
+
+            User user = new UserRepository(Db.em(ctx)).findById(userId).orElse(null);
+            if (user == null) {
+                // 用户被删了，但会话还在 → 清掉会话
+                logout(ctx);
+                return;
+            }
+            ctx.attribute(CTX_KEY, user);
+            user.setLastSeen(java.time.Instant.now());  // 第 10 章：记录最后活跃时间
+        });
+    }
+
+    /** 当前用户，未登录返回 null */
+    public static User get(Context ctx) {
+        return ctx.attribute(CTX_KEY);
+    }
+
+    public static boolean isAuthenticated(Context ctx) {
+        return get(ctx) != null;
+    }
+
+    /** 必须登录，否则抛 401（第 9 章会把它换成更好的机制） */
+    public static User require(Context ctx) {
+        User user = get(ctx);
+        if (user == null) throw new UnauthorizedResponse("请先登录");
+        return user;
+    }
+
+    public static void login(Context ctx, User user) {
+        // 关键一步：换一个新的会话 ID，防止"会话固定攻击"
+        ctx.req().changeSessionId();
+        ctx.sessionAttribute(SESSION_KEY, user.getId());
+        ctx.attribute(CTX_KEY, user);
+    }
+
+    public static void logout(Context ctx) {
+        ctx.sessionAttribute(SESSION_KEY, null);
+        ctx.attribute(CTX_KEY, null);
+        ctx.req().getSession().invalidate();   // 整个会话作废，连 Flash 也清掉
+    }
+
+    private CurrentUser() {}
+}
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：<code>changeSessionId()</code> 防的是什么</div>
+  <p>
+    <strong>会话固定攻击（session fixation）</strong>：攻击者先访问你的网站拿到一个会话 ID，
+    然后用某种方式（钓鱼链接、XSS）让受害者的浏览器也用这个 ID，
+    等受害者登录之后，攻击者手里的那个 ID 就变成了已登录会话。
+  </p>
+  <p>
+    防御就一行：<strong>登录成功时换一个新的会话 ID</strong>，
+    让攻击者手里的旧 ID 作废。
+    这也是 Spring Security 默认行为之一 —— 现在你知道它在干什么了。
+  </p>
+</div>
+
+<h3>让模板也能拿到当前用户</h3>
+
+<p>
+  导航栏要显示“登录 / 我的账户”，所以每个页面的 <code>Layout</code> 都需要当前用户：
+</p>
+
+<div class="code" data-lang="java" data-file="web/Layout.java（最终版）">
+<pre>
+package com.example.javalinky.web;
+
+import com.example.javalinky.model.User;
+import java.util.List;
+
+public record Layout(
+    String title,
+    String csrfToken,
+    List&lt;Flash&gt; flashes,
+    User currentUser          // 未登录时是 null
+) {
+    public boolean isAuthenticated() {
+        return currentUser != null;
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/View.java（更新）">
+<pre>
+public static void render(Context ctx, String template, String title, Object... pairs) {
+    Map&lt;String, Object&gt; model = new HashMap&lt;&gt;();
+    model.put("layout", new Layout(
+        title,
+        ctx.attribute("csrfToken"),
+        Flash.consume(ctx),
+        CurrentUser.get(ctx)
+    ));
+    for (int i = 0; i &lt; pairs.length; i += 2) {
+        model.put((String) pairs[i], pairs[i + 1]);
+    }
+    ctx.render(template, model);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/layout/base.jte（导航栏部分）">
+<pre>
+&lt;ul class="navbar-nav me-auto"&gt;
+  &lt;li class="nav-item"&gt;&lt;a class="nav-link" href="${Routes.INDEX}"&gt;首页&lt;/a&gt;&lt;/li&gt;
+  @if(layout.isAuthenticated())
+    &lt;li class="nav-item"&gt;
+      &lt;a class="nav-link" href="${Routes.user(layout.currentUser().getUsername())}"&gt;我的主页&lt;/a&gt;
+    &lt;/li&gt;
+  @endif
+&lt;/ul&gt;
+
+&lt;ul class="navbar-nav"&gt;
+  @if(layout.isAuthenticated())
+    &lt;li class="nav-item dropdown"&gt;
+      &lt;a class="nav-link dropdown-toggle" href="#" data-bs-toggle="dropdown"&gt;
+        ${layout.currentUser().getUsername()}
+      &lt;/a&gt;
+      &lt;ul class="dropdown-menu dropdown-menu-end"&gt;
+        &lt;li&gt;&lt;a class="dropdown-item" href="${Routes.CHANGE_PASSWORD}"&gt;修改密码&lt;/a&gt;&lt;/li&gt;
+        &lt;li&gt;&lt;a class="dropdown-item" href="${Routes.CHANGE_EMAIL}"&gt;修改邮箱&lt;/a&gt;&lt;/li&gt;
+        &lt;li&gt;&lt;hr class="dropdown-divider"&gt;&lt;/li&gt;
+        &lt;li&gt;
+          &lt;%-- 登出用 POST，不用 GET —— 见下面的说明 --%&gt;
+          &lt;form method="post" action="${Routes.LOGOUT}" class="px-3 py-1"&gt;
+            @template.tag.csrf(token = layout.csrfToken())
+            &lt;button class="btn btn-sm btn-outline-secondary w-100" type="submit"&gt;登出&lt;/button&gt;
+          &lt;/form&gt;
+        &lt;/li&gt;
+      &lt;/ul&gt;
+    &lt;/li&gt;
+  @else
+    &lt;li class="nav-item"&gt;&lt;a class="nav-link" href="${Routes.LOGIN}"&gt;登录&lt;/a&gt;&lt;/li&gt;
+    &lt;li class="nav-item"&gt;&lt;a class="nav-link" href="${Routes.REGISTER}"&gt;注册&lt;/a&gt;&lt;/li&gt;
+  @endif
+&lt;/ul&gt;
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 登出为什么要用 POST</div>
+  <p>
+    原书的登出是 <code>GET /auth/logout</code>。这其实有个问题：
+    任何能让你的浏览器发起 GET 的地方（<code>&lt;img src="/auth/logout"&gt;</code>、
+    浏览器预取、聊天软件的链接预览）都能把你登出。
+  </p>
+  <p>
+    虽然“被登出”危害不大，但它违反了一条基本原则：
+    <strong>GET 必须是安全的（不改变服务器状态）。</strong>
+    所以我们用带 CSRF 令牌的 POST。
+  </p>
+</div>
+
+<h2 id="loginroutes">登录与登出的处理器</h2>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java（登录部分）">
+<pre>
+private void loginForm(Context ctx) {
+    if (CurrentUser.isAuthenticated(ctx)) {
+        ctx.redirect(Routes.INDEX);
+        return;
+    }
+    View.render(ctx, "auth/login.jte", "登录", "form", FormView.empty());
+}
+
+private void login(Context ctx) {
+    var form = new LoginForm(
+        ctx.formParam("email"),
+        ctx.formParam("password"),
+        ctx.formParam("remember") != null);
+
+    var errors = Forms.validate(form);
+    if (!errors.isEmpty()) {
+        renderLoginWithErrors(ctx, form, errors);
+        return;
+    }
+
+    var users = services.users(ctx);
+    User user = users.findByEmail(form.email().toLowerCase()).orElse(null);
+
+    if (user == null || !user.checkPassword(form.password())) {
+        // 注意：不区分"用户不存在"和"密码错误"
+        Flash.danger(ctx, "邮箱或密码错误。");
+        renderLoginWithErrors(ctx, form, Map.of());
+        return;
+    }
+
+    CurrentUser.login(ctx, user);
+    Flash.success(ctx, "欢迎回来，" + user.getUsername() + "！");
+    ctx.redirect(safeNext(ctx, Routes.INDEX));
+}
+
+private void logout(Context ctx) {
+    CurrentUser.logout(ctx);
+    // invalidate() 之后 Flash 也没了，所以这条消息要重新放进新会话
+    Flash.info(ctx, "你已登出。");
+    ctx.redirect(Routes.INDEX);
+}
+
+private void renderLoginWithErrors(Context ctx, LoginForm form,
+                                   Map&lt;String, List&lt;String&gt;&gt; errors) {
+    var values = new HashMap&lt;String, String&gt;();
+    values.put("email", form.email() == null ? "" : form.email());
+    if (form.remember()) values.put("remember", "1");
+    View.render(ctx, "auth/login.jte", "登录",
+                "form", new FormView(values, errors));
+}
+</pre>
+</div>
+
+<h3>开放重定向：原书留下的一个漏洞</h3>
+
+<p>
+  登录成功后要跳回用户原本想访问的页面，这个目标地址通常放在
+  <code>?next=/edit-profile</code> 查询参数里。原书的代码是：
+</p>
+
+<div class="code" data-lang="python">
+<pre>
+next = request.args.get('next')
+if next is None or not next.startswith('/'):
+    next = url_for('main.index')
+return redirect(next)
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>startswith('/')</code> 不够</div>
+  <p>
+    <code>//evil.example.com/</code> 也是以 <code>/</code> 开头的，
+    但浏览器会把它解释成<strong>协议相对 URL</strong>，跳到 <code>https://evil.example.com/</code>。
+  </p>
+  <p>
+    这叫<strong>开放重定向漏洞</strong>。攻击者给你发
+    <code>https://javalinky.example/auth/login?next=//evil.example/fake-login</code>，
+    你在真网站上登录成功，然后被跳到一个长得一模一样的假网站，
+    它提示"会话过期，请重新登录"——你就把密码交出去了。
+  </p>
+</div>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java">
+<pre>
+/**
+ * 安全地取 next 参数。只接受"本站的绝对路径"：
+ *   /edit-profile        ✓
+ *   /post/5?page=2       ✓
+ *   //evil.example/x     ✗ 协议相对 URL，会跳到外站
+ *   /\evil.example/x     ✗ 某些浏览器会把 \ 当成 /
+ *   https://evil/x       ✗ 显然不行
+ *   javascript:alert(1)  ✗
+ */
+private static String safeNext(Context ctx, String fallback) {
+    String next = ctx.queryParam("next");
+    if (next == null || next.isBlank()) return fallback;
+    if (!next.startsWith("/")) return fallback;
+    if (next.startsWith("//")) return fallback;
+    if (next.length() &gt; 1 &amp;&amp; (next.charAt(1) == '\\' || next.charAt(1) == '/')) return fallback;
+    return next;
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 一个更彻底的做法</div>
+  <p>
+    与其校验用户给的 URL，不如<strong>根本不接受 URL</strong>：
+    把目标地址存进会话（<code>ctx.sessionAttribute("afterLogin", ctx.path())</code>），
+    登录后从会话里取。攻击者碰不到会话，所以天然安全。
+    代价是跨标签页的行为会怪一点。
+  </p>
+</div>
+
+<h2 id="register">新用户注册</h2>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/form/RegisterForm.java">
+<pre>
+package com.example.javalinky.web.form;
+
+import jakarta.validation.constraints.*;
+
+public record RegisterForm(
+    @NotBlank(message = "请填写邮箱")
+    @Size(max = 64, message = "邮箱最长 64 个字符")
+    @Email(message = "邮箱格式不正确")
+    String email,
+
+    @NotBlank(message = "请填写用户名")
+    @Size(max = 64, message = "用户名最长 64 个字符")
+    @Pattern(regexp = "^[A-Za-z][A-Za-z0-9_.]*$",
+             message = "用户名必须以字母开头，只能包含字母、数字、点和下划线")
+    String username,
+
+    @NotBlank(message = "请填写密码")
+    @Size(min = 8, max = 72, message = "密码长度需在 8 到 72 之间")
+    String password,
+
+    @NotBlank(message = "请再输入一次密码")
+    String password2
+) {
+    @AssertTrue(message = "两次输入的密码不一致")
+    public boolean isPasswordsMatch() {
+        return password != null &amp;&amp; password.equals(password2);
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java（注册部分）">
+<pre>
+private void register(Context ctx) {
+    var form = new RegisterForm(
+        ctx.formParam("email"),
+        ctx.formParam("username"),
+        ctx.formParam("password"),
+        ctx.formParam("password2"));
+
+    // 1. 注解能查的先查
+    var errors = new LinkedHashMap&lt;String, List&lt;String&gt;&gt;(Forms.validate(form));
+
+    // 2. 需要查数据库的校验（注解做不到），相当于原书的 validate_email/validate_username
+    var users = services.users(ctx);
+    String email = form.email() == null ? "" : form.email().toLowerCase();
+    if (!errors.containsKey("email") &amp;&amp; users.emailExists(email)) {
+        errors.put("email", List.of("这个邮箱已经注册过了"));
+    }
+    if (!errors.containsKey("username") &amp;&amp; users.usernameExists(form.username())) {
+        errors.put("username", List.of("这个用户名已被占用"));
+    }
+
+    if (!errors.isEmpty()) {
+        var values = new HashMap&lt;String, String&gt;();
+        values.put("email", email);
+        values.put("username", nullToEmpty(form.username()));
+        View.render(ctx, "auth/register.jte", "注册",
+                    "form", new FormView(values, errors));
+        return;
+    }
+
+    // 3. 创建用户
+    var user = new User(email, form.username());
+    user.setPassword(form.password());
+    user.setRole(services.roles(ctx).defaultRole());   // 第 9 章实现
+    users.save(user);
+
+    // 4. 发确认邮件。注意：令牌要用 user.getId()，所以必须先 flush 拿到主键
+    Db.em(ctx).flush();
+    String token = services.auth().confirmationToken(user.getId());
+    services.mail().sendConfirmation(user.getEmail(), user.getUsername(), token);
+
+    Flash.info(ctx, "确认邮件已发送，请查收邮箱完成注册。");
+    ctx.redirect(Routes.LOGIN);
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>em.flush()</code> 是干什么的</div>
+  <p>
+    <code>persist()</code> 只是把对象纳入管理，INSERT 语句默认延迟到事务提交时才发。
+    但我们<strong>现在就需要自增主键</strong>（令牌里要带 userId），
+    所以调 <code>flush()</code> 强制把挂起的 SQL 发到数据库 ——
+    注意这<strong>不是提交</strong>，事务还在，出错照样会回滚。
+  </p>
+  <p>
+    （用 <code>GenerationType.IDENTITY</code> 时 Hibernate 会在 <code>persist()</code> 时就插入以拿到 id，
+    所以这行 <code>flush()</code> 可能是多余的 —— 但写上它可以让代码不依赖主键生成策略。）
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 唯一性检查有竞态，数据库约束是最后防线</div>
+  <p>
+    两个人同时注册同一个邮箱时，两次 <code>emailExists()</code> 都可能返回 false，
+    然后两条 INSERT 都执行。这时救你的是<strong>数据库的唯一索引</strong>
+    （第 5 章的迁移里建了 <code>ix_users_email</code>）。
+  </p>
+  <p>所以要把约束冲突也当成一种校验失败来处理：</p>
+  <div class="code" data-lang="java">
+<pre>
+config.routes.exception(jakarta.persistence.PersistenceException.class, (e, ctx) -&gt; {
+    if (isUniqueViolation(e)) {
+        Flash.danger(ctx, "这个邮箱或用户名刚刚被别人注册了，请换一个。");
+        ctx.redirect(Routes.REGISTER);
+    } else {
+        throw e;   // 其他数据库错误照常当 500
+    }
+});
+</pre>
+  </div>
+  <p>
+    “应用层检查给出友好提示 + 数据库约束保证绝对正确”是标准组合，
+    两者都要有。
+  </p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 8a / 8b / 8c / 8d</b>（密码哈希、认证蓝本、登录、注册）。</div>
+</div>
+
+<h2 id="tokens">签名令牌：确认邮件、重置密码、换邮箱</h2>
+
+<p>
+  这三个功能的套路完全一样：
+  <strong>给用户发一个链接，链接里带一个只有服务器能验证真伪的字符串。</strong>
+</p>
+
+<p>
+  原书用 <code>itsdangerous</code> 库生成“带签名和过期时间的 JSON”。
+  Java 里对应的标准是 <strong>JWT</strong>（JSON Web Token）。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="JWT 的结构与验证流程">
+  <text class="ttl" x="20" y="20">一个 JWT 由三段 Base64 用点连接</text>
+  <rect class="bx-b" x="20" y="32" width="225" height="92" rx="8"/>
+  <text class="lbl on-b" x="36" y="52">① Header（头）</text>
+  <text class="mono" x="36" y="72">{"alg":"HS256",</text>
+  <text class="mono" x="36" y="88"> "typ":"JWT"}</text>
+  <text class="sm" x="36" y="110">说明用什么算法签的</text>
+
+  <rect class="bx-a" x="263" y="32" width="235" height="92" rx="8"/>
+  <text class="lbl on-a" x="279" y="52">② Payload（载荷）</text>
+  <text class="mono" x="279" y="72">{"sub":"7",</text>
+  <text class="mono" x="279" y="88"> "purpose":"confirm",</text>
+  <text class="mono" x="279" y="104"> "exp":1761123456}</text>
+  <text class="sm on-r" x="279" y="120">任何人都能解开读 —— 别放秘密</text>
+
+  <rect class="bx-g" x="516" y="32" width="224" height="92" rx="8"/>
+  <text class="lbl on-g" x="532" y="52">③ Signature（签名）</text>
+  <text class="mono" x="532" y="72">HMAC-SHA256(</text>
+  <text class="mono" x="532" y="88">  头 + "." + 载荷,</text>
+  <text class="mono" x="532" y="104">  SECRET_KEY)</text>
+  <text class="sm on-g" x="532" y="120">只有知道密钥才能算出来</text>
+
+  <rect class="bx-d" x="20" y="146" width="720" height="40" rx="8"/>
+  <text class="mono" x="40" y="171">eyJhbGciOiJIUzI1NiJ9 . eyJzdWIiOiI3IiwicHVycG9zZSI6ImNvbmZpcm0i… . 3xK9v2Lm…</text>
+
+  <path class="ln-a" d="M380 186 V206" marker-end="url(#ar-a)"/>
+
+  <text class="ttl" x="20" y="222">服务器验证时做三件事</text>
+  <rect class="bx" x="20" y="232" width="232" height="56" rx="8"/>
+  <text class="lbl" x="36" y="252">① 用密钥重算签名</text>
+  <text class="sm" x="36" y="270">对不上 → 令牌被篡改过</text>
+  <text class="sm" x="36" y="284">（改不了签名，因为没密钥）</text>
+
+  <rect class="bx" x="264" y="232" width="232" height="56" rx="8"/>
+  <text class="lbl" x="280" y="252">② 检查 exp 过期时间</text>
+  <text class="sm" x="280" y="270">过期 → 拒绝</text>
+  <text class="sm" x="280" y="284">确认链接一般给 24 小时</text>
+
+  <rect class="bx" x="508" y="232" width="232" height="56" rx="8"/>
+  <text class="lbl" x="524" y="252">③ 检查 purpose 用途</text>
+  <text class="sm" x="524" y="270">防止"重置密码的令牌"</text>
+  <text class="sm" x="524" y="284">被拿去当"确认邮箱"用</text>
+
+  <rect class="bx-r" x="80" y="300" width="600" height="26" rx="6"/>
+  <text class="sm on-r" x="380" y="318" text-anchor="middle">最重要的一点：服务器不需要存任何东西 —— 令牌自己携带了全部信息和防伪证明</text>
+</svg>
+<figcaption>图 8-3　JWT 的结构与验证</figcaption>
+</figure>
+
+<div class="code" data-lang="xml" data-file="pom.xml（新增）">
+<pre>
+&lt;dependency&gt;
+  &lt;groupId&gt;com.auth0&lt;/groupId&gt;
+  &lt;artifactId&gt;java-jwt&lt;/artifactId&gt;
+  &lt;version&gt;4.5.0&lt;/version&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/util/Tokens.java">
+<pre>
+package com.example.javalinky.util;
+
+import com.auth0.jwt.JWT;
+import com.auth0.jwt.algorithms.Algorithm;
+import com.auth0.jwt.exceptions.JWTVerificationException;
+import com.auth0.jwt.interfaces.DecodedJWT;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Optional;
+
+public class Tokens {
+
+    private static final String ISSUER = "javalinky";
+
+    private final Algorithm algorithm;
+
+    public Tokens(String secretKey) {
+        this.algorithm = Algorithm.HMAC256(secretKey);
+    }
+
+    /** 签发一个有用途、有有效期、绑定某个用户的令牌 */
+    public String issue(String purpose, long userId, Duration ttl) {
+        return JWT.create()
+            .withIssuer(ISSUER)
+            .withSubject(String.valueOf(userId))
+            .withClaim("purpose", purpose)
+            .withIssuedAt(Instant.now())
+            .withExpiresAt(Instant.now().plus(ttl))
+            .sign(algorithm);
+    }
+
+    /** 带额外数据的令牌（换邮箱需要把新邮箱带上） */
+    public String issue(String purpose, long userId, Duration ttl,
+                        String extraKey, String extraValue) {
+        return JWT.create()
+            .withIssuer(ISSUER)
+            .withSubject(String.valueOf(userId))
+            .withClaim("purpose", purpose)
+            .withClaim(extraKey, extraValue)
+            .withIssuedAt(Instant.now())
+            .withExpiresAt(Instant.now().plus(ttl))
+            .sign(algorithm);
+    }
+
+    /** 校验并解析。任何问题（签名错、过期、用途不符）都返回 empty */
+    public Optional&lt;DecodedJWT&gt; verify(String token, String expectedPurpose) {
+        if (token == null || token.isBlank()) return Optional.empty();
+        try {
+            DecodedJWT jwt = JWT.require(algorithm)
+                .withIssuer(ISSUER)
+                .withClaim("purpose", expectedPurpose)
+                .build()
+                .verify(token);
+            return Optional.of(jwt);
+        } catch (JWTVerificationException e) {
+            return Optional.empty();
+        }
+    }
+
+    public static long userIdOf(DecodedJWT jwt) {
+        return Long.parseLong(jwt.getSubject());
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/service/AuthService.java">
+<pre>
+package com.example.javalinky.service;
+
+import com.example.javalinky.config.AppConfig;
+import com.example.javalinky.mail.MailService;
+import com.example.javalinky.util.Tokens;
+import java.time.Duration;
+
+public class AuthService {
+
+    public static final String PURPOSE_CONFIRM = "confirm";
+    public static final String PURPOSE_RESET   = "reset-password";
+    public static final String PURPOSE_EMAIL   = "change-email";
+
+    private final Tokens tokens;
+    private final MailService mail;
+
+    public AuthService(AppConfig config, MailService mail) {
+        this.tokens = new Tokens(config.secretKey());
+        this.mail = mail;
+    }
+
+    public String confirmationToken(long userId) {
+        return tokens.issue(PURPOSE_CONFIRM, userId, Duration.ofHours(24));
+    }
+
+    public String resetToken(long userId) {
+        // 重置密码的窗口要短 —— 这是高危操作
+        return tokens.issue(PURPOSE_RESET, userId, Duration.ofMinutes(30));
+    }
+
+    public String emailChangeToken(long userId, String newEmail) {
+        return tokens.issue(PURPOSE_EMAIL, userId, Duration.ofHours(2),
+                            "newEmail", newEmail);
+    }
+
+    public Tokens tokens() { return tokens; }
+}
+</pre>
+</div>
+
+<h3>确认账号</h3>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java（确认部分）">
+<pre>
+private void confirm(Context ctx) {
+    var jwt = services.auth().tokens()
+        .verify(ctx.pathParam("token"), AuthService.PURPOSE_CONFIRM);
+
+    if (jwt.isEmpty()) {
+        Flash.danger(ctx, "确认链接无效或已过期，请重新申请。");
+        ctx.redirect(Routes.INDEX);
+        return;
+    }
+
+    long userId = Tokens.userIdOf(jwt.get());
+    User user = services.users(ctx).findById(userId).orElse(null);
+    if (user == null) {
+        Flash.danger(ctx, "确认链接无效。");
+        ctx.redirect(Routes.INDEX);
+        return;
+    }
+
+    if (user.isConfirmed()) {
+        Flash.info(ctx, "这个账号已经确认过了。");
+    } else {
+        user.setConfirmed(true);        // 托管对象，改字段即入库
+        Flash.success(ctx, "账号确认成功，欢迎加入 Javalinky！");
+    }
+    ctx.redirect(Routes.INDEX);
+}
+
+private void resendConfirmation(Context ctx) {
+    User user = CurrentUser.require(ctx);
+    if (user.isConfirmed()) {
+        ctx.redirect(Routes.INDEX);
+        return;
+    }
+    String token = services.auth().confirmationToken(user.getId());
+    services.mail().sendConfirmation(user.getEmail(), user.getUsername(), token);
+    Flash.info(ctx, "新的确认邮件已发送。");
+    ctx.redirect(Routes.INDEX);
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 注意：确认路由<strong>不要求登录</strong></div>
+  <p>
+    原书给 <code>confirm</code> 加了 <code>@login_required</code>，于是流程是
+    “点邮件链接 → 要求先登录 → 登录后才确认”。
+  </p>
+  <p>
+    我们这里不要求登录，因为令牌本身已经证明了“持有者能收到那个邮箱的邮件”。
+    这样用户体验更顺（在手机上点开邮件链接就直接确认完了）。
+    代价是别人拿到你的确认链接也能帮你确认 —— 但这没有危害。
+  </p>
+</div>
+
+<h3>拦住未确认的账号</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="未确认账号的访问拦截">
+  <rect class="bx-b" x="20" y="100" width="130" height="50" rx="8"/>
+  <text class="lbl on-b" x="85" y="121" text-anchor="middle">任意请求</text>
+  <text class="sm" x="85" y="138" text-anchor="middle">GET /post/5</text>
+
+  <path class="ln-a" d="M152 125 H188" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-a" x="192" y="96" width="170" height="58" rx="8"/>
+  <text class="lbl on-a" x="277" y="116" text-anchor="middle">beforeMatched 过滤器</text>
+  <text class="sm" x="277" y="133" text-anchor="middle">已登录 且 未确认？</text>
+  <text class="sm" x="277" y="147" text-anchor="middle">且 不在白名单路径上？</text>
+
+  <path class="ln-g" d="M364 112 H420" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="392" y="105" text-anchor="middle">否</text>
+  <rect class="bx-g" x="424" y="92" width="150" height="40" rx="7"/>
+  <text class="lbl on-g" x="499" y="116" text-anchor="middle">正常处理</text>
+
+  <path class="ln-r" d="M364 140 H420" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="392" y="160" text-anchor="middle">是</text>
+  <rect class="bx-r" x="424" y="140" width="150" height="40" rx="7"/>
+  <text class="lbl on-r" x="499" y="164" text-anchor="middle">重定向到提示页</text>
+
+  <path class="ln-r" d="M576 160 H616" marker-end="url(#ar-r)"/>
+  <rect class="bx" x="620" y="138" width="120" height="44" rx="7"/>
+  <text class="sm" x="680" y="157" text-anchor="middle">/auth/unconfirmed</text>
+  <text class="sm" x="680" y="172" text-anchor="middle">“请查收邮件”</text>
+
+  <rect class="bx-d" x="40" y="196" width="680" height="46" rx="9"/>
+  <text class="sm" x="60" y="216">白名单（必须放过，否则用户被锁死在提示页）：/auth/* 全部、静态文件、以及登出。</text>
+  <text class="sm" x="60" y="234">用 beforeMatched 而不是 before：这样 404 和静态文件不会被牵连。</text>
+</svg>
+<figcaption>图 8-4　未确认账号的拦截逻辑</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java（拦截过滤器）">
+<pre>
+/** 相当于原书的 @auth.before_app_request */
+public static void installUnconfirmedGuard(JavalinConfig config) {
+    config.routes.beforeMatched(ctx -&gt; {
+        User user = CurrentUser.get(ctx);
+        if (user == null || user.isConfirmed()) return;
+
+        String path = ctx.path();
+        // 白名单：认证相关的路径必须放过
+        if (path.startsWith("/auth/") || path.equals("/favicon.ico")) return;
+        // API 走自己的规则（第 14 章）
+        if (path.startsWith("/api/")) return;
+
+        ctx.redirect("/auth/unconfirmed");
+        ctx.skipRemainingHandlers();    // 别再执行后面的处理器
+    });
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java">
+<pre>
+private void unconfirmed(Context ctx) {
+    User user = CurrentUser.get(ctx);
+    if (user == null || user.isConfirmed()) {
+        ctx.redirect(Routes.INDEX);
+        return;
+    }
+    View.render(ctx, "auth/unconfirmed.jte", "请确认你的账号");
+}
+</pre>
+</div>
+
+<h2 id="account">账号管理</h2>
+
+<p>三个功能，都是“表单 + 校验 + 改字段”的套路，这里只列关键点。</p>
+
+<h3>修改密码（已登录）</h3>
+
+<div class="code" data-lang="java">
+<pre>
+private void changePassword(Context ctx) {
+    User user = CurrentUser.require(ctx);
+    var form = new ChangePasswordForm(
+        ctx.formParam("oldPassword"),
+        ctx.formParam("password"),
+        ctx.formParam("password2"));
+
+    var errors = new LinkedHashMap&lt;String, List&lt;String&gt;&gt;(Forms.validate(form));
+    if (errors.isEmpty() &amp;&amp; !user.checkPassword(form.oldPassword())) {
+        errors.put("oldPassword", List.of("当前密码不正确"));
+    }
+    if (!errors.isEmpty()) {
+        View.render(ctx, "auth/change_password.jte", "修改密码",
+                    "form", new FormView(Map.of(), errors));
+        return;
+    }
+
+    user.setPassword(form.password());
+
+    // 改密码之后换一个会话 ID（和登录时同理）
+    ctx.req().changeSessionId();
+
+    Flash.success(ctx, "密码已更新。");
+    ctx.redirect(Routes.INDEX);
+}
+</pre>
+</div>
+
+<h3>忘记密码（未登录）</h3>
+
+<div class="code" data-lang="java">
+<pre>
+private void requestPasswordReset(Context ctx) {
+    String email = nullToEmpty(ctx.formParam("email")).toLowerCase();
+
+    services.users(ctx).findByEmail(email).ifPresent(user -&gt; {
+        String token = services.auth().resetToken(user.getId());
+        services.mail().sendPasswordReset(user.getEmail(), user.getUsername(), token);
+    });
+
+    // 关键：无论邮箱存不存在，都给同一句提示。
+    // 否则这个接口就变成了"查询某邮箱是否注册过"的工具。
+    Flash.info(ctx, "如果这个邮箱已注册，重置链接已经发送过去了。");
+    ctx.redirect(Routes.LOGIN);
+}
+
+private void doPasswordReset(Context ctx) {
+    var jwt = services.auth().tokens()
+        .verify(ctx.pathParam("token"), AuthService.PURPOSE_RESET);
+    if (jwt.isEmpty()) {
+        Flash.danger(ctx, "重置链接无效或已过期。");
+        ctx.redirect(Routes.LOGIN);
+        return;
+    }
+
+    var form = new PasswordResetForm(ctx.formParam("password"), ctx.formParam("password2"));
+    var errors = Forms.validate(form);
+    if (!errors.isEmpty()) {
+        View.render(ctx, "auth/reset_password.jte", "重置密码",
+                    "form", new FormView(Map.of(), errors),
+                    "token", ctx.pathParam("token"));
+        return;
+    }
+
+    User user = services.users(ctx).findById(Tokens.userIdOf(jwt.get())).orElse(null);
+    if (user == null) {
+        Flash.danger(ctx, "重置链接无效。");
+        ctx.redirect(Routes.LOGIN);
+        return;
+    }
+
+    user.setPassword(form.password());
+    Flash.success(ctx, "密码已重置，请用新密码登录。");
+    ctx.redirect(Routes.LOGIN);
+}
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：JWT 做密码重置令牌的一个缺陷</div>
+  <p>
+    JWT 是<strong>无状态</strong>的：签发之后服务器不记录它，所以<strong>没法作废</strong>。
+    这意味着一个重置令牌在有效期内可以<strong>用多次</strong>——
+    如果邮箱被人看过一眼，攻击者可以在 30 分钟内反复重置你的密码。
+  </p>
+  <p>更严格的做法有两种：</p>
+  <ol>
+    <li><strong>把令牌哈希存进数据库</strong>，用过就删（<code>password_reset_tokens</code> 表）。
+        这是最稳的做法，代价是多一张表。</li>
+    <li><strong>把当前密码哈希的一部分放进令牌</strong>的 claim 里。
+        密码一改，哈希就变，旧令牌自动失效。零成本，很巧妙。</li>
+  </ol>
+  <p>
+    原书用 itsdangerous 也有同样的问题。生产系统请至少实现第二种。
+  </p>
+</div>
+
+<h3>修改邮箱</h3>
+
+<p>
+  这里有个容易做错的地方：<strong>确认邮件要发给新邮箱，但在确认之前不能改数据库。</strong>
+  所以把新邮箱放进令牌：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+private void requestEmailChange(Context ctx) {
+    User user = CurrentUser.require(ctx);
+    String newEmail = nullToEmpty(ctx.formParam("email")).toLowerCase();
+    String password = ctx.formParam("password");
+
+    // 改邮箱是敏感操作，必须重新验证密码
+    if (!user.checkPassword(password)) {
+        Flash.danger(ctx, "密码不正确。");
+        ctx.redirect(Routes.CHANGE_EMAIL);
+        return;
+    }
+    if (services.users(ctx).emailExists(newEmail)) {
+        Flash.danger(ctx, "这个邮箱已经被使用了。");
+        ctx.redirect(Routes.CHANGE_EMAIL);
+        return;
+    }
+
+    String token = services.auth().emailChangeToken(user.getId(), newEmail);
+    services.mail().sendEmailChange(newEmail, user.getUsername(), token);
+
+    Flash.info(ctx, "确认邮件已发送到新邮箱，请到那边完成确认。");
+    ctx.redirect(Routes.INDEX);
+}
+
+private void confirmEmailChange(Context ctx) {
+    var jwt = services.auth().tokens()
+        .verify(ctx.pathParam("token"), AuthService.PURPOSE_EMAIL);
+    if (jwt.isEmpty()) {
+        Flash.danger(ctx, "链接无效或已过期。");
+        ctx.redirect(Routes.INDEX);
+        return;
+    }
+
+    User user = services.users(ctx).findById(Tokens.userIdOf(jwt.get())).orElse(null);
+    String newEmail = jwt.get().getClaim("newEmail").asString();
+    if (user == null || newEmail == null) {
+        Flash.danger(ctx, "链接无效。");
+        ctx.redirect(Routes.INDEX);
+        return;
+    }
+    // 再查一次：令牌签发之后可能有人抢注了这个邮箱
+    if (services.users(ctx).emailExists(newEmail)) {
+        Flash.danger(ctx, "这个邮箱已经被使用了。");
+        ctx.redirect(Routes.INDEX);
+        return;
+    }
+
+    user.setEmail(newEmail);
+    user.setAvatarHash(null);      // 第 10 章：Gravatar 哈希是按邮箱算的，要重算
+    Flash.success(ctx, "邮箱已更新。");
+    ctx.redirect(Routes.INDEX);
+}
+</pre>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 8e</b>（账号确认与账号管理）。</div>
+</div>
+
+<h2 id="routes-all">完整的 AuthRoutes 路由表</h2>
+
+<div class="code" data-lang="java" data-file="web/routes/AuthRoutes.java（register 方法）">
+<pre>
+@Override
+public void register(JavalinConfig config) {
+    config.routes.apiBuilder(() -&gt; path("/auth", () -&gt; {
+        get("/login",  this::loginForm);
+        post("/login", this::login);
+        post("/logout", this::logout);
+
+        get("/register",  this::registerForm);
+        post("/register", this::register);
+
+        get("/confirm/{token}", this::confirm);
+        get("/confirm",         this::resendConfirmation);
+        get("/unconfirmed",     this::unconfirmed);
+
+        get("/change-password",  this::changePasswordForm);
+        post("/change-password", this::changePassword);
+
+        get("/reset",  this::resetRequestForm);
+        post("/reset", this::requestPasswordReset);
+        get("/reset/{token}",  this::resetForm);
+        post("/reset/{token}", this::doPasswordReset);
+
+        get("/change-email",  this::emailChangeForm);
+        post("/change-email", this::requestEmailChange);
+        get("/change-email/{token}", this::confirmEmailChange);
+    }));
+
+    installUnconfirmedGuard(config);
+}
+</pre>
+</div>
+
+<h2 id="test">测一下登录</h2>
+
+<p>原书在这一节加了测试，我们也加 —— 顺便验证 <code>JavalinTest</code> 能处理 Cookie：</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/AuthTest.java">
+<pre>
+package com.example.javalinky;
+
+import com.example.javalinky.util.Passwords;
+import io.javalin.testtools.JavalinTest;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class AuthTest {
+
+    @Test
+    void 相同密码的哈希每次都不同() {
+        String h1 = Passwords.hash("cat");
+        String h2 = Passwords.hash("cat");
+        assertThat(h1).isNotEqualTo(h2);       // 因为盐是随机的
+        assertThat(Passwords.verify("cat", h1)).isTrue();
+        assertThat(Passwords.verify("cat", h2)).isTrue();
+        assertThat(Passwords.verify("dog", h1)).isFalse();
+    }
+
+    @Test
+    void 未登录访问受保护页面会被挡住() {
+        JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -&gt; {
+            // OkHttp 默认不跟随重定向，所以能直接看到 302/401
+            assertThat(client.get("/edit-profile").code()).isIn(302, 401);
+        });
+    }
+
+    @Test
+    void 注册并登录的完整流程() {
+        JavalinTest.test(JavalinkyApp.create(TestFixtures.config()), (server, client) -&gt; {
+            // JavalinTest 的客户端自带 Cookie 管理，所以会话能跨请求保持
+            var register = client.post("/auth/register", Map.of(
+                "email", "john@example.com",
+                "username", "john",
+                "password", "cat12345",
+                "password2", "cat12345",
+                "_csrf", csrfTokenFrom(client.get("/auth/register"))
+            ));
+            assertThat(register.code()).isIn(200, 302);
+
+            var login = client.post("/auth/login", Map.of(
+                "email", "john@example.com",
+                "password", "cat12345",
+                "_csrf", csrfTokenFrom(client.get("/auth/login"))
+            ));
+            assertThat(login.code()).isEqualTo(302);
+        });
+    }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 测试里的 CSRF 令牌怎么弄</div>
+  <p>有两种做法，各有取舍：</p>
+  <ol>
+    <li><strong>从页面 HTML 里抠出来</strong>（上面 <code>csrfTokenFrom()</code> 的做法）——
+        真实度最高，连 CSRF 防护本身都一起测了。</li>
+    <li><strong>在测试配置里关掉 CSRF</strong>——原书就是这么做的
+        （<code>WTF_CSRF_ENABLED = False</code>）。代码干净，但漏测了一个安全机制。</li>
+    </ol>
+  <p>
+    建议：大部分测试用第 2 种（加一个 <code>AppConfig.csrfEnabled</code> 开关），
+    然后专门写两三个测试用第 1 种来验证 CSRF 防护确实有效。
+  </p>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在 JShell 里执行 <code>Passwords.hash("cat")</code> 三次，对比三个结果。
+        数一数 bcrypt 字符串的各个部分（<code>$2a$12$</code> 开头）。
+        然后把 <code>COST</code> 改成 4 和 15，用 <code>System.nanoTime()</code> 测一下耗时差多少。</li>
+    <li>跑起 Mailpit，完整走一遍注册流程：填表 → 在 Mailpit 里看到邮件 → 点确认链接 → 账号变成已确认。</li>
+    <li>把确认令牌的有效期改成 <code>Duration.ofSeconds(5)</code>，注册一个账号，
+        等 10 秒再点链接，确认看到"链接已过期"。</li>
+    <li>拿一个确认令牌，到 <a href="https://jwt.io">jwt.io</a> 上粘贴进去
+        （或者自己 Base64 解码中间那段），看看载荷里有什么。
+        然后<strong>手动改一个字符</strong>再去访问，确认服务器拒绝了它。</li>
+    <li>试试开放重定向：访问 <code>/auth/login?next=//example.com</code>，登录。
+        确认你<strong>没有</strong>被跳到外站。然后把 <code>safeNext</code> 里那几行检查注释掉，再试一次。</li>
+    <li>注册一个账号但不确认，然后登录并访问首页。确认被重定向到 <code>/auth/unconfirmed</code>。
+        再确认你<strong>仍然能</strong>登出 —— 如果不能，说明白名单写漏了。</li>
+    <li>实现上面「深入」里提到的方案二：在重置令牌里加一个 claim，
+        内容是用户当前 <code>passwordHash</code> 的前 10 个字符；验证时比对。
+        然后测试：用同一个重置链接改两次密码，第二次应该失败。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

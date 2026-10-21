@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 1 章 · 安装 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="1">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 1 章</span>
+<h1>安装</h1>
+<p class="lede">
+  Flask 自称“微框架”：核心很小，其他功能靠扩展。Javalin 也是这个思路。
+  这一章我们把工具装好：JDK、Maven，最后建出一个空的 Javalin 项目，为下一章的 “Hello World” 做准备。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>知道 Javalin 由哪几块组成，和 Flask 的组成方式有什么异同</li>
+    <li>装好 JDK 21，并理解“版本管理器”是干什么的</li>
+    <li>理解 Java 为什么不需要 Python 那样的虚拟环境</li>
+    <li>会读懂 <code>pom.xml</code>，会用 Maven 下载依赖、编译、运行</li>
+    <li>建出本教程要用一整本书的项目骨架</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="what">Javalin 是什么</h2>
+
+<p>
+  原书第 1 章开头说：Flask 小到你熟悉之后可以读懂它的全部源码。
+  Javalin 也是这种尺寸的框架 —— 核心一个 jar，依赖只有两个：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>依赖</th><th>作用</th><th>相当于 Flask 的</th></tr>
+<tr><td><strong>Jetty 12</strong></td><td>内嵌的 HTTP 服务器 + Servlet 容器，负责监听端口、解析 HTTP、管理线程</td><td>Werkzeug（WSGI）</td></tr>
+<tr><td><strong>SLF4J</strong></td><td>日志门面（只是接口，具体实现要你自己选，比如 Logback）</td><td>Python 的 <code>logging</code></td></tr>
+</table>
+</div>
+
+<p>
+  注意这里和 Flask 的一个重要区别：
+  Flask 的开发服务器只能用于开发，上线要换 Gunicorn / uWSGI；
+  而 <strong>Javalin 内嵌的 Jetty 就是生产级服务器</strong>，开发和上线跑的是同一个东西。
+  第 17 章我们会看到，部署一个 Javalin 应用只需要 <code>java -jar</code>。
+</p>
+
+<p>
+  和 Flask 一样，Javalin 核心里<strong>没有</strong>数据库、没有表单校验、没有用户认证。
+  这些都由你自己挑库来补。Javalin 官方提供了一小组“卫星模块”，其余用任何 Java 库都行：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 310" role="img" aria-label="Javalin 的核心与卫星模块，以及第三方库">
+  <rect class="bx-a" x="300" y="130" width="160" height="56" rx="12"/>
+  <text class="ttl on-a" x="380" y="153" text-anchor="middle">io.javalin:javalin</text>
+  <text class="sm" x="380" y="172" text-anchor="middle">路由 · Context · 过滤器</text>
+
+  <rect class="bx-b" x="20" y="20" width="210" height="92" rx="10"/>
+  <text class="ttl on-b" x="30" y="42">官方卫星模块</text>
+  <text class="sm" x="30" y="62">javalin-rendering-jte（模板）</text>
+  <text class="sm" x="30" y="79">javalin-bundle（Jackson+测试）</text>
+  <text class="sm" x="30" y="96">javalin-micrometer（指标）</text>
+  <text class="sm" x="30" y="108">javalin-ssl（TLS）</text>
+
+  <rect class="bx-g" x="530" y="20" width="210" height="92" rx="10"/>
+  <text class="ttl on-g" x="540" y="42">数据层（第 5 章）</text>
+  <text class="sm" x="540" y="62">Hibernate ORM 7</text>
+  <text class="sm" x="540" y="79">HikariCP 连接池</text>
+  <text class="sm" x="540" y="96">Flyway 数据库迁移</text>
+  <text class="sm" x="540" y="108">PostgreSQL / H2 驱动</text>
+
+  <rect class="bx-p" x="20" y="204" width="210" height="92" rx="10"/>
+  <text class="ttl on-p" x="30" y="226">安全（第 8–9 章）</text>
+  <text class="sm" x="30" y="246">at.favre.lib:bcrypt</text>
+  <text class="sm" x="30" y="263">com.auth0:java-jwt</text>
+  <text class="sm" x="30" y="280">OWASP HTML Sanitizer</text>
+  <text class="sm" x="30" y="292">Hibernate Validator</text>
+
+  <rect class="bx-g" x="530" y="204" width="210" height="92" rx="10"/>
+  <text class="ttl on-g" x="540" y="226">开发与测试</text>
+  <text class="sm" x="540" y="246">JUnit 5 + AssertJ</text>
+  <text class="sm" x="540" y="263">JaCoCo 覆盖率</text>
+  <text class="sm" x="540" y="280">Playwright（端到端）</text>
+  <text class="sm" x="540" y="292">Datafaker（假数据）</text>
+
+  <rect class="bx-d" x="290" y="222" width="180" height="56" rx="10"/>
+  <text class="ttl" x="380" y="244" text-anchor="middle">Logback</text>
+  <text class="sm" x="380" y="263" text-anchor="middle">SLF4J 的具体实现</text>
+
+  <path class="ln" d="M232 78 L296 142"/>
+  <path class="ln" d="M528 78 L464 142"/>
+  <path class="ln" d="M232 250 L286 250"/>
+  <path class="ln" d="M528 250 L474 250"/>
+  <path class="ln" d="M380 188 V220"/>
+</svg>
+<figcaption>图 1-1　Javalin 的核心很小，能力来自周边的库 —— 和 Flask 的扩展生态一个道理</figcaption>
+</figure>
+
+<h2 id="jdk">第一步：装 JDK 21</h2>
+
+<p>
+  Java 程序需要 <strong>JDK</strong>（Java Development Kit，含编译器 <code>javac</code> 和运行时 <code>java</code>）。
+  Javalin 7 要求 <strong>Java 17 或更高</strong>。本教程统一用 <strong>Java 21</strong>，原因有两个：
+  它是长期支持（LTS）版本，而且它带来的几个新语法（<code>record</code>、<code>var</code>、文本块、虚拟线程）
+  能让 Java 代码写起来比你印象中的 Java 短得多。
+</p>
+
+<h3>怎么知道自己装没装</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+java -version
+</pre>
+</div>
+
+<p>如果输出里的大版本号 &ge; 21，你可以直接跳到下一节。否则：</p>
+
+<h3>推荐方式：用版本管理器</h3>
+
+<p>
+  Java 世界的版本管理器相当于 Python 的 pyenv：它让你在一台机器上并存多个 JDK，按项目切换。
+  最常用的是 <strong>SDKMAN!</strong>（Linux / macOS / WSL）：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 安装 SDKMAN!（只需一次）
+curl -s "https://get.sdkman.io" | bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+
+# 看看有哪些 JDK 可装（列表很长，按 q 退出）
+sdk list java
+
+# 装一个 Java 21（Temurin 是 Eclipse 基金会维护的免费发行版）
+sdk install java 21.0.5-tem
+
+# 查看当前用的是哪个
+sdk current java
+</pre>
+</div>
+
+<p>Windows 用户如果不想装 WSL，用 winget 最省事：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+winget install EclipseAdoptium.Temurin.21.JDK
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; “JDK 发行版”是什么意思</div>
+  <p>
+    Java 的语言规范是公开的，任何人都可以按规范编译出一套 JDK。
+    所以你会看到 Temurin、Oracle JDK、Amazon Corretto、Azul Zulu、GraalVM 等等很多名字。
+    对本教程来说<strong>它们完全等价</strong>，挑一个带长期免费更新的就行（Temurin 和 Corretto 都是安全选择）。
+  </p>
+</div>
+
+<h2 id="novenv">为什么 Java 不需要虚拟环境</h2>
+
+<p>
+  原书第 1 章花了整整四节讲虚拟环境（<code>python3 -m venv venv</code>、<code>source venv/bin/activate</code>、<code>pip install</code>）。
+  这部分在 Java 里直接消失了，值得解释一下为什么。
+</p>
+
+<p>
+  Python 的问题在于：<code>pip install flask</code> 默认把包装到<strong>解释器自己的目录</strong>里，
+  全局共享。两个项目要不同版本的同一个库就会打架，所以才需要给每个项目复制一份解释器（虚拟环境）。
+</p>
+
+<p>
+  Java 走的是另一条路。依赖不装进 JDK，而是：
+</p>
+
+<ol>
+  <li>以 jar 文件的形式下载到一个<strong>全局缓存</strong>（<code>~/.m2/repository</code>），同一个库的不同版本各占一个目录，互不干扰；</li>
+  <li>每个项目在 <code>pom.xml</code> 里声明自己要哪些坐标和版本；</li>
+  <li>运行时 Maven 按这份声明<strong>拼出这个项目专属的 classpath</strong>（“这次运行能看到哪些 jar”）。</li>
+</ol>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="Python 虚拟环境与 Maven 本地仓库的依赖隔离方式对比">
+  <text class="ttl" x="20" y="20">Python：给每个项目复制一份解释器</text>
+  <rect class="bx-d" x="20" y="32" width="160" height="92" rx="9"/>
+  <text class="lbl" x="100" y="52" text-anchor="middle">项目 A</text>
+  <rect class="bx-b" x="34" y="62" width="132" height="22" rx="5"/>
+  <text class="sm on-b" x="100" y="77" text-anchor="middle">venv/ （含 python）</text>
+  <rect class="bx" x="34" y="90" width="132" height="22" rx="5"/>
+  <text class="sm" x="100" y="105" text-anchor="middle">flask 2.3 · jinja2 3.1</text>
+
+  <rect class="bx-d" x="200" y="32" width="160" height="92" rx="9"/>
+  <text class="lbl" x="280" y="52" text-anchor="middle">项目 B</text>
+  <rect class="bx-b" x="214" y="62" width="132" height="22" rx="5"/>
+  <text class="sm on-b" x="280" y="77" text-anchor="middle">venv/ （含 python）</text>
+  <rect class="bx" x="214" y="90" width="132" height="22" rx="5"/>
+  <text class="sm" x="280" y="105" text-anchor="middle">flask 1.1 · jinja2 2.11</text>
+
+  <text class="sm" x="20" y="146">两份互相隔离，但各自多出一整个解释器副本</text>
+
+  <text class="ttl" x="420" y="20">Java：一个共享仓库 + 每项目一张清单</text>
+  <rect class="bx-d" x="420" y="32" width="150" height="48" rx="9"/>
+  <text class="lbl" x="495" y="52" text-anchor="middle">项目 A</text>
+  <text class="mono" x="495" y="70" text-anchor="middle">pom.xml</text>
+
+  <rect class="bx-d" x="590" y="32" width="150" height="48" rx="9"/>
+  <text class="lbl" x="665" y="52" text-anchor="middle">项目 B</text>
+  <text class="mono" x="665" y="70" text-anchor="middle">pom.xml</text>
+
+  <rect class="bx-a" x="420" y="124" width="320" height="104" rx="10"/>
+  <text class="ttl on-a" x="580" y="146" text-anchor="middle">~/.m2/repository（全局缓存）</text>
+  <rect class="bx" x="436" y="156" width="140" height="22" rx="5"/>
+  <text class="sm" x="506" y="171" text-anchor="middle">javalin / 7.2.3 /</text>
+  <rect class="bx" x="584" y="156" width="140" height="22" rx="5"/>
+  <text class="sm" x="654" y="171" text-anchor="middle">javalin / 6.7.0 /</text>
+  <rect class="bx" x="436" y="184" width="140" height="22" rx="5"/>
+  <text class="sm" x="506" y="199" text-anchor="middle">jetty / 12.0.x /</text>
+  <rect class="bx" x="584" y="184" width="140" height="22" rx="5"/>
+  <text class="sm" x="654" y="199" text-anchor="middle">hibernate / 7.4 /</text>
+  <text class="sm" x="580" y="221" text-anchor="middle">不同版本各一个目录，天然不冲突</text>
+
+  <path class="ln-a" d="M495 82 V120" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M665 82 V120" marker-end="url(#ar-a)"/>
+  <text class="sm" x="420" y="252">JDK 只有一份；每次编译/运行由 Maven 按 pom.xml</text>
+  <text class="sm" x="420" y="268">挑出需要的 jar 拼成 classpath —— 隔离发生在“清单”层面</text>
+</svg>
+<figcaption>图 1-2　虚拟环境 vs. 本地仓库 + 依赖声明</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 心里的对应关系</div>
+  <ul>
+    <li><code>venv/</code> + <code>pip install</code> &nbsp;&rarr;&nbsp; <code>~/.m2/repository</code>（下载缓存，所有项目共用）</li>
+    <li><code>requirements.txt</code> &nbsp;&rarr;&nbsp; <code>pom.xml</code> 的 <code>&lt;dependencies&gt;</code>（声明，进版本控制）</li>
+    <li><code>pip freeze</code> &nbsp;&rarr;&nbsp; <code>mvn dependency:tree</code>（看实际解析出来的完整依赖）</li>
+    <li><code>source venv/bin/activate</code> &nbsp;&rarr;&nbsp; 不存在，不需要</li>
+  </ul>
+</div>
+
+<h2 id="maven">第二步：Maven</h2>
+
+<p>
+  Java 有两个主流构建工具：<strong>Maven</strong>（配置是 XML，声明式，约定多）和
+  <strong>Gradle</strong>（配置是 Kotlin/Groovy 代码，灵活，增量构建快）。
+  本教程用 Maven，因为它的配置文件“所有东西都写明了”，对初学者更容易读懂 —— 没有隐藏逻辑。
+</p>
+
+<h3>装 Maven</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+# SDKMAN!
+sdk install maven
+
+# macOS Homebrew
+brew install maven
+
+# Windows
+winget install Apache.Maven
+
+# 验证
+mvn -version
+</pre>
+</div>
+
+<h3>Maven 的两个核心概念</h3>
+
+<p>
+  <strong>坐标（coordinates）。</strong>每个 Java 库由三段唯一确定，俗称 GAV：
+</p>
+
+<div class="code" data-lang="xml">
+<pre>
+&lt;dependency&gt;
+  &lt;groupId&gt;io.javalin&lt;/groupId&gt;      &lt;!-- 组织，一般是反写域名 --&gt;
+  &lt;artifactId&gt;javalin&lt;/artifactId&gt;   &lt;!-- 这个库自己的名字 --&gt;
+  &lt;version&gt;7.2.3&lt;/version&gt;           &lt;!-- 版本 --&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<p>
+  <strong>生命周期（lifecycle）。</strong>Maven 把构建拆成固定的几个阶段，你执行某个阶段，
+  它会自动把前面的阶段都跑一遍。日常只要记住四个命令：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="Maven 构建生命周期的主要阶段">
+  <rect class="bx" x="14" y="56" width="120" height="48" rx="8"/>
+  <text class="ttl" x="74" y="78" text-anchor="middle">compile</text>
+  <text class="sm" x="74" y="95" text-anchor="middle">编译 main 源码</text>
+
+  <rect class="bx" x="164" y="56" width="120" height="48" rx="8"/>
+  <text class="ttl" x="224" y="78" text-anchor="middle">test</text>
+  <text class="sm" x="224" y="95" text-anchor="middle">跑单元测试</text>
+
+  <rect class="bx-a" x="314" y="56" width="120" height="48" rx="8"/>
+  <text class="ttl on-a" x="374" y="78" text-anchor="middle">package</text>
+  <text class="sm" x="374" y="95" text-anchor="middle">打成 jar</text>
+
+  <rect class="bx" x="464" y="56" width="130" height="48" rx="8"/>
+  <text class="ttl" x="529" y="78" text-anchor="middle">verify</text>
+  <text class="sm" x="529" y="95" text-anchor="middle">集成测试、检查</text>
+
+  <rect class="bx" x="624" y="56" width="122" height="48" rx="8"/>
+  <text class="ttl" x="685" y="78" text-anchor="middle">install</text>
+  <text class="sm" x="685" y="95" text-anchor="middle">装进 ~/.m2</text>
+
+  <path class="ln-a" d="M136 80 H162" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M286 80 H312" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M436 80 H462" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M596 80 H622" marker-end="url(#ar-a)"/>
+
+  <text class="sm" x="14" y="28">执行后面的阶段会自动跑完前面的全部阶段 —— 所以 `mvn package` 一定先编译、先测试</text>
+  <text class="sm" x="14" y="136">另有两个不属于生命周期的常用命令：</text>
+  <text class="mono" x="14" y="156">mvn clean</text><text class="sm" x="110" y="156">删掉 target/ 目录，从头来</text>
+  <text class="mono" x="14" y="176">mvn dependency:tree</text><text class="sm" x="180" y="176">打印完整依赖树（相当于 pip freeze）</text>
+</svg>
+<figcaption>图 1-3　Maven 生命周期：你只需要记住最右边你想到的那个阶段</figcaption>
+</figure>
+
+<h2 id="create">第三步：创建 Javalinky 项目</h2>
+
+<p>
+  Maven 对目录结构有<strong>强约定</strong>：源码必须放在 <code>src/main/java</code>，资源放 <code>src/main/resources</code>，
+  测试放 <code>src/test/java</code>。约定的好处是所有 Java 项目长得一样，换个项目你立刻知道去哪找东西。
+</p>
+
+<p>我们手动把骨架建出来，这样每个目录是干什么的你都清楚：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+mkdir -p javalinky/src/main/java/com/example/javalinky
+mkdir -p javalinky/src/main/resources
+mkdir -p javalinky/src/main/jte
+mkdir -p javalinky/src/test/java/com/example/javalinky
+cd javalinky
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="Javalinky 项目的 Maven 标准目录结构">
+  <text class="mono ttl" x="20" y="24">javalinky/</text>
+
+  <path class="ln-d" d="M30 32 V276"/>
+
+  <path class="ln-d" d="M30 48 H46"/><text class="mono" x="52" y="52">pom.xml</text>
+  <text class="sm" x="210" y="52">项目清单：依赖、插件、Java 版本（本章的重点）</text>
+
+  <path class="ln-d" d="M30 76 H46"/><text class="mono" x="52" y="80">src/main/java/</text>
+  <text class="sm" x="210" y="80">Java 源码。包名 com.example.javalinky 对应目录层级</text>
+
+  <path class="ln-d" d="M30 104 H46"/><text class="mono" x="52" y="108">src/main/resources/</text>
+  <text class="sm" x="210" y="108">非代码文件，会被打进 jar：配置、SQL 迁移、静态文件</text>
+
+  <path class="ln-d" d="M30 132 H46"/><text class="mono" x="52" y="136">src/main/jte/</text>
+  <text class="sm" x="210" y="136">JTE 模板（第 3 章）。相当于 Flask 的 templates/</text>
+
+  <path class="ln-d" d="M30 160 H46"/><text class="mono" x="52" y="164">src/test/java/</text>
+  <text class="sm" x="210" y="164">测试代码（第 15 章）。相当于 tests/</text>
+
+  <path class="ln-d" d="M30 188 H46"/><text class="mono" x="52" y="192">src/test/resources/</text>
+  <text class="sm" x="210" y="192">测试专用配置（例如测试用的内存数据库设置）</text>
+
+  <path class="ln-d" d="M30 216 H46"/><text class="mono" x="52" y="220">target/</text>
+  <text class="sm" x="210" y="220">Maven 的输出目录：.class 文件和打好的 jar</text>
+
+  <path class="ln-d" d="M30 244 H46"/><text class="mono" x="52" y="248">.gitignore</text>
+  <text class="sm" x="210" y="248">至少要忽略 target/ 和 .env</text>
+
+  <path class="ln-d" d="M30 272 H46"/><text class="mono" x="52" y="276">.env</text>
+  <text class="sm" x="210" y="276">本机的密钥、数据库口令（第 7 章）。<tspan class="on-r">千万不要进版本库</tspan></text>
+
+  <rect class="bx-d" x="500" y="12" width="246" height="34" rx="7"/>
+  <text class="sm" x="623" y="33" text-anchor="middle">蓝色部分 = 你写的；target/ = 生成的</text>
+</svg>
+<figcaption>图 1-4　Maven 标准目录结构（本教程会一路把它填满）</figcaption>
+</figure>
+
+<h3>pom.xml</h3>
+
+<p>
+  <code>pom.xml</code>（Project Object Model）是整个项目的清单。
+  下面是本章要用的最小版本 —— 后面每一章都会往里加几行，所以请花两分钟看懂每一段：
+</p>
+
+<div class="code" data-lang="xml" data-file="pom.xml">
+<pre>
+&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd"&gt;
+  &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+
+  &lt;!-- 1. 本项目自己的坐标 --&gt;
+  &lt;groupId&gt;com.example&lt;/groupId&gt;
+  &lt;artifactId&gt;javalinky&lt;/artifactId&gt;
+  &lt;version&gt;1.0-SNAPSHOT&lt;/version&gt;
+  &lt;packaging&gt;jar&lt;/packaging&gt;
+
+  &lt;!-- 2. 把版本号集中在一处，后面引用 ${javalin.version} 即可 --&gt;
+  &lt;properties&gt;
+    &lt;maven.compiler.release&gt;21&lt;/maven.compiler.release&gt;
+    &lt;project.build.sourceEncoding&gt;UTF-8&lt;/project.build.sourceEncoding&gt;
+    &lt;javalin.version&gt;7.2.3&lt;/javalin.version&gt;
+    &lt;logback.version&gt;1.5.20&lt;/logback.version&gt;
+  &lt;/properties&gt;
+
+  &lt;!-- 3. 依赖 --&gt;
+  &lt;dependencies&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;io.javalin&lt;/groupId&gt;
+      &lt;artifactId&gt;javalin&lt;/artifactId&gt;
+      &lt;version&gt;${javalin.version}&lt;/version&gt;
+    &lt;/dependency&gt;
+
+    &lt;!-- Javalin 只依赖 SLF4J 接口，不带实现。不加这一条启动时会警告“没有日志实现” --&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;ch.qos.logback&lt;/groupId&gt;
+      &lt;artifactId&gt;logback-classic&lt;/artifactId&gt;
+      &lt;version&gt;${logback.version}&lt;/version&gt;
+    &lt;/dependency&gt;
+  &lt;/dependencies&gt;
+
+  &lt;!-- 4. 插件：告诉 Maven 用什么工具干活 --&gt;
+  &lt;build&gt;
+    &lt;plugins&gt;
+      &lt;!-- 用 mvn exec:java 直接运行 main 方法，省得手拼 classpath --&gt;
+      &lt;plugin&gt;
+        &lt;groupId&gt;org.codehaus.mojo&lt;/groupId&gt;
+        &lt;artifactId&gt;exec-maven-plugin&lt;/artifactId&gt;
+        &lt;version&gt;3.5.0&lt;/version&gt;
+        &lt;configuration&gt;
+          &lt;mainClass&gt;com.example.javalinky.App&lt;/mainClass&gt;
+        &lt;/configuration&gt;
+      &lt;/plugin&gt;
+    &lt;/plugins&gt;
+  &lt;/build&gt;
+&lt;/project&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>1.0-SNAPSHOT</code> 是什么意思</div>
+  <p>
+    Maven 里带 <code>-SNAPSHOT</code> 后缀的版本表示“还在开发中、随时会变”。
+    自己的项目在没发布之前一直挂着 SNAPSHOT 就好，不用管它。
+  </p>
+</div>
+
+<h3>第一次编译：让 Maven 把依赖拉下来</h3>
+
+<p>先建一个最简单的类，好让编译器有事可做：</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/App.java">
+<pre>
+package com.example.javalinky;
+
+import io.javalin.Javalin;
+
+public class App {
+    public static void main(String[] args) {
+        // 下一章我们才真正启动服务器，这里只验证 Javalin 能被 import
+        System.out.println("Javalin 已就位：" + Javalin.class.getName());
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn compile
+</pre>
+</div>
+
+<p>
+  第一次执行会刷很多 <code>Downloading from central: ...</code> —— Maven 正在把 Javalin、Jetty、Logback
+  以及它们的依赖下载到 <code>~/.m2/repository</code>。
+  这些下载只发生一次，之后换项目也能直接复用。
+  最后看到 <code>BUILD SUCCESS</code> 就对了。
+</p>
+
+<p>然后运行它：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn -q compile exec:java
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+Javalin 已就位：io.javalin.Javalin
+</pre>
+</div>
+
+<p>
+  <code>-q</code>（quiet）让 Maven 少打印它自己的日志，只留你程序的输出。
+  这个组合命令（先编译、再运行）后面几章会一直用。
+</p>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本章对应原书 <b>git checkout 1a</b> —— 空项目 + 装好框架。</div>
+</div>
+
+<h2 id="deps">看清楚自己到底装了什么</h2>
+
+<p>
+  原书用 <code>pip freeze</code> 查看虚拟环境里实际装了哪些包。
+  Maven 的对应命令是 <code>dependency:tree</code>，而且它更有信息量 —— 它会画出
+  “谁把谁带进来的”：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn -q dependency:tree
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+com.example:javalinky:jar:1.0-SNAPSHOT
++- io.javalin:javalin:jar:7.2.3:compile
+|  +- org.eclipse.jetty:jetty-server:jar:12.0.x:compile
+|  +- org.eclipse.jetty.ee10:jetty-ee10-servlet:jar:12.0.x:compile
+|  +- org.eclipse.jetty.websocket:jetty-websocket-jetty-server:...:compile
+|  \- org.slf4j:slf4j-api:jar:2.0.x:compile
+\- ch.qos.logback:logback-classic:jar:1.5.20:compile
+   \- ch.qos.logback:logback-core:jar:1.5.20:compile
+</pre>
+</div>
+
+<p>
+  你声明了 2 个依赖，实际得到 8 个 jar —— 多出来的叫<strong>传递依赖</strong>（transitive dependency）。
+  <code>slf4j-api</code> 是 Javalin 带进来的，Jetty 也是。
+  这棵树在排查“为什么同一个类有两个版本”的问题时非常有用。
+</p>
+
+<div class="box tip">
+  <div class="t">&#128161; 两个很实用的 Maven 小命令</div>
+  <div class="code" data-lang="bash">
+<pre>
+# 有哪些依赖可以升级？（相当于 pip list --outdated）
+mvn versions:display-dependency-updates
+
+# 把依赖全部打到一个目录，看看它们一共多大
+mvn dependency:copy-dependencies -DoutputDirectory=target/libs &amp;&amp; du -sh target/libs
+</pre>
+  </div>
+</div>
+
+<h2 id="gitignore">把项目纳入 Git</h2>
+
+<p>
+  和原书一样，强烈建议从第一天就用版本控制。Java 项目至少要忽略这些：
+</p>
+
+<div class="code" data-lang="text" data-file=".gitignore">
+<pre>
+target/
+.env
+*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# JTE 生成的类（第 3 章）
+jte-classes/
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+git init
+git add .
+git commit -m "chore: 项目骨架 + Javalin 依赖"
+</pre>
+</div>
+
+<h2 id="ide">第四步（可选但强烈建议）：IDE</h2>
+
+<p>
+  Java 是一门“IDE 收益极高”的语言：类型信息足够丰富，IDE 能准确地做自动补全、跳转定义、重命名重构。
+  纯文本编辑器写 Java 会非常痛苦。
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128161;</span><h4>IntelliJ IDEA</h4>
+    <p>事实标准。社区版（免费）足够本教程全部内容。装一个 <strong>JTE 插件</strong>，第 3 章的模板就有补全和跳转。</p></div>
+  <div class="card"><span class="ic">&#128187;</span><h4>VS Code</h4>
+    <p>装 “Extension Pack for Java”。轻量，适合已经习惯 VS Code 的人。</p></div>
+  <div class="card"><span class="ic">&#127758;</span><h4>Eclipse</h4>
+    <p>老牌免费 IDE，对 Maven 支持完善。</p></div>
+</div>
+
+<p>
+  用 IDE 打开项目的方式是：<strong>打开 <code>pom.xml</code>（或项目根目录），而不是打开某个 .java 文件</strong>。
+  IDE 会读 pom 自动配好 classpath、Java 版本和模块结构。
+</p>
+
+<div class="box tip">
+  <div class="t">&#128161; 开发时的“自动重启”</div>
+  <p>
+    Flask 有 <code>FLASK_DEBUG=1</code> 带来的自动重载。Javalin 没有内置这个功能，但有两条路：
+  </p>
+  <ul>
+    <li><strong>IDE 的热交换</strong>：以 Debug 模式启动，改了方法体之后保存，IntelliJ 会把新字节码换进正在运行的 JVM（Build → Build Project，或开启 “Build project automatically”）。改方法体够用，加字段/改签名还是要重启。</li>
+    <li><strong>模板不需要重启</strong>：第 3 章会配置 JTE 从目录加载模板，改 <code>.jte</code> 文件刷新页面就生效。页面调整占了开发时间的大头，所以这条最实用。</li>
+  </ul>
+  <p>重启一个 Javalin 应用通常不到一秒，所以实践中没有想象的那么麻烦。</p>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>执行 <code>mvn -q dependency:tree</code>，找出 <code>slf4j-api</code> 是被谁带进来的。
+        然后把 <code>logback-classic</code> 这条依赖临时注释掉，重新 <code>mvn compile exec:java</code>，
+        看看控制台多出了什么警告 —— 这就是“只有日志门面、没有日志实现”的症状。</li>
+    <li>把 <code>pom.xml</code> 里的 <code>javalin.version</code> 改成 <code>6.7.0</code>，执行 <code>mvn -q dependency:tree</code>，
+        对比依赖树的差异（提示：Javalin 6 用的是 Jetty 11，包名是 <code>javax.servlet</code>）。改完记得改回 7.2.3。</li>
+    <li>执行 <code>mvn clean</code>，观察 <code>target/</code> 目录消失；再 <code>mvn compile</code>，
+        到 <code>target/classes</code> 里找到编译出来的 <code>App.class</code>。</li>
+    <li>把 <code>maven.compiler.release</code> 改成 <code>17</code>，然后在 <code>App.java</code> 里写一个
+        <code>record Point(int x, int y) {}</code>，再改成 <code>11</code>。观察报错信息 ——
+        体会一下这个属性到底在控制什么。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

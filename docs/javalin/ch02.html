@@ -1,0 +1,953 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 2 章 · 应用的基本结构 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="2">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 2 章</span>
+<h1>应用的基本结构</h1>
+<p class="lede">
+  这一章你会写出第一个真正能跑的 Javalin 应用，并且理解一个请求从网卡进来、到响应发回去，
+  中间到底经过了哪些地方。这是整本教程最重要的一章 —— 后面所有内容都是在这个循环上挂东西。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>会创建、配置、启动一个 Javalin 实例</li>
+    <li>理解“路由”和“处理器”，会写静态路由和带参数的动态路由</li>
+    <li>理解 Javalin 的 <code>Context</code> 为什么要显式传参，而 Flask 的 <code>request</code> 像全局变量</li>
+    <li>掌握请求生命周期的六个钩子：before、beforeMatched、endpoint、afterMatched、error、exception</li>
+    <li>会设置状态码、响应头、Cookie、重定向，会抛出标准 HTTP 异常</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="init">初始化：应用实例</h2>
+
+<p>
+  所有 Flask 应用都要先创建一个应用实例 <code>app = Flask(__name__)</code>，
+  Web 服务器把收到的请求都交给这个对象处理。Javalin 完全一样，只是创建方式不同：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask 这样写</div>
+    <div class="code" data-lang="python">
+<pre>
+from flask import Flask
+app = Flask(__name__)
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Javalin 这样写</div>
+    <div class="code" data-lang="java">
+<pre>
+import io.javalin.Javalin;
+
+var app = Javalin.create(config -&gt; {
+    // 所有配置和路由都写在这里
+});
+</pre>
+    </div>
+  </div>
+</div>
+
+<p>
+  <code>Javalin.create()</code> 接收一个 <strong>配置 lambda</strong>。
+  Flask 需要 <code>__name__</code> 来定位模板和静态文件的位置；Javalin 不需要，
+  因为它从 classpath 加载资源，而 classpath 已经由 Maven 确定了。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; Javalin 7 的一个重要变化</div>
+  <p>
+    <strong>路由必须在 <code>create()</code> 的配置块里注册</strong>，调用 <code>.start()</code> 之后不能再加路由。
+    你在网上搜到的 Javalin 6 及更早的教程写的是 <code>app.get("/", ...)</code>（在 start 之后），
+    那种写法在 Javalin 7 里会抛异常。
+  </p>
+  <div class="vs">
+    <div class="old">
+      <div class="h">Javalin 6（已不适用）</div>
+      <div class="code" data-lang="java">
+<pre>
+var app = Javalin.create().start(7070);
+app.get("/", ctx -&gt; ctx.result("Hi"));
+</pre>
+      </div>
+    </div>
+    <div class="new">
+      <div class="h">Javalin 7（本教程）</div>
+      <div class="code" data-lang="java">
+<pre>
+var app = Javalin.create(config -&gt; {
+    config.routes.get("/", ctx -&gt; ctx.result("Hi"));
+}).start(7070);
+</pre>
+      </div>
+    </div>
+  </div>
+  <p>
+    这个改动看起来只是挪了个位置，其实挺重要：它保证了“服务器一旦开始接受请求，路由表就是完整且不变的”。
+    第 7 章我们会看到，它还让“应用工厂”模式变得非常自然。
+  </p>
+</div>
+
+<h2 id="routes">路由与处理器</h2>
+
+<p>
+  浏览器把请求发给服务器，服务器交给 Javalin。Javalin 需要知道<strong>每个 URL 该跑哪段代码</strong>，
+  所以它维护了一张 URL &rarr; 代码的映射表。一条映射叫一个 <strong>路由（route）</strong>，
+  映射到的那段代码叫 <strong>处理器（handler）</strong>。
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+config.routes.get("/", ctx -&gt; ctx.html("&lt;h1&gt;Hello World!&lt;/h1&gt;"));
+</pre>
+</div>
+
+<p>这行代码干了三件事，和 Flask 的 <code>@app.route('/')</code> 装饰器一一对应：</p>
+
+<div class="tw">
+<table>
+<tr><th>部分</th><th>含义</th><th>Flask 里的对应物</th></tr>
+<tr><td><code>get</code></td><td>HTTP 方法。还有 <code>post</code>、<code>put</code>、<code>patch</code>、<code>delete</code>、<code>head</code>、<code>options</code></td><td><code>methods=['GET']</code></td></tr>
+<tr><td><code>"/"</code></td><td>路径</td><td>装饰器的第一个参数</td></tr>
+<tr><td><code>ctx -&gt; ...</code></td><td>处理器，一个 <code>Handler</code> 函数式接口的实现</td><td>视图函数</td></tr>
+</table>
+</div>
+
+<p>
+  <code>Handler</code> 接口的方法<strong>返回类型是 <code>void</code></strong> —— 这是和 Flask 最直观的差别。
+  Flask 的视图函数 <code>return</code> 什么，什么就是响应体；
+  Javalin 的处理器不返回任何东西，而是通过 <code>ctx</code> 上的方法<strong>设置</strong>响应：
+</p>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask：返回值就是响应</div>
+    <div class="code" data-lang="python">
+<pre>
+@app.route('/')
+def index():
+    return '&lt;h1&gt;Hello World!&lt;/h1&gt;'
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Javalin：在 ctx 上设置响应</div>
+    <div class="code" data-lang="java">
+<pre>
+config.routes.get("/", ctx -&gt; {
+    ctx.html("&lt;h1&gt;Hello World!&lt;/h1&gt;");
+});
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么 Java 不用装饰器</div>
+  <p>
+    Python 的装饰器是“把函数当参数传给另一个函数”的语法糖。Java 没有这个语法，
+    但 Java 8 之后有了 lambda，所以直接把处理器当参数传进去 ——
+    本质上和 <code>app.add_url_rule('/', 'index', index)</code>（原书提到的 Flask 非装饰器写法）是同一件事。
+  </p>
+</div>
+
+<h2 id="complete">一个完整的应用</h2>
+
+<p>把上一章的 <code>App.java</code> 改成这样：</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/App.java">
+<pre>
+package com.example.javalinky;
+
+import io.javalin.Javalin;
+
+public class App {
+    public static void main(String[] args) {
+        Javalin.create(config -&gt; {
+            config.routes.get("/", ctx -&gt; ctx.html("&lt;h1&gt;Hello World!&lt;/h1&gt;"));
+        }).start(7070);
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn -q compile exec:java
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+[main] INFO io.javalin.Javalin - Starting Javalin ...
+[main] INFO org.eclipse.jetty.server.Server - jetty-12.0.x
+[main] INFO io.javalin.Javalin - Listening on http://localhost:7070/
+[main] INFO io.javalin.Javalin - You are running Javalin 7.2.3 (released ...).
+[main] INFO io.javalin.Javalin - Javalin started in 213ms \o/
+</pre>
+</div>
+
+<p>
+  打开浏览器访问 <code>http://localhost:7070/</code>，你会看到 “Hello World!”。
+  访问任何别的路径会得到 404 —— Javalin 没有匹配的路由。
+  按 <kbd>Ctrl</kbd>+<kbd>C</kbd> 停止服务器。
+</p>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 2a</b>。</div>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 端口号与“为什么是 7070”</div>
+  <p>
+    Flask 开发服务器默认 5000，Javalin 文档习惯用 7070，都只是惯例。
+    <code>.start()</code> 不传参数时默认是 8080。生产环境一般从环境变量读端口：
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "7070"));
+app.start(port);
+</pre>
+  </div>
+  <p>也可以用 <code>.start("127.0.0.1", 7070)</code> 指定绑定的网卡。默认绑定全部网卡（相当于 Flask 的 <code>--host 0.0.0.0</code>），同一局域网内的其他机器可以访问。</p>
+</div>
+
+<h2 id="dynamic">动态路由</h2>
+
+<p>
+  很多 URL 带可变部分，比如 <code>/user/&lt;你的用户名&gt;</code>。Javalin 有两种语法：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+Javalin.create(config -&gt; {
+    config.routes.get("/", ctx -&gt; ctx.html("&lt;h1&gt;Hello World!&lt;/h1&gt;"));
+
+    // {name} 不允许包含斜杠
+    config.routes.get("/user/{name}", ctx -&gt; {
+        ctx.html("&lt;h1&gt;Hello, " + ctx.pathParam("name") + "!&lt;/h1&gt;");
+    });
+
+    // &lt;path&gt; 允许包含斜杠，适合文件路径这类场景
+    config.routes.get("/files/&lt;path&gt;", ctx -&gt; {
+        ctx.result("你要的文件是：" + ctx.pathParam("path"));
+    });
+}).start(7070);
+</pre>
+</div>
+
+<p>访问 <code>http://localhost:7070/user/Dave</code> 会看到 “Hello, Dave!”。</p>
+
+<div class="tw">
+<table>
+<tr><th>Javalin</th><th>匹配</th><th>Flask 的对应写法</th></tr>
+<tr><td><code>/user/{name}</code></td><td><code>/user/dave</code>，但不匹配 <code>/user/a/b</code></td><td><code>/user/&lt;name&gt;</code></td></tr>
+<tr><td><code>/files/&lt;path&gt;</code></td><td><code>/files/a/b/c.txt</code></td><td><code>/files/&lt;path:p&gt;</code></td></tr>
+<tr><td><code>/admin/*</code></td><td>任何以 <code>/admin/</code> 开头的路径，但<strong>取不到</strong>通配的值</td><td>—</td></tr>
+</table>
+</div>
+
+<h3>类型转换：路径参数不只是字符串</h3>
+
+<p>
+  Flask 可以写 <code>/user/&lt;int:id&gt;</code>，让框架帮你转成整数并拒绝非数字。
+  Javalin 的做法是 <code>pathParamAsClass</code>，它返回一个 <strong><code>Validator</code></strong>：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+config.routes.get("/post/{id}", ctx -&gt; {
+    // 转不成 int 时，Javalin 自动返回 400 Bad Request + JSON 错误说明
+    int id = ctx.pathParamAsClass("id", Integer.class).get();
+    ctx.result("文章 #" + id);
+});
+
+// 还可以附加检查
+config.routes.get("/page/{n}", ctx -&gt; {
+    int n = ctx.pathParamAsClass("n", Integer.class)
+               .check(v -&gt; v &gt; 0, "页码必须是正整数")
+               .get();
+    ctx.result("第 " + n + " 页");
+});
+</pre>
+</div>
+
+<p>
+  <code>Validator</code> 是 Javalin 里很核心的一个小工具，第 4 章处理表单、第 14 章处理 JSON 时还会大量用到。
+</p>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 2b</b>。</div>
+</div>
+
+<h2 id="debug">“调试模式”：Javalin 的等价物</h2>
+
+<p>
+  Flask 的 <code>FLASK_DEBUG=1</code> 打开两个东西：<strong>自动重载</strong>和<strong>网页版交互式调试器</strong>。
+  Javalin 的情况不一样，值得分开说：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>Flask 调试模式提供的</th><th>Javalin 的对应</th></tr>
+<tr><td>改代码自动重启</td><td>没有内置。用 IDE 的热交换，或者接受“重启只要 0.3 秒”（见第 1 章）</td></tr>
+<tr><td>浏览器里的交互式堆栈</td><td>没有，也不该有。异常堆栈打到控制台日志；IDE 的断点调试比网页调试器强得多</td></tr>
+<tr><td>—</td><td><strong>开发日志</strong>：把每个请求的完整头、体、耗时打到控制台</td></tr>
+<tr><td>—</td><td><strong>路由总览</strong>：一个页面列出所有已注册的路由</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="java">
+<pre>
+Javalin.create(config -&gt; {
+    // 开发期神器：打印每个请求/响应的全部细节
+    config.bundledPlugins.enableDevLogging();
+
+    // 访问 /routes 可以看到所有路由的表格
+    config.bundledPlugins.enableRouteOverview("/routes");
+
+    config.routes.get("/", ctx -&gt; ctx.html("&lt;h1&gt;Hello World!&lt;/h1&gt;"));
+}).start(7070);
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 这两个都只能在开发环境开</div>
+  <p>
+    <code>enableDevLogging()</code> 会把请求体和响应体（可能包含密码、令牌）整段打进日志；
+    <code>enableRouteOverview()</code> 把你的全部 API 结构公开出去。
+    第 7 章我们会用配置开关把它们关在开发环境里。
+  </p>
+</div>
+
+<h2 id="cli">命令行参数</h2>
+
+<p>
+  原书这一节讲 <code>flask run --host --port</code> 这些选项。
+  Java 没有一个“框架自带的 CLI”，启动参数就是 <code>main(String[] args)</code> 和环境变量。
+  这其实更简单，也更容易在容器里配置：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+public static void main(String[] args) {
+    String host = System.getenv().getOrDefault("HOST", "0.0.0.0");
+    int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "7070"));
+
+    Javalin.create(config -&gt; { /* ... */ }).start(host, port);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+# 开发时临时换端口
+PORT=9000 mvn -q compile exec:java
+
+# 打包之后（第 17 章）
+PORT=9000 java -jar target/javalinky.jar
+</pre>
+</div>
+
+<p>
+  至于 <code>flask shell</code>（在应用上下文里开一个 Python 交互式会话）——
+  Java 也有对应的东西，叫 <strong>JShell</strong>，我们在第 5 章操作数据库时会用到。
+</p>
+
+<h2 id="cycle">请求-响应循环</h2>
+
+<p>现在来看最关键的部分：一个请求进来，到底发生了什么。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 420" role="img" aria-label="Javalin 的请求-响应完整流程">
+  <!-- client -->
+  <rect class="bx-b" x="20" y="20" width="120" height="48" rx="9"/>
+  <text class="ttl on-b" x="80" y="42" text-anchor="middle">浏览器</text>
+  <text class="sm" x="80" y="59" text-anchor="middle">GET /user/dave</text>
+
+  <!-- jetty -->
+  <rect class="bx" x="200" y="20" width="200" height="48" rx="9"/>
+  <text class="ttl" x="300" y="41" text-anchor="middle">Jetty 12（内嵌）</text>
+  <text class="sm" x="300" y="58" text-anchor="middle">解析 HTTP · 从线程池取一个线程</text>
+
+  <!-- servlet -->
+  <rect class="bx" x="460" y="20" width="280" height="48" rx="9"/>
+  <text class="ttl" x="600" y="41" text-anchor="middle">JavalinServlet</text>
+  <text class="sm" x="600" y="58" text-anchor="middle">创建一个 Context 对象包住 req/res</text>
+
+  <path class="ln-b" d="M142 44 H198" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M402 44 H458" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M600 70 V96" marker-end="url(#ar-b)"/>
+
+  <!-- pipeline -->
+  <rect class="bx-d" x="40" y="96" width="700" height="226" rx="12"/>
+  <text class="sm" x="56" y="116">处理管线（都拿到同一个 Context 实例）</text>
+
+  <rect class="bx-g" x="70" y="128" width="640" height="34" rx="7"/>
+  <text class="lbl on-g" x="86" y="150">① before　每个请求都跑，包括静态文件和 404</text>
+
+  <rect class="bx-g" x="70" y="170" width="640" height="34" rx="7"/>
+  <text class="lbl on-g" x="86" y="192">② beforeMatched　只有找到匹配路由才跑（认证、权限放这里）</text>
+
+  <rect class="bx-a" x="70" y="212" width="640" height="38" rx="7"/>
+  <text class="ttl on-a" x="86" y="236">③ 路由处理器　ctx -&gt; { ... }　&#8592; 你的业务代码在这一层</text>
+
+  <rect class="bx-g" x="70" y="258" width="310" height="34" rx="7"/>
+  <text class="lbl on-g" x="86" y="280">④ afterMatched</text>
+
+  <rect class="bx-r" x="396" y="258" width="314" height="34" rx="7"/>
+  <text class="lbl on-r" x="412" y="280">④' exception / error 映射（出错时）</text>
+
+  <rect class="bx-g" x="70" y="298" width="640" height="18" rx="5"/>
+  <text class="sm on-g" x="86" y="311">⑤ after　无论成功还是抛异常都会跑（相当于 teardown_request）</text>
+
+  <path class="ln" d="M390 162 V168"/>
+  <path class="ln" d="M390 204 V210"/>
+  <path class="ln" d="M390 250 V256"/>
+  <path class="ln" d="M390 292 V296"/>
+
+  <!-- response -->
+  <rect class="bx-g" x="200" y="350" width="360" height="48" rx="9"/>
+  <text class="ttl on-g" x="380" y="371" text-anchor="middle">Context 里积累的状态码 / 头 / 响应体</text>
+  <text class="sm" x="380" y="388" text-anchor="middle">由 Jetty 序列化成 HTTP 响应写回浏览器</text>
+  <path class="ln-g" d="M380 324 V346" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M198 374 H120 V72" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 2-1　一个请求的完整旅程</figcaption>
+</figure>
+
+<h3>线程模型：一个请求一个线程</h3>
+
+<p>
+  Jetty 维护一个线程池（默认 250 个线程）。每个进来的请求<strong>占用一个线程直到处理完</strong>。
+  这和 Flask 的默认模型类似（WSGI 服务器也是线程/进程池），但有两个实际后果你要记住：
+</p>
+
+<ul>
+  <li><strong>在处理器里阻塞是合法的。</strong>查数据库、发 HTTP 请求可以直接同步写，不需要 async/await。
+      这让 Java Web 代码读起来很顺。</li>
+  <li><strong>线程数是有限的。</strong>如果每个请求都阻塞 3 秒，250 个并发就打满了。
+      Java 21 的<strong>虚拟线程</strong>正是为了解决这个：线程变得极其廉价，阻塞不再是问题。
+      Javalin 一行配置就能开：</li>
+</ul>
+
+<div class="code" data-lang="java">
+<pre>
+Javalin.create(config -&gt; {
+    config.concurrency.useVirtualThreads = true;   // Java 21+
+    // ...
+});
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：虚拟线程为什么重要</div>
+  <p>
+    传统 Java 线程是操作系统线程的包装，每个要占约 1 MB 栈空间，创建开销大，所以必须池化。
+    虚拟线程由 JVM 自己调度，一个可以只占几百字节，创建上百万个都没问题。
+    当虚拟线程执行到一个阻塞操作（比如等数据库返回）时，JVM 会把它从底层的 OS 线程上<strong>卸下来</strong>，
+    让这个 OS 线程去跑别的虚拟线程。
+  </p>
+  <p>
+    结果就是：你照常写同步阻塞代码，却能拿到接近异步框架的并发能力。
+    这也是为什么本教程所有数据库代码都用最朴素的同步写法 —— 在 Java 21 上它已经够快了。
+  </p>
+</div>
+
+<h3>Context：Javalin 没有“上下文全局变量”</h3>
+
+<p>
+  这是 Flask 和 Javalin 在设计哲学上最大的一处分歧，值得单独讲。
+</p>
+
+<p>
+  原书第 2 章花了很长篇幅解释 Flask 的<strong>应用上下文</strong>和<strong>请求上下文</strong>：
+  为什么 <code>request</code> 看起来是全局变量却能在多线程下正确工作，
+  为什么在请求之外访问它会报 <code>working outside of request context</code>，
+  为什么往后台线程里传 <code>app</code> 还要手动 <code>with app.app_context()</code>（原书第 6 章发异步邮件时就踩了这个坑）。
+</p>
+
+<p>
+  Javalin 把这些问题从根上消掉了：<strong>没有全局变量，所有东西都从处理器的 <code>ctx</code> 参数上取。</strong>
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="Flask 的线程局部上下文与 Javalin 的显式 Context 参数对比">
+  <text class="ttl" x="20" y="20">Flask：线程局部存储 + 看似全局的代理对象</text>
+
+  <rect class="bx-d" x="20" y="32" width="330" height="200" rx="10"/>
+  <rect class="bx-p" x="38" y="46" width="294" height="30" rx="6"/>
+  <text class="mono on-p" x="185" y="66" text-anchor="middle">from flask import request, session, g</text>
+
+  <rect class="bx" x="38" y="86" width="140" height="60" rx="6"/>
+  <text class="sm" x="108" y="106" text-anchor="middle">线程 #1</text>
+  <text class="sm" x="108" y="123" text-anchor="middle">request &rarr; 请求 A</text>
+  <text class="sm" x="108" y="139" text-anchor="middle">session &rarr; 会话 A</text>
+
+  <rect class="bx" x="192" y="86" width="140" height="60" rx="6"/>
+  <text class="sm" x="262" y="106" text-anchor="middle">线程 #2</text>
+  <text class="sm" x="262" y="123" text-anchor="middle">request &rarr; 请求 B</text>
+  <text class="sm" x="262" y="139" text-anchor="middle">session &rarr; 会话 B</text>
+
+  <path class="ln-p" d="M108 78 V84" marker-end="url(#ar-p)"/>
+  <path class="ln-p" d="M262 78 V84" marker-end="url(#ar-p)"/>
+
+  <rect class="bx-r" x="38" y="158" width="294" height="60" rx="6"/>
+  <text class="sm on-r" x="185" y="178" text-anchor="middle">代价：新建一个线程 → 上下文丢失</text>
+  <text class="sm" x="185" y="195" text-anchor="middle">必须手动 with app.app_context():</text>
+  <text class="sm" x="185" y="211" text-anchor="middle">忘了就是 RuntimeError</text>
+
+  <text class="ttl" x="410" y="20">Javalin：Context 就是个普通参数</text>
+
+  <rect class="bx-d" x="410" y="32" width="330" height="200" rx="10"/>
+
+  <rect class="bx-a" x="428" y="46" width="294" height="52" rx="6"/>
+  <text class="mono on-a" x="575" y="68" text-anchor="middle">get("/x", ctx -&gt; { ... })</text>
+  <text class="sm" x="575" y="88" text-anchor="middle">ctx 由框架创建并直接传给你</text>
+
+  <rect class="bx" x="428" y="108" width="140" height="78" rx="6"/>
+  <text class="sm" x="498" y="128" text-anchor="middle">请求 A 的调用栈</text>
+  <text class="mono" x="498" y="146" text-anchor="middle">ctx₁</text>
+  <text class="sm" x="498" y="164" text-anchor="middle">ctx₁.queryParam()</text>
+  <text class="sm" x="498" y="180" text-anchor="middle">ctx₁.sessionAttribute()</text>
+
+  <rect class="bx" x="582" y="108" width="140" height="78" rx="6"/>
+  <text class="sm" x="652" y="128" text-anchor="middle">请求 B 的调用栈</text>
+  <text class="mono" x="652" y="146" text-anchor="middle">ctx₂</text>
+  <text class="sm" x="652" y="164" text-anchor="middle">两者互不可见</text>
+  <text class="sm" x="652" y="180" text-anchor="middle">因为是两个局部变量</text>
+
+  <rect class="bx-g" x="428" y="196" width="294" height="22" rx="6"/>
+  <text class="sm on-g" x="575" y="211" text-anchor="middle">代价：要传给别的方法时得写成参数（这是好事）</text>
+</svg>
+<figcaption>图 2-2　Flask 的隐式上下文 vs Javalin 的显式参数</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 这个差异会一路影响你的代码风格</div>
+  <p>
+    因为 <code>ctx</code> 必须显式传递，你会自然而然地<strong>不把它往深处传</strong>：
+    在处理器里把需要的数据从 <code>ctx</code> 取出来，调用一个只接收普通参数的方法去干活。
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+// 推荐：处理器只负责"取参数 → 调服务 → 设响应"
+config.routes.post("/posts", ctx -&gt; {
+    String body = ctx.formParam("body");
+    long userId = ctx.sessionAttribute("userId");
+    Post post = postService.publish(userId, body);   // 不传 ctx！
+    ctx.redirect("/post/" + post.getId());
+});
+</pre>
+  </div>
+  <p>
+    这样写出来的 <code>postService</code> 完全不知道 HTTP 的存在，于是能在单元测试里脱离 Web 环境直接测
+    （第 15 章原书也强调了同样的分层原则）。
+  </p>
+</div>
+
+<h2 id="request">读请求：Context 的请求方法</h2>
+
+<p>
+  原书用一张表列出了 Flask <code>request</code> 对象的常用属性。
+  下面是 Javalin <code>Context</code> 的对应清单（按读请求/写响应分开，这里先看读）：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>Context 方法</th><th>说明</th><th>Flask 的对应</th></tr>
+<tr><td><code>formParam("k")</code></td><td>表单字段</td><td><code>request.form['k']</code></td></tr>
+<tr><td><code>formParamMap()</code></td><td>全部表单字段</td><td><code>request.form</code></td></tr>
+<tr><td><code>queryParam("k")</code></td><td>查询字符串参数</td><td><code>request.args['k']</code></td></tr>
+<tr><td><code>queryParams("k")</code></td><td>同名参数的全部值（<code>?tag=a&amp;tag=b</code>）</td><td><code>request.args.getlist('k')</code></td></tr>
+<tr><td><code>pathParam("k")</code></td><td>路径参数</td><td>视图函数的参数</td></tr>
+<tr><td><code>cookie("k")</code> / <code>cookieMap()</code></td><td>请求 Cookie</td><td><code>request.cookies</code></td></tr>
+<tr><td><code>header("k")</code> / <code>headerMap()</code></td><td>请求头。可用常量 <code>Header.USER_AGENT</code></td><td><code>request.headers</code></td></tr>
+<tr><td><code>uploadedFile("k")</code> / <code>uploadedFiles()</code></td><td>上传的文件</td><td><code>request.files</code></td></tr>
+<tr><td><code>body()</code> / <code>bodyAsBytes()</code></td><td>原始请求体</td><td><code>request.get_data()</code></td></tr>
+<tr><td><code>bodyAsClass(X.class)</code></td><td>把 JSON 请求体反序列化成对象</td><td><code>request.get_json()</code></td></tr>
+<tr><td><code>bodyValidator(X.class)</code></td><td>同上，但带校验（第 14 章）</td><td>—</td></tr>
+<tr><td><code>sessionAttribute("k")</code></td><td>会话数据（第 4 章）</td><td><code>session['k']</code></td></tr>
+<tr><td><code>attribute("k", v)</code></td><td>本次请求内的临时存储，用于在钩子之间传数据</td><td><code>g.k</code></td></tr>
+<tr><td><code>method()</code> / <code>path()</code> / <code>url()</code> / <code>fullUrl()</code></td><td>请求的方法、路径、URL</td><td>同名属性</td></tr>
+<tr><td><code>scheme()</code> / <code>host()</code> / <code>port()</code> / <code>ip()</code></td><td>协议、主机、端口、客户端 IP</td><td><code>scheme</code> / <code>host</code> / <code>remote_addr</code></td></tr>
+<tr><td><code>endpoint().path</code></td><td>匹配到的<strong>路由模式</strong>，如 <code>/user/{name}</code></td><td><code>request.url_rule</code></td></tr>
+<tr><td><code>routeRoles()</code></td><td>这条路由声明了哪些权限角色（第 9 章）</td><td>—</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="java">
+<pre>
+config.routes.get("/whoami", ctx -&gt; {
+    ctx.html("&lt;p&gt;你的浏览器是 " + ctx.header("User-Agent") + "&lt;/p&gt;");
+});
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>attribute()</code> 就是 Flask 的 <code>g</code></div>
+  <p>
+    原书提到“在 <code>before_request</code> 里把当前用户塞进 <code>g.user</code>，视图函数再取出来”。
+    Javalin 完全一样，只是换个名字 —— 第 8 章我们会这样做：
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+config.routes.before(ctx -&gt; {
+    Long userId = ctx.sessionAttribute("userId");
+    ctx.attribute("currentUser", userId == null ? null : users.find(userId));
+});
+
+config.routes.get("/", ctx -&gt; {
+    User me = ctx.attribute("currentUser");   // 可能是 null
+    // ...
+});
+</pre>
+  </div>
+</div>
+
+<h2 id="hooks">请求钩子：洋葱模型</h2>
+
+<p>
+  有些代码需要在<strong>每个</strong>请求前后执行：记录日志、认证用户、打开数据库连接、
+  统计耗时。原书把这类功能叫“请求钩子”，Flask 提供四个装饰器。
+  Javalin 提供六个挂载点，而且顺序是严格确定的：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+Javalin.create(config -&gt; {
+    config.routes.before(ctx       -&gt; { /* ① 每个请求 */ });
+    config.routes.beforeMatched(ctx -&gt; { /* ② 只有匹配到路由时 */ });
+
+    config.routes.get("/", ctx     -&gt; { /* ③ 处理器 */ });
+
+    config.routes.afterMatched(ctx -&gt; { /* ④ 匹配过的请求结束后 */ });
+    config.routes.after(ctx        -&gt; { /* ⑤ 每个请求结束后，抛异常也跑 */ });
+
+    config.routes.error(404, ctx   -&gt; { /* 状态码是 404 时 */ });
+    config.routes.exception(Exception.class, (e, ctx) -&gt; { /* 抛异常时 */ });
+});
+</pre>
+</div>
+
+<div class="tw">
+<table>
+<tr><th>Javalin</th><th>何时执行</th><th>Flask 的对应</th></tr>
+<tr><td><code>before</code></td><td>每个请求之前，<strong>包括静态文件和最终 404 的请求</strong></td><td><code>before_request</code></td></tr>
+<tr><td><code>beforeMatched</code></td><td>确认有路由能处理之后、处理器之前</td><td>（Flask 没有，要自己判断 <code>request.endpoint</code>）</td></tr>
+<tr><td><code>afterMatched</code></td><td>处理器正常结束后</td><td><code>after_request</code></td></tr>
+<tr><td><code>after</code></td><td>每个请求最后，<strong>即使抛了异常</strong></td><td><code>teardown_request</code></td></tr>
+<tr><td><code>exception(Type, ...)</code></td><td>有处理器抛出该类型异常时</td><td><code>errorhandler(Exception)</code></td></tr>
+<tr><td><code>error(code, ...)</code></td><td>响应状态码等于 code 时（第 3 章做自定义错误页要用）</td><td><code>errorhandler(404)</code></td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="过滤器的洋葱模型：请求穿过一层层过滤器到达处理器再穿回来">
+  <text class="ttl" x="20" y="20">把过滤器想成包在处理器外面的一层层洋葱皮</text>
+
+  <!-- outer: after -->
+  <rect class="bx-g" x="60" y="34" width="640" height="236" rx="14"/>
+  <text class="lbl on-g" x="76" y="54">before　/　after　（每个请求，连静态文件和 404 都算）</text>
+
+  <!-- beforeMatched -->
+  <rect class="bx-b" x="110" y="68" width="540" height="168" rx="12"/>
+  <text class="lbl on-b" x="126" y="88">beforeMatched　/　afterMatched　（只有匹配到路由才跑）</text>
+
+  <!-- endpoint -->
+  <rect class="bx-a" x="170" y="104" width="420" height="96" rx="10"/>
+  <text class="ttl on-a" x="380" y="130" text-anchor="middle">你的处理器</text>
+  <text class="mono" x="380" y="154" text-anchor="middle">ctx -&gt; { ... }</text>
+  <text class="sm" x="380" y="180" text-anchor="middle">这里抛的异常会被外层的 exception 映射接住</text>
+
+  <!-- arrows in -->
+  <path class="ln-g" d="M20 100 H56" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="20" y="92">请求进</text>
+  <path class="ln-b" d="M80 124 H106" marker-end="url(#ar-b)"/>
+  <path class="ln-a" d="M136 152 H166" marker-end="url(#ar-a)"/>
+
+  <!-- arrows out -->
+  <path class="ln-a" d="M594 152 H624" marker-end="url(#ar-a)"/>
+  <path class="ln-b" d="M654 124 H680" marker-end="url(#ar-b)"/>
+  <path class="ln-g" d="M704 100 H740" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="700" y="92">响应出</text>
+
+  <text class="sm" x="126" y="216">一个请求"进去"时穿过 before 们，"出来"时穿过 after 们 —— 所以 after 看到的是已经成型的响应。</text>
+  <text class="sm" x="76" y="256">同类型的过滤器按<tspan class="on-a">注册顺序</tspan>执行。第 5、8、9 章会往这几层里分别塞进：事务、当前用户、权限检查。</text>
+
+  <rect class="bx-r" x="60" y="282" width="640" height="30" rx="8"/>
+  <text class="sm on-r" x="380" y="302" text-anchor="middle">注意 after 即使在抛了异常的情况下也会执行 —— 所以"一定要做的收尾工作"（关资源）放这里</text>
+</svg>
+<figcaption>图 2-3　过滤器的洋葱模型</figcaption>
+</figure>
+
+<p>还可以给钩子限定路径，只在某个前缀下生效 —— 这在做后台管理区的鉴权时很好用：</p>
+
+<div class="code" data-lang="java">
+<pre>
+config.routes.before("/admin/*", ctx -&gt; {
+    if (!isAdmin(ctx)) throw new ForbiddenResponse();
+});
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; <code>beforeMatched</code> 是 Javalin 的精髓之一</div>
+  <p>
+    为什么需要区分 <code>before</code> 和 <code>beforeMatched</code>？考虑“检查登录”这件事：
+  </p>
+  <ul>
+    <li>放在 <code>before</code> 里：favicon.ico、CSS 文件、任何打错的 URL 都会触发检查，浪费且容易误伤。</li>
+    <li>放在 <code>beforeMatched</code> 里：只有真的要进入某个业务处理器时才检查，
+        而且此时 <code>ctx.routeRoles()</code> 已经能告诉你“这条路由需要什么权限”。</li>
+  </ul>
+  <p>第 9 章整套权限系统就建立在这一点上。</p>
+</div>
+
+<h2 id="response">写响应</h2>
+
+<p>
+  Flask 视图函数可以返回字符串、<code>(body, status)</code> 元组、或者 <code>make_response()</code> 造的响应对象。
+  Javalin 统一通过 <code>ctx</code> 的方法设置，而且<strong>可以链式调用</strong>：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>Context 方法</th><th>说明</th></tr>
+<tr><td><code>result("文本")</code></td><td>设置响应体（纯文本）</td></tr>
+<tr><td><code>html("&lt;h1&gt;..&lt;/h1&gt;")</code></td><td>设置响应体并把 Content-Type 设为 <code>text/html</code></td></tr>
+<tr><td><code>json(obj)</code></td><td>序列化成 JSON 并设 Content-Type（第 14 章）</td></tr>
+<tr><td><code>render("page.jte", model)</code></td><td>渲染模板（第 3 章）</td></tr>
+<tr><td><code>status(201)</code></td><td>状态码。默认 200</td></tr>
+<tr><td><code>header("X-Foo", "bar")</code></td><td>响应头</td></tr>
+<tr><td><code>contentType("text/csv")</code></td><td>Content-Type</td></tr>
+<tr><td><code>cookie("name", "value", maxAge)</code></td><td>设置 Cookie</td></tr>
+<tr><td><code>removeCookie("name")</code></td><td>删除 Cookie</td></tr>
+<tr><td><code>redirect("/path")</code></td><td>重定向（默认 302，可传第二个参数指定状态码）</td></tr>
+</table>
+</div>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask</div>
+    <div class="code" data-lang="python">
+<pre>
+@app.route('/')
+def index():
+    return '&lt;h1&gt;Bad Request&lt;/h1&gt;', 400
+
+@app.route('/cookie')
+def cookie():
+    r = make_response('带 Cookie 的页面')
+    r.set_cookie('answer', '42')
+    return r
+
+@app.route('/go')
+def go():
+    return redirect('/')
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Javalin</div>
+    <div class="code" data-lang="java">
+<pre>
+config.routes.get("/", ctx -&gt;
+    ctx.status(400).html("&lt;h1&gt;Bad Request&lt;/h1&gt;"));
+
+config.routes.get("/cookie", ctx -&gt; {
+    ctx.cookie("answer", "42");
+    ctx.result("带 Cookie 的页面");
+});
+
+config.routes.get("/go", ctx -&gt; ctx.redirect("/"));
+</pre>
+    </div>
+  </div>
+</div>
+
+<h3>标准 HTTP 异常：比 <code>abort()</code> 更好用</h3>
+
+<p>
+  Flask 用 <code>abort(404)</code> 中断请求。Javalin 的做法是抛出一个异常，
+  它自带一组现成的类型，而且<strong>会根据客户端的 <code>Accept</code> 头自动决定返回 HTML 还是 JSON</strong>：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+import io.javalin.http.*;
+
+config.routes.get("/user/{name}", ctx -&gt; {
+    User user = users.findByUsername(ctx.pathParam("name"));
+    if (user == null) {
+        throw new NotFoundResponse("没有这个用户");
+    }
+    ctx.html("&lt;h1&gt;Hello, " + user.getUsername() + "&lt;/h1&gt;");
+});
+</pre>
+</div>
+
+<p>浏览器（<code>Accept: text/html</code>）收到的是纯文本 <code>没有这个用户</code>；而 API 客户端（<code>Accept: application/json</code>）收到的是：</p>
+
+<div class="code" data-lang="text">
+<pre>
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{
+  "title": "没有这个用户",
+  "status": 404,
+  "type": "https://javalin.io/documentation#notfoundresponse",
+  "details": []
+}
+</pre>
+</div>
+
+<p>常用的几个（都在 <code>io.javalin.http</code> 包里）：</p>
+
+<div class="tw">
+<table>
+<tr><th>异常类</th><th>状态码</th><th>什么时候用</th></tr>
+<tr><td><code>BadRequestResponse</code></td><td>400</td><td>客户端数据有问题</td></tr>
+<tr><td><code>UnauthorizedResponse</code></td><td>401</td><td>没登录 / 凭证无效</td></tr>
+<tr><td><code>ForbiddenResponse</code></td><td>403</td><td>登录了但权限不够（第 9 章）</td></tr>
+<tr><td><code>NotFoundResponse</code></td><td>404</td><td>资源不存在</td></tr>
+<tr><td><code>ConflictResponse</code></td><td>409</td><td>比如用户名已被占用</td></tr>
+<tr><td><code>InternalServerErrorResponse</code></td><td>500</td><td>服务端自己的问题</td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 异常不是“错误”，是一种控制流</div>
+  <p>
+    有些人觉得“用异常返回 404 很奇怪”。但注意 <code>abort()</code> 在 Flask 里<strong>也是靠抛异常实现的</strong>
+    （原书明确提到了这一点：“<code>abort()</code> 不会把控制权交回函数，因为它抛出了一个异常”）。
+    用异常的好处是：你在一个嵌套很深的方法里也能立刻终止请求，不用一层层 <code>return</code> 错误码。
+  </p>
+</div>
+
+<h2 id="plugins">Javalin 的“扩展”</h2>
+
+<p>
+  原书这一章最后一节讲 Flask 扩展。Javalin 的对应概念有两层：
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128230;</span><h4>卫星模块</h4>
+    <p>独立的 Maven 依赖，版本号和 Javalin 核心一致。例如 <code>javalin-rendering-jte</code>（第 3 章）、<code>javalin-micrometer</code>（第 16 章）。</p></div>
+  <div class="card"><span class="ic">&#128295;</span><h4>自带插件</h4>
+    <p>核心里就有，一行 <code>config.bundledPlugins.enableXxx()</code> 打开。CORS、开发日志、路由总览、HTTPS 重定向、全局响应头。</p></div>
+  <div class="card"><span class="ic">&#9999;</span><h4>自己写的插件</h4>
+    <p>实现 <code>Plugin</code> 接口，用 <code>config.registerPlugin(...)</code> 注册。本教程大部分“扩展”其实就是普通的 Java 类，不需要插件机制。</p></div>
+  <div class="card"><span class="ic">&#9749;</span><h4>任何 Java 库</h4>
+    <p>这才是重点：Javalin 不要求库“适配 Javalin”。Hibernate、Jackson、bcrypt 都是普通 Java 库，直接用。</p></div>
+</div>
+
+<p>
+  这一点比 Flask 还宽松：Flask 很多功能要用专门的 <code>Flask-XXX</code> 适配包
+  （Flask-SQLAlchemy、Flask-Mail、Flask-Login），而 Javalin 几乎不需要这一层 ——
+  因为没有“应用上下文”要适配。
+</p>
+
+<h2 id="recap">本章完整代码</h2>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/App.java">
+<pre>
+package com.example.javalinky;
+
+import io.javalin.Javalin;
+import io.javalin.http.NotFoundResponse;
+
+public class App {
+
+    public static void main(String[] args) {
+        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "7070"));
+
+        Javalin.create(config -&gt; {
+            // --- 开发期辅助（第 7 章会按环境开关） ---
+            config.bundledPlugins.enableDevLogging();
+            config.bundledPlugins.enableRouteOverview("/routes");
+
+            // --- 钩子 ---
+            config.routes.before(ctx -&gt;
+                ctx.attribute("startedAt", System.nanoTime()));
+
+            config.routes.after(ctx -&gt; {
+                long started = ctx.attribute("startedAt");
+                long ms = (System.nanoTime() - started) / 1_000_000;
+                ctx.header("X-Response-Time", ms + "ms");
+            });
+
+            // --- 路由 ---
+            config.routes.get("/", ctx -&gt; ctx.html("&lt;h1&gt;Hello World!&lt;/h1&gt;"));
+
+            config.routes.get("/user/{name}", ctx -&gt; {
+                String name = ctx.pathParam("name");
+                if (name.isBlank()) throw new NotFoundResponse();
+                ctx.html("&lt;h1&gt;Hello, " + name + "!&lt;/h1&gt;");
+            });
+
+            config.routes.get("/whoami", ctx -&gt;
+                ctx.html("&lt;p&gt;你的浏览器是 " + ctx.header("User-Agent") + "&lt;/p&gt;"));
+
+        }).start(port);
+    }
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 一个安全隐患，第 3 章就会修掉</div>
+  <p>
+    上面的 <code>"&lt;h1&gt;Hello, " + name + "!&lt;/h1&gt;"</code> 把用户输入直接拼进 HTML。
+    如果有人访问 <code>/user/&lt;script&gt;alert(1)&lt;/script&gt;</code>，脚本会在访客浏览器里执行 ——
+    这就是 <strong>XSS（跨站脚本）</strong>漏洞。
+  </p>
+  <p>
+    原书同样在这里埋了这个坑，并在第 3 章用模板引擎的自动转义解决。
+    我们下一章用 JTE 也会解决它，而且 JTE 的转义是<strong>编译期按 HTML 上下文</strong>决定的，比运行时转义更可靠。
+  </p>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>启动应用，访问 <code>http://localhost:7070/routes</code>，看看 Javalin 自己也注册了哪些路由。</li>
+    <li>加一个 <code>config.routes.post("/echo", ctx -&gt; ctx.result(ctx.body()))</code>，
+        然后用 <code>curl -X POST localhost:7070/echo -d 'hello'</code> 测试。
+        再试试 <code>curl localhost:7070/echo</code>（GET），观察返回 404 还是 405，
+        然后加上 <code>config.http.prefer405over404 = true</code> 再试一次。</li>
+    <li>在 <code>before</code> 里打印 <code>ctx.path()</code>，然后访问一个不存在的 URL。
+        确认 <code>before</code> 跑了而 <code>beforeMatched</code> 没跑（给 <code>beforeMatched</code> 也加个打印来验证）。</li>
+    <li>写一条路由 <code>/boom</code>，在里面 <code>throw new IllegalStateException("炸了")</code>。
+        观察默认响应和控制台日志。然后加上
+        <code>config.routes.exception(IllegalStateException.class, (e, ctx) -&gt; ctx.status(500).result("出错了：" + e.getMessage()))</code>，
+        再看变化。</li>
+    <li>用 <code>ctx.pathParamAsClass("id", Integer.class).get()</code> 写一条 <code>/post/{id}</code>，
+        然后访问 <code>/post/abc</code>，看看 Javalin 自动返回的 400 响应长什么样。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

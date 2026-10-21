@@ -1,0 +1,1119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 4 章 · Web 表单 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="4">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 4 章</span>
+<h1>Web 表单</h1>
+<p class="lede">
+  前三章的数据都是从服务器流向用户。这一章让数据反向流动：用户填表单，服务器接收、校验、保存。
+  听起来简单，但里面藏着四个绕不开的问题：怎么优雅地报校验错误、刷新页面为什么会重复提交、
+  怎么在两次请求之间记住东西、以及怎么防住 CSRF 攻击。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>会用 Javalin 的 <code>Validator</code> 读取并校验表单字段</li>
+    <li>会用 Jakarta Bean Validation 注解声明式地校验整个表单对象</li>
+    <li>写出一个可复用的表单字段模板片段（相当于 Flask-Bootstrap 的 <code>quick_form</code>）</li>
+    <li>理解并实现 Post/Redirect/Get 模式</li>
+    <li>配好服务端会话，理解它和 Flask 签名 Cookie 会话的区别</li>
+    <li>实现 Flash 一次性消息</li>
+    <li>理解 CSRF 攻击的原理，并亲手写一套防护</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="html">表单的两次请求</h2>
+
+<p>
+  一个表单从出现在屏幕上到数据进库，<strong>至少经过两次 HTTP 请求</strong>。
+  这是本章所有复杂性的根源，先把它看清楚：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="表单的 GET 渲染与 POST 提交两次请求">
+  <text class="ttl" x="20" y="22">① 用户打开页面</text>
+  <rect class="bx-b" x="20" y="34" width="120" height="44" rx="8"/>
+  <text class="mono on-b" x="80" y="53" text-anchor="middle">GET /login</text>
+  <text class="sm" x="80" y="69" text-anchor="middle">没有任何数据</text>
+
+  <path class="ln-b" d="M142 56 H246" marker-end="url(#ar-b)"/>
+  <rect class="bx" x="250" y="34" width="200" height="44" rx="8"/>
+  <text class="lbl" x="350" y="53" text-anchor="middle">渲染一个空表单</text>
+  <text class="sm" x="350" y="69" text-anchor="middle">顺便塞一个 CSRF 令牌</text>
+
+  <path class="ln-b" d="M452 56 H556" marker-end="url(#ar-b)"/>
+  <rect class="bx-b" x="560" y="34" width="180" height="44" rx="8"/>
+  <text class="lbl on-b" x="650" y="53" text-anchor="middle">浏览器显示表单</text>
+  <text class="sm" x="650" y="69" text-anchor="middle">用户开始填</text>
+
+  <text class="ttl" x="20" y="118">② 用户点“提交”</text>
+  <rect class="bx-a" x="20" y="130" width="120" height="58" rx="8"/>
+  <text class="mono on-a" x="80" y="150" text-anchor="middle">POST /login</text>
+  <text class="sm" x="80" y="166" text-anchor="middle">body 里带字段</text>
+  <text class="sm" x="80" y="181" text-anchor="middle">email=…&amp;password=…</text>
+
+  <path class="ln-a" d="M142 159 H246" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="250" y="130" width="200" height="58" rx="8"/>
+  <text class="lbl on-a" x="350" y="150" text-anchor="middle">校验 CSRF 令牌</text>
+  <text class="lbl on-a" x="350" y="167" text-anchor="middle">校验字段</text>
+  <text class="sm" x="350" y="183" text-anchor="middle">成功 → 处理业务</text>
+
+  <path class="ln-g" d="M452 146 H556" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="560" y="124" width="180" height="34" rx="8"/>
+  <text class="lbl on-g" x="650" y="146" text-anchor="middle">302 重定向（成功）</text>
+
+  <path class="ln-r" d="M452 176 H556" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="560" y="162" width="180" height="40" rx="8"/>
+  <text class="lbl on-r" x="650" y="180" text-anchor="middle">重新渲染表单（失败）</text>
+  <text class="sm" x="650" y="195" text-anchor="middle">保留用户输入 + 显示错误</text>
+
+  <rect class="bx-d" x="90" y="226" width="580" height="60" rx="10"/>
+  <text class="ttl" x="110" y="248">校验失败时的两个硬要求</text>
+  <text class="lbl" x="110" y="270">① 把用户已经填的内容回填（不能让人重新填一遍）　② 把错误显示在对应字段旁边</text>
+</svg>
+<figcaption>图 4-1　一次表单交互 = 两次请求</figcaption>
+</figure>
+
+<p>
+  原书用 Flask-WTF + WTForms 把这整套流程包了起来：一个 <code>FlaskForm</code> 子类同时负责
+  <strong>声明字段、校验、渲染 HTML、CSRF 防护</strong>四件事。
+  Java 没有一个这样的大一统方案 —— 我们要把这四件事分开做。
+  好消息是分开之后每一块都很简单，而且你能看清每一块在干什么。
+</p>
+
+<h2 id="read">读表单字段</h2>
+
+<p>最朴素的读法：</p>
+
+<div class="code" data-lang="java">
+<pre>
+config.routes.post("/login", ctx -&gt; {
+    String email = ctx.formParam("email");        // 没传时返回 null
+    String password = ctx.formParam("password");
+    boolean remember = ctx.formParam("remember") != null;   // 复选框：勾了才会提交
+});
+</pre>
+</div>
+
+<p>
+  要校验和类型转换，就用第 2 章见过的 <code>Validator</code>：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+// 转换 + 默认值
+int page = ctx.queryParamAsClass("page", Integer.class).getOrDefault(1);
+
+// 转换 + 自定义检查，失败自动返回 400
+int age = ctx.formParamAsClass("age", Integer.class)
+             .check(v -&gt; v &gt;= 0 &amp;&amp; v &lt; 150, "年龄必须在 0 到 150 之间")
+             .get();
+
+// 收集错误而不是抛异常
+var v = ctx.formParamAsClass("email", String.class)
+           .check(s -&gt; s.contains("@"), "邮箱格式不对");
+Map&lt;String, List&lt;ValidationError&lt;String&gt;&gt;&gt; errors = v.errors();
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>Validator</code> 适合什么、不适合什么</div>
+  <p>
+    <strong>适合</strong>：URL 查询参数、API 的单个字段 —— 校验失败直接返回 400 就够了。
+  </p>
+  <p>
+    <strong>不适合</strong>：网页表单。因为网页表单失败时不能只返回 400，
+    得<strong>把表单连同错误和用户已填的内容一起重新渲染</strong>。
+    所以下面我们换一套做法。
+  </p>
+</div>
+
+<h2 id="formobject">表单对象：WTForms 的对标</h2>
+
+<p>
+  Java 的标准做法是 <strong>Jakarta Bean Validation</strong>（原 JSR-380，参考实现是 Hibernate Validator）：
+  用注解在数据类上声明约束，然后让校验器一次性检查整个对象。
+  这和 WTForms 的 <code>validators=[DataRequired(), Length(1,64), Email()]</code> 几乎是一一对应的。
+</p>
+
+<div class="code" data-lang="xml" data-file="pom.xml（新增）">
+<pre>
+&lt;!-- Bean Validation 的参考实现 --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;org.hibernate.validator&lt;/groupId&gt;
+  &lt;artifactId&gt;hibernate-validator&lt;/artifactId&gt;
+  &lt;version&gt;9.0.1.Final&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;!-- 注解里 message 的表达式求值需要它 --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;org.glassfish.expressly&lt;/groupId&gt;
+  &lt;artifactId&gt;expressly&lt;/artifactId&gt;
+  &lt;version&gt;6.0.0&lt;/version&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<div class="vs">
+  <div class="old">
+    <div class="h">Flask-WTF / WTForms</div>
+    <div class="code" data-lang="python">
+<pre>
+class LoginForm(FlaskForm):
+    email = StringField('Email', validators=[
+        DataRequired(), Length(1, 64), Email()])
+    password = PasswordField('Password',
+        validators=[DataRequired()])
+    remember_me = BooleanField('Keep me logged in')
+    submit = SubmitField('Log In')
+</pre>
+    </div>
+  </div>
+  <div class="new">
+    <div class="h">Java record + Bean Validation</div>
+    <div class="code" data-lang="java">
+<pre>
+public record LoginForm(
+    @NotBlank(message = "请填写邮箱")
+    @Size(max = 64, message = "邮箱最长 64 个字符")
+    @Email(message = "邮箱格式不正确")
+    String email,
+
+    @NotBlank(message = "请填写密码")
+    String password,
+
+    boolean remember
+) {}
+</pre>
+    </div>
+  </div>
+</div>
+
+<p>注意 Java 版<strong>没有 label 和 submit 字段</strong>。原因是分工不同：</p>
+
+<div class="tw">
+<table>
+<tr><th>WTForms 的 Form 类负责</th><th>我们的做法</th></tr>
+<tr><td>声明字段和类型</td><td>record 的组件</td></tr>
+<tr><td>校验规则</td><td>Bean Validation 注解</td></tr>
+<tr><td>字段的显示名（label）</td><td>写在 JTE 模板里（表现逻辑该在模板）</td></tr>
+<tr><td>渲染成 HTML</td><td>JTE 模板片段</td></tr>
+<tr><td>提交按钮</td><td>模板里的 <code>&lt;button&gt;</code></td></tr>
+<tr><td>CSRF 令牌</td><td>统一的过滤器 + 模板片段（本章最后一节）</td></tr>
+</table>
+</div>
+
+<h3>常用约束注解</h3>
+
+<div class="tw">
+<table>
+<tr><th>注解</th><th>作用</th><th>WTForms 的对应</th></tr>
+<tr><td><code>@NotNull</code></td><td>不能为 null</td><td><code>InputRequired</code></td></tr>
+<tr><td><code>@NotBlank</code></td><td>字符串不能为 null / 空 / 全空白</td><td><code>DataRequired</code></td></tr>
+<tr><td><code>@NotEmpty</code></td><td>集合或字符串不能为空</td><td>—</td></tr>
+<tr><td><code>@Size(min=, max=)</code></td><td>长度范围</td><td><code>Length</code></td></tr>
+<tr><td><code>@Email</code></td><td>邮箱格式</td><td><code>Email</code></td></tr>
+<tr><td><code>@Pattern(regexp=)</code></td><td>正则匹配</td><td><code>Regexp</code></td></tr>
+<tr><td><code>@Min</code> / <code>@Max</code></td><td>数值范围</td><td><code>NumberRange</code></td></tr>
+<tr><td><code>@Positive</code> / <code>@PositiveOrZero</code></td><td>正数 / 非负数</td><td>—</td></tr>
+<tr><td><code>@Past</code> / <code>@Future</code></td><td>日期在过去 / 未来</td><td>—</td></tr>
+<tr><td><code>@AssertTrue</code></td><td>布尔值必须为 true（“我已阅读条款”）</td><td>—</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 跨字段校验（“两次密码必须一致”）</div>
+  <p>
+    WTForms 用 <code>EqualTo('password2')</code>。Bean Validation 的注解是单字段的，
+    跨字段校验最简单的办法是在 record 里加一个 <code>@AssertTrue</code> 的派生属性：
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+public record RegisterForm(
+    @NotBlank @Email String email,
+    @NotBlank @Pattern(regexp = "^[A-Za-z][A-Za-z0-9_.]*$",
+        message = "用户名只能包含字母、数字、点和下划线，且必须以字母开头")
+    String username,
+    @NotBlank @Size(min = 8, message = "密码至少 8 位") String password,
+    @NotBlank String password2
+) {
+    @AssertTrue(message = "两次输入的密码不一致")
+    public boolean isPasswordsMatch() {
+        return password != null &amp;&amp; password.equals(password2);
+    }
+}
+</pre>
+  </div>
+  <p>
+    校验器会把这个属性的错误挂在字段名 <code>passwordsMatch</code> 上。
+    至于“邮箱是否已被注册”这类<strong>需要查数据库</strong>的校验，不要写进注解 ——
+    放在处理器里，第 8 章会这么做。
+  </p>
+</div>
+
+<h3>把校验结果包装成一个好用的东西</h3>
+
+<p>
+  原书的 <code>form.validate_on_submit()</code> 返回一个布尔值，失败时 <code>form.errors</code> 里有错误。
+  我们做一个等价的小工具类：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Forms.java">
+<pre>
+package com.example.javalinky.web;
+
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
+import java.util.*;
+
+public final class Forms {
+
+    // Validator 是线程安全的，创建一次全局复用（创建开销不小）
+    private static final Validator VALIDATOR =
+        Validation.buildDefaultValidatorFactory().getValidator();
+
+    /**
+     * 校验一个表单对象。
+     * @return 字段名 → 该字段的全部错误信息。没有错误时返回空 Map。
+     */
+    public static &lt;T&gt; Map&lt;String, List&lt;String&gt;&gt; validate(T form) {
+        Map&lt;String, List&lt;String&gt;&gt; errors = new LinkedHashMap&lt;&gt;();
+        for (ConstraintViolation&lt;T&gt; v : VALIDATOR.validate(form)) {
+            String field = v.getPropertyPath().toString();
+            errors.computeIfAbsent(field, k -&gt; new ArrayList&lt;&gt;()).add(v.getMessage());
+        }
+        return errors;
+    }
+
+    private Forms() {}
+}
+</pre>
+</div>
+
+<p>
+  再定义一个“表单 + 错误”的容器，传给模板用。
+  它承担了 WTForms 里“回填用户输入”和“显示错误”两个职责：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/FormView.java">
+<pre>
+package com.example.javalinky.web;
+
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 传给模板的表单状态。
+ * values：要回填到 input 里的值（键是字段名）
+ * errors：字段名 → 错误信息
+ */
+public record FormView(Map&lt;String, String&gt; values, Map&lt;String, List&lt;String&gt;&gt; errors) {
+
+    public static FormView empty() {
+        return new FormView(Map.of(), Map.of());
+    }
+
+    /** 模板里取回填值，没有就返回空串（不会是 null，模板省一层判断） */
+    public String value(String field) {
+        return values.getOrDefault(field, "");
+    }
+
+    public boolean hasError(String field) {
+        return errors.containsKey(field);
+    }
+
+    /** 该字段的第一条错误，没有则返回 null */
+    public String error(String field) {
+        List&lt;String&gt; list = errors.get(field);
+        return list == null || list.isEmpty() ? null : list.get(0);
+    }
+
+    public boolean ok() {
+        return errors.isEmpty();
+    }
+}
+</pre>
+</div>
+
+<h2 id="renderform">渲染表单：自己的 “quick_form”</h2>
+
+<p>
+  原书用 <code>{{ wtf.quick_form(form) }}</code> 一行渲染整个表单。
+  我们做一个 JTE 片段来渲染<strong>单个字段</strong> —— 稍微啰嗦一点，
+  但换来了对 HTML 的完全控制（实际项目里你总会需要调整某个字段的样式）：
+</p>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/tag/field.jte">
+<pre>
+@import com.example.javalinky.web.FormView
+
+@param FormView form
+@param String name
+@param String label
+@param String type = "text"
+@param String help = null
+@param boolean required = false
+@param String autocomplete = null
+
+&lt;div class="mb-3"&gt;
+  &lt;label class="form-label" for="f-${name}"&gt;
+    ${label}@if(required)&lt;span class="text-danger"&gt;&nbsp;*&lt;/span&gt;@endif
+  &lt;/label&gt;
+
+  &lt;input class="form-control ${form.hasError(name) ? "is-invalid" : ""}"
+         id="f-${name}"
+         name="${name}"
+         type="${type}"
+         value="${type.equals("password") ? "" : form.value(name)}"
+         @if(autocomplete != null)autocomplete="${autocomplete}"@endif
+         @if(required)required@endif&gt;
+
+  @if(form.hasError(name))
+    &lt;div class="invalid-feedback"&gt;${form.error(name)}&lt;/div&gt;
+  @elseif(help != null)
+    &lt;div class="form-text"&gt;${help}&lt;/div&gt;
+  @endif
+&lt;/div&gt;
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 密码框永远不要回填</div>
+  <p>
+    注意上面那行 <code>type.equals("password") ? "" : form.value(name)</code>。
+    把密码写回 HTML 会让它出现在页面源码、浏览器缓存、甚至某些代理日志里。
+    校验失败时让用户重新输密码是业界通行做法。
+  </p>
+</div>
+
+<p>再做一个复选框片段和一个“表单顶部总错误”的片段：</p>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/tag/checkbox.jte">
+<pre>
+@import com.example.javalinky.web.FormView
+
+@param FormView form
+@param String name
+@param String label
+
+&lt;div class="form-check mb-3"&gt;
+  &lt;input class="form-check-input" type="checkbox" value="1"
+         id="f-${name}" name="${name}"
+         @if("1".equals(form.value(name)))checked@endif&gt;
+  &lt;label class="form-check-label" for="f-${name}"&gt;${label}&lt;/label&gt;
+&lt;/div&gt;
+</pre>
+</div>
+
+<p>一个登录页就长这样：</p>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/auth/login.jte">
+<pre>
+@import com.example.javalinky.web.FormView
+@import com.example.javalinky.web.Layout
+@import com.example.javalinky.web.Routes
+
+@param Layout layout
+@param FormView form
+
+@template.layout.base(layout = layout, content = @`
+  &lt;div class="row justify-content-center"&gt;
+    &lt;div class="col-md-5"&gt;
+      &lt;h1 class="h3 mb-4"&gt;登录&lt;/h1&gt;
+
+      &lt;form method="post" action="${Routes.LOGIN}" novalidate&gt;
+        @template.tag.csrf(token = layout.csrfToken())
+
+        @template.tag.field(form = form, name = "email", label = "邮箱",
+                            type = "email", required = true,
+                            autocomplete = "username")
+        @template.tag.field(form = form, name = "password", label = "密码",
+                            type = "password", required = true,
+                            autocomplete = "current-password")
+        @template.tag.checkbox(form = form, name = "remember", label = "记住我")
+
+        &lt;button class="btn btn-primary" type="submit"&gt;登录&lt;/button&gt;
+      &lt;/form&gt;
+
+      &lt;p class="mt-3 text-secondary small"&gt;
+        还没有账号？&lt;a href="${Routes.REGISTER}"&gt;注册一个&lt;/a&gt;
+      &lt;/p&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+`)
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>novalidate</code> 是故意加的</div>
+  <p>
+    <code>&lt;form novalidate&gt;</code> 关掉浏览器自带的 HTML5 校验弹泡，
+    这样你能在开发时看到<strong>服务端</strong>的校验结果。
+    上线时可以去掉它 —— 浏览器校验是很好的即时反馈。
+    但无论如何，<strong>服务端校验不能省</strong>：
+    任何人都能绕过浏览器直接 <code>curl</code> 你的接口。
+  </p>
+</div>
+
+<h2 id="handle">处理器：一个路由，两种方法</h2>
+
+<p>
+  原书的视图函数同时处理 GET 和 POST（<code>methods=['GET','POST']</code>），
+  用 <code>form.validate_on_submit()</code> 区分。
+  Javalin 的路由是按方法注册的，所以写成两个处理器 —— 其实更清楚：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+// GET：渲染一个空表单
+config.routes.get(Routes.LOGIN, ctx -&gt;
+    View.render(ctx, "auth/login.jte", "登录", "form", FormView.empty()));
+
+// POST：接收、校验、处理
+config.routes.post(Routes.LOGIN, ctx -&gt; {
+    var form = new LoginForm(
+        ctx.formParam("email"),
+        ctx.formParam("password"),
+        ctx.formParam("remember") != null
+    );
+
+    var errors = Forms.validate(form);
+    if (!errors.isEmpty()) {
+        // 校验失败：回填 + 显示错误，重新渲染（HTTP 200，不是重定向）
+        var values = new HashMap&lt;String, String&gt;();
+        values.put("email", form.email() == null ? "" : form.email());
+        if (form.remember()) values.put("remember", "1");
+
+        View.render(ctx, "auth/login.jte", "登录",
+                    "form", new FormView(values, errors));
+        return;
+    }
+
+    // 校验通过：业务逻辑（第 8 章会真的验证密码）
+    ctx.sessionAttribute("flash", "登录成功！");
+    ctx.redirect(Routes.INDEX);     // &#8592; 关键：重定向，不是渲染
+});
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 校验失败时该返回什么状态码？</div>
+  <p>
+    严格说应该是 <code>422 Unprocessable Content</code>。但实践中返回 200 更常见，
+    因为我们返回的是一个<strong>完整可用的 HTML 页面</strong>，不是错误。
+    如果是 JSON API，就该用 400 / 422（第 14 章）。
+  </p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 4a</b>（表单处理）。</div>
+</div>
+
+<h2 id="prg">Post/Redirect/Get</h2>
+
+<p>
+  上面那行 <code>ctx.redirect(...)</code> 看着不起眼，它解决的是一个很烦人的真实问题。
+  试一下：如果成功之后直接渲染页面（而不是重定向），然后按浏览器的刷新按钮 ——
+  浏览器会问你“要重新提交表单吗？”，确认之后，<strong>数据被提交了两遍</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="直接渲染与 Post/Redirect/Get 的刷新行为对比">
+  <text class="ttl on-r" x="20" y="20">&#10007; POST 之后直接渲染</text>
+  <rect class="bx-d" x="20" y="30" width="330" height="128" rx="9"/>
+  <rect class="bx-a" x="38" y="44" width="294" height="26" rx="5"/>
+  <text class="mono on-a" x="185" y="62" text-anchor="middle">POST /posts （新建文章）</text>
+  <path class="ln" d="M185 72 V80"/>
+  <rect class="bx" x="38" y="82" width="294" height="26" rx="5"/>
+  <text class="sm" x="185" y="100" text-anchor="middle">200 OK + 渲染好的页面</text>
+  <path class="ln-r" d="M185 110 V118" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="38" y="120" width="294" height="30" rx="5"/>
+  <text class="sm on-r" x="185" y="139" text-anchor="middle">用户按 F5 → 浏览器重放上一个请求 = 再 POST 一次</text>
+
+  <rect class="bx-r" x="38" y="168" width="294" height="54" rx="7"/>
+  <text class="lbl on-r" x="185" y="190" text-anchor="middle">结果：数据库里出现两篇一样的文章</text>
+  <text class="sm" x="185" y="208" text-anchor="middle">（在支付场景里这叫重复扣款）</text>
+
+  <text class="ttl on-g" x="410" y="20">&#10003; Post/Redirect/Get</text>
+  <rect class="bx-d" x="410" y="30" width="330" height="192" rx="9"/>
+  <rect class="bx-a" x="428" y="44" width="294" height="26" rx="5"/>
+  <text class="mono on-a" x="575" y="62" text-anchor="middle">POST /posts （新建文章）</text>
+  <path class="ln" d="M575 72 V80"/>
+  <rect class="bx-g" x="428" y="82" width="294" height="30" rx="5"/>
+  <text class="sm on-g" x="575" y="101" text-anchor="middle">302 Found + Location: /</text>
+  <path class="ln-g" d="M575 114 V122" marker-end="url(#ar-g)"/>
+  <rect class="bx-b" x="428" y="124" width="294" height="26" rx="5"/>
+  <text class="mono on-b" x="575" y="142" text-anchor="middle">GET /　（浏览器自动发起）</text>
+  <path class="ln" d="M575 152 V160"/>
+  <rect class="bx" x="428" y="162" width="294" height="26" rx="5"/>
+  <text class="sm" x="575" y="180" text-anchor="middle">200 OK + 渲染好的页面</text>
+  <rect class="bx-g" x="428" y="192" width="294" height="22" rx="5"/>
+  <text class="sm on-g" x="575" y="207" text-anchor="middle">用户按 F5 → 重放的是 GET /，完全安全</text>
+
+  <rect class="bx-d" x="90" y="244" width="580" height="74" rx="10"/>
+  <text class="ttl" x="110" y="266">代价与补偿</text>
+  <text class="lbl" x="110" y="288">代价：多一次往返（几十毫秒），而且 POST 里算出来的东西（比如提示语）会丢。</text>
+  <text class="lbl" x="110" y="308">补偿：用<tspan class="on-a">会话</tspan>把提示语存一下，让重定向后的 GET 取出来显示 —— 这就是下面的 Flash 消息。</text>
+</svg>
+<figcaption>图 4-2　Post/Redirect/Get 模式</figcaption>
+</figure>
+
+<div class="box key">
+  <div class="t">&#9728; 一条可以当纪律执行的规则</div>
+  <p>
+    <strong>任何修改了服务器状态的 POST 处理器，结束时必须 <code>ctx.redirect(...)</code>，
+    不能 <code>ctx.render(...)</code>。</strong>
+    唯一的例外是校验失败 —— 那时什么都没改，重新渲染是安全的。
+  </p>
+</div>
+
+<h2 id="session">会话</h2>
+
+<p>
+  HTTP 是无状态的：服务器处理完一个请求就把一切忘了。
+  要“记住”用户登录了、购物车里有什么、刚才提交成功了，就需要<strong>会话</strong>。
+</p>
+
+<p>这里 Flask 和 Javalin 走的是两条完全不同的路，必须讲清楚：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="客户端会话与服务端会话的对比">
+  <text class="ttl" x="20" y="20">Flask：数据存在客户端（签名 Cookie）</text>
+  <rect class="bx-d" x="20" y="32" width="330" height="150" rx="9"/>
+  <rect class="bx-b" x="38" y="46" width="132" height="54" rx="6"/>
+  <text class="sm on-b" x="104" y="66" text-anchor="middle">浏览器 Cookie</text>
+  <text class="sm" x="104" y="82" text-anchor="middle">{"user":7}</text>
+  <text class="sm" x="104" y="95" text-anchor="middle">+ 签名</text>
+
+  <rect class="bx" x="200" y="46" width="132" height="54" rx="6"/>
+  <text class="sm" x="266" y="66" text-anchor="middle">服务器</text>
+  <text class="sm" x="266" y="83" text-anchor="middle">什么都不存</text>
+  <text class="sm" x="266" y="96" text-anchor="middle">只存签名密钥</text>
+
+  <path class="ln-b" d="M172 66 H196" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M196 86 H176" marker-end="url(#ar-b)"/>
+
+  <text class="sm on-g" x="38" y="122">&#10003; 服务器无状态，水平扩容天然可行</text>
+  <text class="sm on-r" x="38" y="140">&#10007; 容量只有 4 KB</text>
+  <text class="sm on-r" x="38" y="156">&#10007; 内容用户可读（只防篡改，不保密）</text>
+  <text class="sm on-r" x="38" y="172">&#10007; 无法“立即踢人下线”</text>
+
+  <text class="ttl" x="410" y="20">Javalin / Jetty：数据存在服务端</text>
+  <rect class="bx-d" x="410" y="32" width="330" height="150" rx="9"/>
+  <rect class="bx-b" x="428" y="46" width="132" height="54" rx="6"/>
+  <text class="sm on-b" x="494" y="66" text-anchor="middle">浏览器 Cookie</text>
+  <text class="sm" x="494" y="82" text-anchor="middle">JSESSIONID=</text>
+  <text class="sm" x="494" y="95" text-anchor="middle">a1b2c3…（只是钥匙）</text>
+
+  <rect class="bx-a" x="590" y="46" width="132" height="54" rx="6"/>
+  <text class="sm on-a" x="656" y="66" text-anchor="middle">服务器内存 / Redis</text>
+  <text class="sm" x="656" y="82" text-anchor="middle">a1b2c3 → {user:7,</text>
+  <text class="sm" x="656" y="95" text-anchor="middle">cart:[…], csrf:…}</text>
+
+  <path class="ln-a" d="M562 73 H586" marker-end="url(#ar-a)"/>
+
+  <text class="sm on-g" x="428" y="122">&#10003; 容量不受限，可以放对象</text>
+  <text class="sm on-g" x="428" y="140">&#10003; 内容用户看不到</text>
+  <text class="sm on-g" x="428" y="156">&#10003; 删掉服务端记录就立刻登出</text>
+  <text class="sm on-r" x="428" y="172">&#10007; 多实例部署要共享存储（第 17 章）</text>
+
+  <rect class="bx-d" x="60" y="206" width="640" height="100" rx="10"/>
+  <text class="ttl" x="80" y="228">两者都必须做到的三件事</text>
+  <text class="lbl" x="80" y="252">① Cookie 加 <tspan class="mono">HttpOnly</tspan> —— 禁止 JavaScript 读取，XSS 偷不到会话</text>
+  <text class="lbl" x="80" y="272">② Cookie 加 <tspan class="mono">SameSite=Lax</tspan> —— 跨站请求不带 Cookie，挡掉大部分 CSRF</text>
+  <text class="lbl" x="80" y="292">③ 生产环境加 <tspan class="mono">Secure</tspan> —— 只在 HTTPS 下发送（第 17 章）</text>
+</svg>
+<figcaption>图 4-3　客户端会话 vs 服务端会话</figcaption>
+</figure>
+
+<h3>用起来</h3>
+
+<p>Javalin 默认已经有一个内存会话，直接就能用：</p>
+
+<div class="code" data-lang="java">
+<pre>
+ctx.sessionAttribute("userId", 7L);          // 写
+Long userId = ctx.sessionAttribute("userId"); // 读（类型由左边推断，取不到是 null）
+ctx.sessionAttribute("userId", null);         // 删
+ctx.consumeSessionAttribute("flash");         // 读一次然后删掉（Flash 消息就用它）
+ctx.req().getSession().invalidate();          // 整个会话作废（登出时用）
+</pre>
+</div>
+
+<h3>调一下会话 Cookie</h3>
+
+<p>默认配置能跑，但 Cookie 名字和安全属性值得自己定：</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/Sessions.java">
+<pre>
+package com.example.javalinky;
+
+import org.eclipse.jetty.ee10.servlet.SessionHandler;
+import org.eclipse.jetty.http.HttpCookie;
+
+public final class Sessions {
+
+    public static SessionHandler handler(boolean httpsOnly) {
+        SessionHandler h = new SessionHandler();
+        h.setSessionCookie("JAVALINKY_SESSION");
+        h.setHttpOnly(true);                                 // JS 读不到
+        h.setSameSite(HttpCookie.SameSite.LAX);              // 挡掉跨站请求携带
+        h.setSecureRequestOnly(httpsOnly);                   // 生产环境 true
+        h.setMaxInactiveInterval(60 * 60 * 24 * 7);          // 7 天不活动就过期
+        return h;
+    }
+
+    private Sessions() {}
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="App.java">
+<pre>
+Javalin.create(config -&gt; {
+    config.jetty.modifyServletContextHandler(handler -&gt;
+        handler.setSessionHandler(Sessions.handler(false)));
+    // ...
+});
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 关于 <code>SessionHandler</code> 的 import</div>
+  <p>
+    Jetty 12 把 Servlet 相关的类放进了 <code>ee10</code> 模块，所以包名是
+    <code>org.eclipse.jetty.ee10.servlet.SessionHandler</code>。
+    如果你的 IDE 提示找不到，让它自动补全 import 就行 ——
+    这个类随 Javalin 的 Jetty 依赖一起进来，不用额外加依赖。
+  </p>
+  <p>
+    默认的会话数据存在<strong>内存</strong>里，所以重启应用会把所有人踢下线。
+    开发时无所谓；第 17 章我们会讲生产环境怎么把会话放到文件或数据库里（或者干脆不用会话，改用 JWT）。
+  </p>
+</div>
+
+<h2 id="flash">Flash 消息</h2>
+
+<p>
+  Flash 消息就是“显示一次就消失的提示”：操作成功、密码错误、权限不足。
+  它必须跨越一次重定向存活，所以要存在会话里 —— 而且<strong>读完就删</strong>。
+</p>
+
+<p>
+  Javalin 的 <code>consumeSessionAttribute()</code> 正是为此而生（读取并置空）。
+  做一个小类把它包起来，支持多条消息和不同级别：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Flash.java">
+<pre>
+package com.example.javalinky.web;
+
+import io.javalin.http.Context;
+import java.util.ArrayList;
+import java.util.List;
+
+/** 一条一次性提示消息。level 直接用 Bootstrap 的样式名。 */
+public record Flash(String level, String message) {
+
+    private static final String KEY = "flash";
+
+    public static void success(Context ctx, String msg) { add(ctx, "success", msg); }
+    public static void info(Context ctx, String msg)    { add(ctx, "info", msg); }
+    public static void warning(Context ctx, String msg) { add(ctx, "warning", msg); }
+    public static void danger(Context ctx, String msg)  { add(ctx, "danger", msg); }
+
+    private static void add(Context ctx, String level, String msg) {
+        List&lt;Flash&gt; list = ctx.sessionAttribute(KEY);
+        if (list == null) {
+            list = new ArrayList&lt;&gt;();
+            ctx.sessionAttribute(KEY, list);
+        }
+        list.add(new Flash(level, msg));
+    }
+
+    /** 取出全部消息并清空。相当于 Flask 的 get_flashed_messages()。 */
+    public static List&lt;Flash&gt; consume(Context ctx) {
+        List&lt;Flash&gt; list = ctx.consumeSessionAttribute(KEY);
+        return list == null ? List.of() : list;
+    }
+}
+</pre>
+</div>
+
+<p>
+  消息要在<strong>每一个</strong>页面上都能显示，所以让 <code>Layout</code> 带上它，
+  在布局模板里统一渲染 —— 和原书把 <code>get_flashed_messages()</code> 放在 <code>base.html</code> 里是同一个思路：
+</p>
+
+<div class="code" data-lang="java" data-file="web/Layout.java（更新）">
+<pre>
+package com.example.javalinky.web;
+
+import java.util.List;
+
+public record Layout(String title, String csrfToken, List&lt;Flash&gt; flashes) {}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/View.java（更新）">
+<pre>
+public static void render(Context ctx, String template, String title, Object... pairs) {
+    Map&lt;String, Object&gt; model = new HashMap&lt;&gt;();
+    model.put("layout", new Layout(
+        title,
+        ctx.attribute("csrfToken"),   // 由 CSRF 过滤器放进来，见下一节
+        Flash.consume(ctx)            // 注意：读取即清空
+    ));
+    for (int i = 0; i &lt; pairs.length; i += 2) {
+        model.put((String) pairs[i], pairs[i + 1]);
+    }
+    ctx.render(template, model);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/layout/base.jte（新增片段）">
+<pre>
+&lt;div class="container py-4"&gt;
+
+  @for(var flash : layout.flashes())
+    &lt;div class="alert alert-${flash.level()} alert-dismissible fade show" role="alert"&gt;
+      ${flash.message()}
+      &lt;button type="button" class="btn-close" data-bs-dismiss="alert"
+              aria-label="关闭"&gt;&lt;/button&gt;
+    &lt;/div&gt;
+  @endfor
+
+  ${content}
+&lt;/div&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java">
+<pre>
+// 用起来就一行
+Flash.success(ctx, "你的资料已更新。");
+ctx.redirect(Routes.INDEX);
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 一个容易踩的坑</div>
+  <p>
+    <code>Flash.consume()</code> 是<strong>破坏性读取</strong>。
+    如果某次请求渲染了页面但消息没被显示出来（比如模板里忘了那段 <code>@for</code>），
+    消息就永久丢了。所以：<strong>只在真正要渲染页面时调用 <code>View.render</code></strong>，
+    不要在 before 钩子之类的地方提前取。
+  </p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本节对应原书 <b>git checkout 4b / 4c</b>（重定向与会话、Flash 消息）。</div>
+</div>
+
+<h2 id="csrf">CSRF 防护</h2>
+
+<p>
+  原书说“Flask-WTF 需要 <code>SECRET_KEY</code>，因为它要给所有表单生成 CSRF 令牌”，
+  然后就没再深入。但这个攻击值得你真正理解一次 —— 因为 Javalin 不替你做，得你自己写。
+  （好消息：写完你就永远懂了。）
+</p>
+
+<h3>攻击是怎么发生的</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="CSRF 攻击流程与令牌防御">
+  <text class="ttl on-r" x="20" y="20">攻击流程</text>
+
+  <rect class="bx-b" x="20" y="34" width="150" height="56" rx="8"/>
+  <text class="lbl on-b" x="95" y="56" text-anchor="middle">① 你已登录</text>
+  <text class="sm" x="95" y="73" text-anchor="middle">bank.com 的会话</text>
+  <text class="sm" x="95" y="86" text-anchor="middle">Cookie 在浏览器里</text>
+
+  <path class="ln-r" d="M172 62 H218" marker-end="url(#ar-r)"/>
+
+  <rect class="bx-r" x="222" y="34" width="190" height="56" rx="8"/>
+  <text class="lbl on-r" x="317" y="52" text-anchor="middle">② 你访问 evil.com</text>
+  <text class="sm" x="317" y="69" text-anchor="middle">页面里藏了一个表单：</text>
+  <text class="mono" x="317" y="84" text-anchor="middle">action="bank.com/transfer"</text>
+
+  <path class="ln-r" d="M414 62 H460" marker-end="url(#ar-r)"/>
+
+  <rect class="bx-r" x="464" y="34" width="190" height="56" rx="8"/>
+  <text class="lbl on-r" x="559" y="52" text-anchor="middle">③ JS 自动提交</text>
+  <text class="sm" x="559" y="69" text-anchor="middle">浏览器按规则</text>
+  <text class="sm" x="559" y="84" text-anchor="middle">自动带上 bank.com 的 Cookie</text>
+
+  <path class="ln-r" d="M559 92 V118" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="330" y="120" width="420" height="40" rx="8"/>
+  <text class="lbl on-r" x="540" y="145" text-anchor="middle">④ 服务器看到合法 Cookie，以为是你本人 → 转账成功</text>
+
+  <text class="ttl on-g" x="20" y="194">令牌防御</text>
+  <rect class="bx-d" x="20" y="206" width="720" height="110" rx="10"/>
+
+  <rect class="bx-g" x="38" y="220" width="200" height="54" rx="7"/>
+  <text class="sm on-g" x="138" y="238" text-anchor="middle">渲染表单时</text>
+  <text class="sm" x="138" y="254" text-anchor="middle">往会话里放一个随机串</text>
+  <text class="sm" x="138" y="268" text-anchor="middle">同时写进隐藏字段</text>
+
+  <path class="ln-g" d="M240 247 H266" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-g" x="270" y="220" width="200" height="54" rx="7"/>
+  <text class="sm on-g" x="370" y="238" text-anchor="middle">收到 POST 时</text>
+  <text class="sm" x="370" y="254" text-anchor="middle">比较"表单里的串"</text>
+  <text class="sm" x="370" y="268" text-anchor="middle">和"会话里的串"</text>
+
+  <path class="ln-g" d="M472 247 H498" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-a" x="502" y="220" width="220" height="54" rx="7"/>
+  <text class="sm on-a" x="612" y="238" text-anchor="middle">为什么有效？</text>
+  <text class="sm" x="612" y="254" text-anchor="middle">evil.com 读不到你会话里</text>
+  <text class="sm" x="612" y="268" text-anchor="middle">的随机串（同源策略）</text>
+
+  <text class="sm" x="38" y="300">关键点：Cookie 会被<tspan class="on-r">自动</tspan>发送，但令牌需要<tspan class="on-g">主动读取并填入</tspan> —— 攻击者能做到前者，做不到后者。</text>
+</svg>
+<figcaption>图 4-4　CSRF 攻击与令牌防御</figcaption>
+</figure>
+
+<h3>实现</h3>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Csrf.java">
+<pre>
+package com.example.javalinky.web;
+
+import io.javalin.config.JavalinConfig;
+import io.javalin.http.Context;
+import io.javalin.http.ForbiddenResponse;
+
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.Base64;
+import java.util.Set;
+
+public final class Csrf {
+
+    private static final String SESSION_KEY = "csrfToken";
+    private static final String FORM_FIELD = "_csrf";
+    private static final String HEADER = "X-CSRF-Token";
+
+    /** 不会改变服务器状态的方法，不需要校验 */
+    private static final Set&lt;String&gt; SAFE = Set.of("GET", "HEAD", "OPTIONS", "TRACE");
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    /** 在 Javalin 配置里调一次，装上两个过滤器 */
+    public static void install(JavalinConfig config) {
+
+        // ① 每个请求：确保会话里有令牌，并暴露给模板
+        config.routes.before(ctx -&gt; ctx.attribute(SESSION_KEY, tokenFor(ctx)));
+
+        // ② 不安全的方法：校验令牌
+        config.routes.before(ctx -&gt; {
+            if (SAFE.contains(ctx.method().name())) return;
+
+            String sessionToken = ctx.sessionAttribute(SESSION_KEY);
+            String submitted = ctx.formParam(FORM_FIELD);
+            if (submitted == null) submitted = ctx.header(HEADER);   // AJAX 走请求头
+
+            if (sessionToken == null || submitted == null || !constantTimeEquals(sessionToken, submitted)) {
+                throw new ForbiddenResponse("CSRF 令牌缺失或不匹配，请刷新页面重试");
+            }
+        });
+    }
+
+    /** 取当前会话的令牌，没有就生成一个 */
+    private static String tokenFor(Context ctx) {
+        String token = ctx.sessionAttribute(SESSION_KEY);
+        if (token == null) {
+            byte[] bytes = new byte[32];
+            RANDOM.nextBytes(bytes);
+            token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+            ctx.sessionAttribute(SESSION_KEY, token);
+        }
+        return token;
+    }
+
+    /**
+     * 定长时间比较，避免"按字符逐个比较、不同就提前返回"泄露信息。
+     * 普通的 equals() 比较越早失败返回越快，攻击者能据此一个字符一个字符地猜。
+     */
+    private static boolean constantTimeEquals(String a, String b) {
+        return MessageDigest.isEqual(a.getBytes(), b.getBytes());
+    }
+
+    private Csrf() {}
+}
+</pre>
+</div>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/tag/csrf.jte">
+<pre>
+@param String token
+
+&lt;input type="hidden" name="_csrf" value="${token}"&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="App.java">
+<pre>
+Javalin.create(config -&gt; {
+    config.jetty.modifyServletContextHandler(h -&gt;
+        h.setSessionHandler(Sessions.handler(false)));
+
+    Csrf.install(config);      // &#8592; 一行搞定全站防护
+
+    // ... 其他配置和路由
+});
+</pre>
+</div>
+
+<p>
+  之后<strong>每个 <code>&lt;form method="post"&gt;</code> 里都必须有</strong>
+  <code>@template.tag.csrf(token = layout.csrfToken())</code>。
+  忘了就会得到 403 —— 这个“失败很明显”的设计是故意的，总比默默不设防好。
+</p>
+
+<div class="box tip">
+  <div class="t">&#128161; 两层防御，不是一层</div>
+  <ol>
+    <li><strong>SameSite=Lax Cookie</strong>（上一节配好了）：浏览器层面就不给跨站 POST 带 Cookie。
+        现代浏览器默认就是 Lax，这已经挡掉了绝大多数 CSRF。</li>
+    <li><strong>令牌校验</strong>（这一节）：防住老浏览器、以及 SameSite 不生效的边缘情况
+        （比如同站的子域名被攻破）。</li>
+  </ol>
+  <p>
+    安全上这叫纵深防御。另外注意：<strong>第 14 章的 REST API 不需要 CSRF 令牌</strong>，
+    因为它用 <code>Authorization</code> 头认证，而浏览器不会自动帮攻击者加这个头。
+    届时我们会把 <code>/api/*</code> 排除掉。
+  </p>
+</div>
+
+<h2 id="full">本章成果</h2>
+
+<p>把所有东西拼起来，<code>App.java</code> 现在是这样：</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/App.java">
+<pre>
+package com.example.javalinky;
+
+import com.example.javalinky.web.*;
+import io.javalin.Javalin;
+import io.javalin.http.staticfiles.Location;
+import io.javalin.rendering.template.JavalinJte;
+
+import java.util.HashMap;
+
+public class App {
+
+    public static void main(String[] args) {
+        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "7070"));
+
+        Javalin.create(config -&gt; {
+
+            config.fileRenderer(new JavalinJte(JavalinJte.directoryTemplateEngine()));
+
+            config.staticFiles.add(f -&gt; {
+                f.directory = "/public";
+                f.location = Location.CLASSPATH;
+                f.hostedPath = "/";
+            });
+
+            config.jetty.modifyServletContextHandler(h -&gt;
+                h.setSessionHandler(Sessions.handler(false)));
+
+            Csrf.install(config);
+
+            config.bundledPlugins.enableDevLogging();
+
+            config.routes.error(404, "html", ctx -&gt;
+                View.render(ctx, "error/404.jte", "页面不存在"));
+            config.routes.error(403, "html", ctx -&gt;
+                View.render(ctx, "error/403.jte", "没有权限"));
+            config.routes.error(500, "html", ctx -&gt;
+                View.render(ctx, "error/500.jte", "服务器错误"));
+
+            config.routes.get(Routes.INDEX, ctx -&gt;
+                View.render(ctx, "index.jte", "首页"));
+
+            // --- 登录表单（第 8 章会接上真正的认证） ---
+            config.routes.get(Routes.LOGIN, ctx -&gt;
+                View.render(ctx, "auth/login.jte", "登录", "form", FormView.empty()));
+
+            config.routes.post(Routes.LOGIN, ctx -&gt; {
+                var form = new LoginForm(
+                    ctx.formParam("email"),
+                    ctx.formParam("password"),
+                    ctx.formParam("remember") != null);
+
+                var errors = Forms.validate(form);
+                if (!errors.isEmpty()) {
+                    var values = new HashMap&lt;String, String&gt;();
+                    values.put("email", form.email() == null ? "" : form.email());
+                    if (form.remember()) values.put("remember", "1");
+                    View.render(ctx, "auth/login.jte", "登录",
+                                "form", new FormView(values, errors));
+                    return;
+                }
+
+                Flash.success(ctx, "表单校验通过！（真正的登录在第 8 章）");
+                ctx.redirect(Routes.INDEX);
+            });
+
+        }).start(port);
+    }
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 本章建立的四个可复用零件</div>
+  <div class="tw">
+  <table>
+  <tr><th>零件</th><th>职责</th><th>后面哪里会用到</th></tr>
+  <tr><td><code>Forms.validate()</code></td><td>校验表单对象</td><td>第 8、10、11、13 章的每个表单</td></tr>
+  <tr><td><code>FormView</code> + <code>tag/field.jte</code></td><td>回填输入、显示错误</td><td>同上</td></tr>
+  <tr><td><code>Flash</code></td><td>跨重定向的一次性提示</td><td>几乎每个 POST 处理器</td></tr>
+  <tr><td><code>Csrf</code></td><td>全站 CSRF 防护</td><td>装一次，一直生效</td></tr>
+  </table>
+  </div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>提交一个空的登录表单，确认两个字段下面都出现了红色错误，并且邮箱框里你刚才填的内容被保留了。</li>
+    <li>临时把 <code>login.jte</code> 里的 <code>@template.tag.csrf(...)</code> 注释掉，再提交表单。
+        确认收到 403 和你写的那句提示 —— 这验证了防护真的在工作。</li>
+    <li>写一个注册表单（用上面的 <code>RegisterForm</code>），包括用户名正则和“两次密码一致”的检查。
+        故意填不一致的密码，看看错误挂在哪个字段名上，并在模板里把它显示出来。</li>
+    <li>把成功之后的 <code>ctx.redirect(...)</code> 改成 <code>View.render(...)</code>，
+        提交一次之后按 F5，观察浏览器的重复提交警告。然后改回来。</li>
+    <li>在首页加一个“访问计数器”：用 <code>ctx.sessionAttribute("visits", ...)</code> 记录你刷新了几次。
+        然后清掉浏览器 Cookie，确认计数归零。</li>
+    <li>打开浏览器开发者工具的 Application → Cookies，找到 <code>JAVALINKY_SESSION</code>，
+        确认它的 HttpOnly 和 SameSite 属性符合你的配置。然后在控制台里执行
+        <code>document.cookie</code>，确认看不到它。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

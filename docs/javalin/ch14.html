@@ -1,0 +1,1028 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 14 章 · 应用编程接口 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="14">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 14 章</span>
+<h1>应用编程接口</h1>
+<p class="lede">
+  到现在 Javalinky 只能用浏览器访问。这一章给它加一套 REST API，
+  让手机应用、单页前端、或者别人的程序也能读写数据。
+  Javalin 在这件事上特别顺手 —— 它本来就是为写 API 而生的框架。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 REST 的六个约束，尤其是“无状态”对设计的影响</li>
+    <li>会设计资源 URL 和选对 HTTP 方法与状态码</li>
+    <li>理解为什么<strong>绝不能</strong>把实体类直接序列化成 JSON</li>
+    <li>实现 HTTP Basic + 令牌两种认证</li>
+    <li>给集合资源做分页，并用 Javalin 的内容协商统一错误格式</li>
+    <li>会用 HTTPie / curl 测接口</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">为什么要有 API</h2>
+
+<p>
+  原书这一章开头描述的趋势今天已经是常态：业务逻辑越来越多地跑在客户端，
+  服务端主要负责<strong>数据的存取</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="服务端渲染与 API 架构的对比">
+  <text class="ttl on-b" x="20" y="20">① 服务端渲染（前 13 章）</text>
+  <rect class="bx-d" x="20" y="30" width="330" height="106" rx="9"/>
+  <rect class="bx-b" x="40" y="46" width="90" height="74" rx="6"/>
+  <text class="sm on-b" x="85" y="68" text-anchor="middle">浏览器</text>
+  <text class="sm" x="85" y="88" text-anchor="middle">只负责显示</text>
+  <text class="sm" x="85" y="104" text-anchor="middle">HTML</text>
+
+  <path class="ln-b" d="M132 70 H168" marker-end="url(#ar-b)"/>
+  <text class="sm" x="150" y="62" text-anchor="middle">GET /</text>
+  <path class="ln-b" d="M168 98 H136" marker-end="url(#ar-b)"/>
+  <text class="sm" x="152" y="114" text-anchor="middle">HTML</text>
+
+  <rect class="bx-a" x="172" y="46" width="158" height="74" rx="6"/>
+  <text class="sm on-a" x="251" y="68" text-anchor="middle">Javalinky</text>
+  <text class="sm" x="251" y="88" text-anchor="middle">业务逻辑 + 渲染</text>
+  <text class="sm" x="251" y="104" text-anchor="middle">全在服务端</text>
+
+  <text class="ttl on-g" x="410" y="20">② API + 客户端渲染（本章）</text>
+  <rect class="bx-d" x="410" y="30" width="330" height="106" rx="9"/>
+  <rect class="bx-g" x="430" y="40" width="86" height="40" rx="5"/>
+  <text class="sm on-g" x="473" y="56" text-anchor="middle">React / Vue</text>
+  <text class="sm" x="473" y="71" text-anchor="middle">单页应用</text>
+  <rect class="bx-g" x="430" y="86" width="86" height="40" rx="5"/>
+  <text class="sm on-g" x="473" y="102" text-anchor="middle">手机 App</text>
+  <text class="sm" x="473" y="117" text-anchor="middle">iOS / 安卓</text>
+
+  <path class="ln-g" d="M518 60 H556" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M518 106 H556" marker-end="url(#ar-g)"/>
+  <text class="sm" x="537" y="88" text-anchor="middle">JSON</text>
+
+  <rect class="bx-a" x="560" y="46" width="160" height="74" rx="6"/>
+  <text class="sm on-a" x="640" y="68" text-anchor="middle">Javalinky API</text>
+  <text class="sm" x="640" y="88" text-anchor="middle">只提供数据</text>
+  <text class="sm" x="640" y="104" text-anchor="middle">不生成 HTML</text>
+
+  <rect class="bx" x="80" y="160" width="600" height="116" rx="10"/>
+  <text class="ttl" x="100" y="182">两者不是二选一</text>
+  <text class="lbl" x="100" y="206">本章的做法是<tspan class="on-a">在同一个应用里同时提供两套接口</tspan>：</text>
+  <text class="mono" x="100" y="230">/            → HTML 页面（前 13 章）</text>
+  <text class="mono" x="100" y="250">/api/v1/...  → JSON 接口（本章）</text>
+  <text class="sm" x="100" y="270">共用同一套实体、仓储和业务服务。这是中小型项目最省事的架构。</text>
+</svg>
+<figcaption>图 14-1　服务端渲染与 API 架构可以共存</figcaption>
+</figure>
+
+<h2 id="rest">REST 的六个约束</h2>
+
+<p>
+  REST 不是协议也不是标准，而是 Roy Fielding 在博士论文里提出的一种<strong>架构风格</strong>。
+  它由六个约束定义：
+</p>
+
+<div class="tw">
+<table>
+<tr><th>约束</th><th>含义</th><th>对我们的实际影响</th></tr>
+<tr><td><strong>客户端-服务器</strong></td><td>界面和数据存储分离</td><td>API 不返回 HTML</td></tr>
+<tr><td><strong>无状态</strong></td><td>每个请求必须自带全部信息，服务器不保存客户端状态</td><td><strong>API 不能用会话</strong>，要用令牌 —— 见下面</td></tr>
+<tr><td><strong>可缓存</strong></td><td>响应要标明自己能不能被缓存</td><td>用 <code>ETag</code> / <code>Cache-Control</code> 响应头</td></tr>
+<tr><td><strong>统一接口</strong></td><td>资源用 URL 标识，用标准 HTTP 方法操作</td><td>最复杂的一条，下面详细说</td></tr>
+<tr><td><strong>分层系统</strong></td><td>客户端和服务器之间可以插代理、缓存、网关</td><td>要正确处理 <code>X-Forwarded-*</code> 头（第 17 章）</td></tr>
+<tr><td><strong>按需代码</strong>（可选）</td><td>服务器可以发可执行代码给客户端</td><td>基本不用</td></tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; “无状态”是最重要也最容易违反的一条</div>
+  <p>
+    前 13 章我们一直用<strong>会话</strong>：浏览器带一个 Cookie，服务器内存里存着
+    <code>userId</code>。这是<strong>有状态</strong>的 —— 服务器记着你。
+  </p>
+  <p>它在浏览器场景下工作得很好，但对 API 不行，原因有三个：</p>
+  <ol>
+    <li>手机应用、脚本、第三方程序不方便管理 Cookie；</li>
+    <li>要扩容到多台服务器时，会话必须共享存储（否则第二个请求打到另一台机器就不认你了）；</li>
+    <li>REST 的缓存和分层约束都依赖"请求自包含"。</li>
+  </ol>
+  <p>
+    所以 API 用<strong>令牌</strong>：每个请求都在
+    <code>Authorization</code> 头里带上凭证，服务器不记任何东西。
+  </p>
+</div>
+
+<h2 id="urls">资源与 URL 设计</h2>
+
+<p>
+  REST 的核心概念是<strong>资源</strong>：应用领域里值得被单独引用的东西。
+  Javalinky 的资源有用户、文章、评论。每个资源有唯一的 URL，
+  操作用 HTTP 方法表达。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="资源 URL 与 HTTP 方法的矩阵">
+  <rect class="bx" x="20" y="24" width="720" height="186" rx="9"/>
+
+  <text class="sm" x="40" y="46">URL</text>
+  <text class="sm on-b" x="300" y="46">GET</text>
+  <text class="sm on-g" x="400" y="46">POST</text>
+  <text class="sm on-a" x="500" y="46">PUT / PATCH</text>
+  <text class="sm on-r" x="640" y="46">DELETE</text>
+  <line class="ln" x1="36" y1="54" x2="724" y2="54"/>
+
+  <text class="mono" x="40" y="78">/api/v1/posts</text>
+  <text class="sm on-b" x="300" y="78">列表 200</text>
+  <text class="sm on-g" x="400" y="78">新建 201</text>
+  <text class="sm" x="500" y="78">—</text>
+  <text class="sm" x="640" y="78">—</text>
+
+  <text class="mono" x="40" y="104">/api/v1/posts/{id}</text>
+  <text class="sm on-b" x="300" y="104">单个 200</text>
+  <text class="sm" x="400" y="104">—</text>
+  <text class="sm on-a" x="500" y="104">修改 200</text>
+  <text class="sm on-r" x="640" y="104">删除 204</text>
+
+  <text class="mono" x="40" y="130">/api/v1/posts/{id}/comments</text>
+  <text class="sm on-b" x="300" y="130">列表 200</text>
+  <text class="sm on-g" x="400" y="130">新建 201</text>
+  <text class="sm" x="500" y="130">—</text>
+  <text class="sm" x="640" y="130">—</text>
+
+  <text class="mono" x="40" y="156">/api/v1/users/{id}</text>
+  <text class="sm on-b" x="300" y="156">单个 200</text>
+  <text class="sm" x="400" y="156">—</text>
+  <text class="sm" x="500" y="156">—</text>
+  <text class="sm" x="640" y="156">—</text>
+
+  <text class="mono" x="40" y="182">/api/v1/users/{id}/timeline</text>
+  <text class="sm on-b" x="300" y="182">列表 200</text>
+  <text class="sm" x="400" y="182">—</text>
+  <text class="sm" x="500" y="182">—</text>
+  <text class="sm" x="640" y="182">—</text>
+
+  <text class="sm" x="40" y="204">空格表示"这个组合没有意义"——不是所有方法都要为每个资源实现</text>
+
+  <rect class="bx-a" x="20" y="226" width="350" height="96" rx="9"/>
+  <text class="ttl on-a" x="40" y="248">URL 设计的几条惯例</text>
+  <text class="sm" x="40" y="270">· 用<tspan class="on-a">名词复数</tspan>，不用动词：/posts 而不是 /getPosts</text>
+  <text class="sm" x="40" y="288">· 层级表达归属：/posts/5/comments</text>
+  <text class="sm" x="40" y="306">· 过滤、排序、分页用查询参数：?page=2&amp;sort=new</text>
+
+  <rect class="bx-g" x="390" y="226" width="350" height="96" rx="9"/>
+  <text class="ttl on-g" x="410" y="248">PUT 和 PATCH 的区别</text>
+  <text class="sm" x="410" y="270">· <tspan class="mono">PUT</tspan>：整体替换，请求体是资源的完整新状态</text>
+  <text class="sm" x="410" y="288">· <tspan class="mono">PATCH</tspan>：局部修改，请求体只含要改的字段</text>
+  <text class="sm" x="410" y="306">实践中 PATCH 更常用，因为客户端往往只想改一两个字段</text>
+</svg>
+<figcaption>图 14-2　资源 URL 与方法矩阵</figcaption>
+</figure>
+
+<h3>版本化</h3>
+
+<p>
+  原书强调了一个重要的现实：<strong>网页能随服务端一起更新，手机应用不能。</strong>
+  你发布了新版 API，用户手机上还装着三个月前的旧版本。
+  所以 API 的变更必须非常谨慎，惯例是把版本号放进 URL：
+</p>
+
+<div class="code" data-lang="text">
+<pre>
+/api/v1/posts     ← 老客户端继续用
+/api/v2/posts     ← 新客户端用，可以改 JSON 结构
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 什么算“破坏性变更”</div>
+  <div class="tw">
+  <table>
+  <tr><th>变更</th><th>破坏吗</th></tr>
+  <tr><td>新增一个响应字段</td><td><strong>不破坏</strong>（老客户端忽略它）</td></tr>
+  <tr><td>新增一个<em>可选</em>请求字段</td><td>不破坏</td></tr>
+  <tr><td>删除或重命名响应字段</td><td><strong>破坏</strong></td></tr>
+  <tr><td>改字段类型（数字 → 字符串）</td><td><strong>破坏</strong></td></tr>
+  <tr><td>新增一个<em>必填</em>请求字段</td><td><strong>破坏</strong></td></tr>
+  <tr><td>收紧校验规则</td><td><strong>破坏</strong>（老客户端的请求开始被拒）</td></tr>
+  </table>
+  </div>
+  <p>
+    所以尽量只做"新增"。一个实用技巧：<strong>响应里永远不要删字段，
+    只是把它标记为废弃并保持返回一个合理的值</strong>。
+  </p>
+</div>
+
+<h2 id="dto">序列化：绝不要直接序列化实体</h2>
+
+<p>
+  这是本章最重要的一条安全建议。假设偷懒写成这样：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+// ✗ 千万不要这么做
+config.routes.get("/api/v1/users/{id}", ctx -&gt; {
+    User user = users.findById(id).orElseThrow();
+    ctx.json(user);         // 把实体直接交给 Jackson
+});
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="直接序列化实体的四个危险">
+  <rect class="bx-r" x="20" y="24" width="720" height="166" rx="9"/>
+  <text class="ttl on-r" x="40" y="46">会发生四件坏事</text>
+
+  <text class="lbl on-r" x="40" y="72">① 泄露敏感字段</text>
+  <text class="sm" x="200" y="72">passwordHash、email、confirmed 全都进了 JSON。</text>
+  <text class="sm" x="200" y="88">加一个字段忘了处理 → 又泄露一个。<tspan class="on-r">默认全暴露是错的默认值。</tspan></text>
+
+  <text class="lbl on-r" x="40" y="114">② 触发懒加载爆炸</text>
+  <text class="sm" x="200" y="114">Jackson 会调用所有 getter，包括 getPosts()、getFollowers()。</text>
+  <text class="sm" x="200" y="130">于是序列化一个用户变成了把半个数据库查出来。</text>
+
+  <text class="lbl on-r" x="40" y="156">③ 无限递归</text>
+  <text class="sm" x="200" y="156">User → posts → 每个 Post 的 author → 又回到 User → …… 栈溢出。</text>
+
+  <text class="lbl on-r" x="40" y="182">④ 数据库结构变成公开契约</text>
+  <text class="sm" x="200" y="182">改个字段名就破坏了所有客户端。</text>
+
+  <path class="ln-g" d="M380 196 V218" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-g" x="20" y="220" width="720" height="100" rx="9"/>
+  <text class="ttl on-g" x="40" y="242">解法：手写一个 DTO record</text>
+  <text class="mono" x="40" y="266">public record UserDto(long id, String username, Instant memberSince, …) {</text>
+  <text class="mono" x="40" y="284">    public static UserDto from(User u) { return new UserDto(u.getId(), …); }</text>
+  <text class="mono" x="40" y="302">}</text>
+  <text class="sm on-g" x="440" y="302">多写十几行，换来四个问题全部消失</text>
+</svg>
+<figcaption>图 14-3　为什么必须用 DTO</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/api/dto/UserDto.java">
+<pre>
+package com.example.javalinky.api.dto;
+
+import com.example.javalinky.model.User;
+import java.time.Instant;
+
+/** 用户资源的公开表示。字段是手工挑的 —— 这就是重点。 */
+public record UserDto(
+    String url,
+    long id,
+    String username,
+    String name,
+    String location,
+    String aboutMe,
+    Instant memberSince,
+    Instant lastSeen,
+    String postsUrl,
+    String timelineUrl,
+    long postCount
+) {
+    public static UserDto from(User user, String baseUrl, long postCount) {
+        return new UserDto(
+            baseUrl + "/api/v1/users/" + user.getId(),
+            user.getId(),
+            user.getUsername(),
+            user.getName(),
+            user.getLocation(),
+            user.getAboutMe(),
+            user.getMemberSince(),
+            user.getLastSeen(),
+            baseUrl + "/api/v1/users/" + user.getId() + "/posts",
+            baseUrl + "/api/v1/users/" + user.getId() + "/timeline",
+            postCount);
+        // 注意这里没有 email、没有 passwordHash、没有 role、没有 confirmed
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/api/dto/PostDto.java">
+<pre>
+package com.example.javalinky.api.dto;
+
+import com.example.javalinky.model.Post;
+import java.time.Instant;
+
+public record PostDto(
+    String url,
+    long id,
+    String body,          // Markdown 原文，客户端可能想自己渲染
+    String bodyHtml,      // 已清洗的 HTML，方便直接显示
+    Instant timestamp,
+    String authorUrl,
+    String authorUsername,
+    String commentsUrl,
+    long commentCount
+) {
+    public static PostDto from(Post post, String baseUrl, long commentCount) {
+        String self = baseUrl + "/api/v1/posts/" + post.getId();
+        return new PostDto(
+            self,
+            post.getId(),
+            post.getBody(),
+            post.getBodyHtml(),
+            post.getTimestamp(),
+            baseUrl + "/api/v1/users/" + post.getAuthor().getId(),
+            post.getAuthor().getUsername(),
+            self + "/comments",
+            commentCount);
+    }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么响应里到处放完整 URL</div>
+  <p>
+    注意 <code>url</code>、<code>authorUrl</code>、<code>commentsUrl</code> 这些字段 ——
+    原书也是这么设计的。这叫 <strong>HATEOAS</strong>
+    （把超链接作为应用状态的引擎）。
+  </p>
+  <p>
+    好处是客户端<strong>不需要知道 URL 的拼法</strong>：
+    拿到一篇文章，想看评论就跟着 <code>commentsUrl</code> 走。
+    这样服务端以后改 URL 结构也不会破坏客户端 ——
+    就像你浏览网页时从不手打 URL，而是点链接。
+  </p>
+</div>
+
+<h3>配置 Jackson</h3>
+
+<div class="code" data-lang="xml" data-file="pom.xml（新增）">
+<pre>
+&lt;dependency&gt;
+  &lt;groupId&gt;com.fasterxml.jackson.core&lt;/groupId&gt;
+  &lt;artifactId&gt;jackson-databind&lt;/artifactId&gt;
+  &lt;version&gt;${jackson.version}&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;!-- 没有它，Instant 会被序列化成一个难看的对象 --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;com.fasterxml.jackson.datatype&lt;/groupId&gt;
+  &lt;artifactId&gt;jackson-datatype-jsr310&lt;/artifactId&gt;
+  &lt;version&gt;${jackson.version}&lt;/version&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="JavalinkyApp.java（新增配置）">
+<pre>
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import io.javalin.json.JavalinJackson;
+
+javalin.jsonMapper(new JavalinJackson().updateMapper(mapper -&gt; {
+    mapper.registerModule(new JavaTimeModule());
+    // Instant 序列化成 ISO-8601 字符串（"2026-10-21T08:30:00Z"）
+    // 而不是 epoch 秒的小数
+    mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+}));
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 时间格式：又回到第 3 章的话题</div>
+  <p>
+    API 返回时间一律用 <strong>ISO-8601 + UTC</strong>（<code>2026-10-21T08:30:00Z</code>）。
+    理由和第 3 章一样：服务端不知道客户端在哪个时区，让客户端自己转换。
+  </p>
+  <p>
+    <strong>不要</strong>返回 <code>"2026-10-21 16:30:00"</code> 这种没有时区信息的格式 ——
+    客户端无法判断它是哪个时区的，这是真实世界里 bug 的高发区。
+  </p>
+</div>
+
+<h2 id="auth">API 认证</h2>
+
+<p>原书的方案（我们沿用）是两段式：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 350" role="img" aria-label="API 的两段式认证流程">
+  <text class="ttl on-b" x="20" y="20">第一段：用邮箱密码换一个令牌（只做一次）</text>
+  <rect class="bx-d" x="20" y="30" width="720" height="110" rx="9"/>
+
+  <rect class="bx-b" x="40" y="46" width="200" height="76" rx="7"/>
+  <text class="sm on-b" x="140" y="66" text-anchor="middle">客户端</text>
+  <text class="mono" x="140" y="86" text-anchor="middle">POST /api/v1/tokens</text>
+  <text class="mono" x="140" y="104" text-anchor="middle">Authorization: Basic ...</text>
+  <text class="sm" x="140" y="118" text-anchor="middle">（邮箱:密码 的 Base64）</text>
+
+  <path class="ln-b" d="M242 84 H286" marker-end="url(#ar-b)"/>
+
+  <rect class="bx-a" x="290" y="46" width="200" height="76" rx="7"/>
+  <text class="sm on-a" x="390" y="66" text-anchor="middle">服务端</text>
+  <text class="sm" x="390" y="86" text-anchor="middle">bcrypt 校验密码</text>
+  <text class="sm" x="390" y="104" text-anchor="middle">签发一个 1 小时有效的</text>
+  <text class="sm" x="390" y="118" text-anchor="middle">JWT 令牌</text>
+
+  <path class="ln-g" d="M492 84 H536" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-g" x="540" y="46" width="180" height="76" rx="7"/>
+  <text class="mono" x="630" y="68" text-anchor="middle">200 OK</text>
+  <text class="mono" x="630" y="88" text-anchor="middle">{"token": "eyJ...",</text>
+  <text class="mono" x="630" y="106" text-anchor="middle"> "expiresIn": 3600}</text>
+
+  <text class="ttl on-a" x="20" y="168">第二段：之后每个请求都带这个令牌</text>
+  <rect class="bx-d" x="20" y="178" width="720" height="92" rx="9"/>
+
+  <rect class="bx-b" x="40" y="194" width="230" height="60" rx="7"/>
+  <text class="mono" x="155" y="216" text-anchor="middle">GET /api/v1/posts</text>
+  <text class="mono" x="155" y="236" text-anchor="middle">Authorization: Bearer eyJ...</text>
+
+  <path class="ln-b" d="M272 224 H316" marker-end="url(#ar-b)"/>
+
+  <rect class="bx-a" x="320" y="188" width="200" height="72" rx="7"/>
+  <text class="sm on-a" x="420" y="208" text-anchor="middle">before 过滤器</text>
+  <text class="sm" x="420" y="226" text-anchor="middle">验签 + 查过期</text>
+  <text class="sm" x="420" y="242" text-anchor="middle">查出 userId 对应的用户</text>
+  <text class="sm on-g" x="420" y="256" text-anchor="middle">不碰会话，完全无状态</text>
+
+  <path class="ln-g" d="M522 224 H566" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="570" y="194" width="150" height="60" rx="7"/>
+  <text class="sm on-g" x="645" y="218" text-anchor="middle">正常处理请求</text>
+  <text class="sm" x="645" y="236" text-anchor="middle">返回 JSON</text>
+
+  <rect class="bx-r" x="20" y="286" width="720" height="56" rx="9"/>
+  <text class="ttl on-r" x="40" y="308">为什么要两段？直接每次都发密码不行吗？</text>
+  <text class="sm" x="40" y="330">① 每次都要跑一遍 bcrypt（0.25 秒），太慢；② 密码在网络上出现的次数越少越好；③ 令牌有有效期，泄露的影响面小。</text>
+</svg>
+<figcaption>图 14-4　两段式令牌认证</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/api/ApiAuth.java">
+<pre>
+package com.example.javalinky.api;
+
+import com.example.javalinky.db.Db;
+import com.example.javalinky.db.UserRepository;
+import com.example.javalinky.model.User;
+import com.example.javalinky.service.AuthService;
+import com.example.javalinky.util.Tokens;
+import io.javalin.http.Context;
+import io.javalin.http.ForbiddenResponse;
+import io.javalin.http.UnauthorizedResponse;
+
+public class ApiAuth {
+
+    public static final String CTX_USER = "apiUser";
+    private static final String PURPOSE_API = "api";
+
+    private final AuthService auth;
+
+    public ApiAuth(AuthService auth) {
+        this.auth = auth;
+    }
+
+    /** 装在 /api/* 上的认证过滤器 */
+    public void authenticate(Context ctx) {
+        // 换令牌那个接口自己处理认证，这里跳过
+        if (ctx.path().endsWith("/tokens") &amp;&amp; ctx.method().name().equals("POST")) return;
+
+        String header = ctx.header("Authorization");
+        if (header == null || !header.startsWith("Bearer ")) {
+            throw new UnauthorizedResponse("需要在 Authorization 头里提供 Bearer 令牌");
+        }
+
+        var jwt = auth.tokens().verify(header.substring(7), PURPOSE_API)
+            .orElseThrow(() -&gt; new UnauthorizedResponse("令牌无效或已过期"));
+
+        User user = new UserRepository(Db.em(ctx))
+            .findById(Tokens.userIdOf(jwt))
+            .orElseThrow(() -&gt; new UnauthorizedResponse("令牌对应的用户不存在"));
+
+        if (!user.isConfirmed()) {
+            throw new ForbiddenResponse("账号尚未确认");
+        }
+
+        ctx.attribute(CTX_USER, user);
+    }
+
+    /** 当前 API 调用者 */
+    public static User user(Context ctx) {
+        User user = ctx.attribute(CTX_USER);
+        if (user == null) throw new UnauthorizedResponse();
+        return user;
+    }
+
+    /** POST /api/v1/tokens —— 用 HTTP Basic 换令牌 */
+    public void issueToken(Context ctx) {
+        var credentials = ctx.basicAuthCredentials();
+        if (credentials == null) {
+            throw new UnauthorizedResponse("需要 HTTP Basic 认证");
+        }
+
+        User user = new UserRepository(Db.em(ctx))
+            .findByEmail(credentials.getUsername().toLowerCase())
+            .filter(u -&gt; u.checkPassword(credentials.getPassword()))
+            .orElseThrow(() -&gt; new UnauthorizedResponse("邮箱或密码错误"));
+
+        if (!user.isConfirmed()) {
+            throw new ForbiddenResponse("账号尚未确认");
+        }
+
+        long ttlSeconds = 3600;
+        String token = auth.tokens().issue(PURPOSE_API, user.getId(),
+            java.time.Duration.ofSeconds(ttlSeconds));
+
+        ctx.json(new TokenResponse(token, "Bearer", ttlSeconds));
+    }
+
+    public record TokenResponse(String token, String tokenType, long expiresIn) {}
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; HTTP Basic 的凭证<strong>不是加密的</strong></div>
+  <p>
+    <code>Authorization: Basic am9obkBleGFtcGxlLmNvbTpjYXQ=</code> 里那串东西只是
+    Base64 编码，<strong>任何人都能一秒解开</strong>。它不提供任何保密性。
+  </p>
+  <p>
+    所以用 Basic 认证的前提是<strong>必须走 HTTPS</strong>（由 TLS 提供加密）。
+    第 17 章会配好这一点。在生产环境用 HTTP 跑 Basic 认证等于把密码明文广播出去。
+  </p>
+</div>
+
+<h2 id="errors">统一的错误格式</h2>
+
+<p>
+  原书为此写了一堆辅助函数（<code>bad_request()</code>、<code>unauthorized()</code>……），
+  还要在错误处理器里手动判断 <code>request.accept_mimetypes</code>。
+</p>
+
+<p>
+  Javalin 把这件事做掉了：第 2 章那些 <code>NotFoundResponse</code> 之类的异常
+  <strong>本来就会按 <code>Accept</code> 头返回 JSON 或文本</strong>。
+  所以我们只需要补两件事：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/api/ApiErrors.java">
+<pre>
+package com.example.javalinky.api;
+
+import io.javalin.config.JavalinConfig;
+import io.javalin.validation.ValidationException;
+
+public final class ApiErrors {
+
+    public static void install(JavalinConfig config) {
+
+        // ① 校验失败 → 400 + 字段级错误明细
+        config.routes.exception(ValidationException.class, (e, ctx) -&gt; {
+            ctx.status(400).json(new ErrorBody(
+                "validation_failed", "请求数据校验失败", e.getErrors()));
+        });
+
+        // ② 给 API 路径补上 JSON 格式的 404 / 405
+        //    （HTML 页面的错误页在 ErrorPages 里，用 "html" 内容类型区分）
+        config.routes.error(404, "json", ctx -&gt;
+            ctx.json(new ErrorBody("not_found", "资源不存在", null)));
+        config.routes.error(405, "json", ctx -&gt;
+            ctx.json(new ErrorBody("method_not_allowed", "这个资源不支持该方法", null)));
+    }
+
+    public record ErrorBody(String error, String message, Object details) {}
+
+    private ApiErrors() {}
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 内容协商：同一个异常，两种响应</div>
+  <p>
+    这是 Javalin 一个很优雅的设计。<code>config.routes.error(404, "html", ...)</code>
+    和 <code>error(404, "json", ...)</code> 可以同时存在，
+    Javalin 按请求的 <code>Accept</code> 头挑一个：
+  </p>
+  <div class="code" data-lang="bash">
+<pre>
+# 浏览器
+curl -H "Accept: text/html" localhost:7070/nope
+→ 你的 404 HTML 页面
+
+# API 客户端
+curl -H "Accept: application/json" localhost:7070/api/v1/posts/99999
+→ {"error":"not_found","message":"资源不存在","details":null}
+</pre>
+  </div>
+  <p>
+    于是<strong>一套业务代码同时服务两种客户端</strong>——
+    处理器里只需要 <code>throw new NotFoundResponse()</code>，不用管调用者是谁。
+  </p>
+</div>
+
+<h2 id="routes">API 路由模块</h2>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/routes/ApiRoutes.java">
+<pre>
+package com.example.javalinky.web.routes;
+
+import com.example.javalinky.api.*;
+import com.example.javalinky.api.dto.*;
+import com.example.javalinky.config.AppConfig;
+import com.example.javalinky.db.Page;
+import com.example.javalinky.model.*;
+import com.example.javalinky.web.Services;
+import io.javalin.config.JavalinConfig;
+import io.javalin.http.*;
+
+import static io.javalin.apibuilder.ApiBuilder.*;
+
+public class ApiRoutes implements RouteModule {
+
+    private final AppConfig cfg;
+    private final Services services;
+    private final ApiAuth apiAuth;
+
+    public ApiRoutes(AppConfig cfg, Services services) {
+        this.cfg = cfg;
+        this.services = services;
+        this.apiAuth = new ApiAuth(services.auth());
+    }
+
+    @Override
+    public void register(JavalinConfig config) {
+
+        // API 不用会话，所以也不需要 CSRF —— 在 Csrf 过滤器里排除 /api/*
+        config.routes.before("/api/*", apiAuth::authenticate);
+
+        ApiErrors.install(config);
+
+        config.routes.apiBuilder(() -&gt; path("/api/v1", () -&gt; {
+
+            post("/tokens", apiAuth::issueToken);
+
+            path("/posts", () -&gt; {
+                get("", this::listPosts);
+                post("", this::createPost);
+                path("/{id}", () -&gt; {
+                    get("", this::getPost);
+                    patch("", this::updatePost);
+                    get("/comments", this::listPostComments);
+                    post("/comments", this::createComment);
+                });
+            });
+
+            path("/users/{id}", () -&gt; {
+                get("", this::getUser);
+                get("/posts", this::listUserPosts);
+                get("/timeline", this::listUserTimeline);
+            });
+
+            get("/comments/{id}", this::getComment);
+        }));
+    }
+
+    // ---------------- 文章 ----------------
+
+    private void listPosts(Context ctx) {
+        int page = Page.clampPage(ctx.queryParamAsClass("page", Integer.class)
+                                     .allowNullable().get());
+        var source = services.postRepo(ctx).findAll(page, cfg.postsPerPage());
+        ctx.json(PagedResponse.of(source, p -&gt; toDto(ctx, p),
+                                  cfg.siteBaseUrl() + "/api/v1/posts"));
+    }
+
+    private void getPost(Context ctx) {
+        Post post = services.postRepo(ctx)
+            .findById(ctx.pathParamAsClass("id", Long.class).get())
+            .orElseThrow(NotFoundResponse::new);
+        ctx.json(toDto(ctx, post));
+    }
+
+    private void createPost(Context ctx) {
+        User author = ApiAuth.user(ctx);
+        if (!author.can(Permission.WRITE)) {
+            throw new ForbiddenResponse("没有发布文章的权限");
+        }
+
+        // bodyValidator：反序列化 + 校验，失败自动 400
+        var request = ctx.bodyValidator(PostRequest.class)
+            .check(r -&gt; r.body() != null &amp;&amp; !r.body().isBlank(), "body 不能为空")
+            .check(r -&gt; r.body().length() &lt;= 20000, "body 最长 20000 个字符")
+            .get();
+
+        Post post = services.postRepo(ctx).save(new Post(request.body(), author));
+        com.example.javalinky.db.Db.em(ctx).flush();   // 要拿到自增 id
+
+        // 201 Created 必须带 Location 头，指向新建的资源
+        ctx.status(HttpStatus.CREATED)
+           .header(Header.LOCATION, cfg.siteBaseUrl() + "/api/v1/posts/" + post.getId())
+           .json(toDto(ctx, post));
+    }
+
+    private void updatePost(Context ctx) {
+        User me = ApiAuth.user(ctx);
+        Post post = services.postRepo(ctx)
+            .findById(ctx.pathParamAsClass("id", Long.class).get())
+            .orElseThrow(NotFoundResponse::new);
+
+        // 和第 11 章一样：角色权限之外还要查归属
+        boolean isAuthor = me.getId().equals(post.getAuthor().getId());
+        if (!isAuthor &amp;&amp; !me.can(Permission.ADMIN)) {
+            throw new ForbiddenResponse("不能修改别人的文章");
+        }
+
+        var request = ctx.bodyValidator(PostRequest.class)
+            .check(r -&gt; r.body() != null &amp;&amp; !r.body().isBlank(), "body 不能为空")
+            .get();
+
+        post.setBody(request.body());
+        ctx.json(toDto(ctx, post));
+    }
+
+    // ---------------- 辅助 ----------------
+
+    private PostDto toDto(Context ctx, Post post) {
+        return PostDto.from(post, cfg.siteBaseUrl(),
+            services.commentRepo(ctx).countByPost(post));
+    }
+
+    /** 请求体的形状。注意它和 PostDto 是两个不同的类 —— 见下面说明 */
+    public record PostRequest(String body) {}
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 请求 DTO 和响应 DTO 要分开</div>
+  <p>
+    <code>PostRequest</code> 只有 <code>body</code> 一个字段，而 <code>PostDto</code> 有九个。
+    为什么不复用一个类？
+  </p>
+  <p>
+    因为<strong>客户端能提供的字段和服务端返回的字段本来就不一样</strong>。
+    <code>id</code>、<code>timestamp</code>、<code>authorUrl</code> 都是服务端决定的；
+    如果用同一个类接收请求，客户端就可能尝试传一个
+    <code>"id": 999</code> 或 <code>"authorUrl": "..."</code>——
+    这叫<strong>批量赋值漏洞</strong>（mass assignment）。
+  </p>
+  <p>
+    <strong>规则：请求 DTO 只声明客户端<em>应该</em>能设置的字段。</strong>
+    多出来的 JSON 字段会被 Jackson 忽略（或者配置成报错）。
+  </p>
+</div>
+
+<h2 id="paging">集合资源的分页</h2>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/api/dto/PagedResponse.java">
+<pre>
+package com.example.javalinky.api.dto;
+
+import com.example.javalinky.db.Page;
+import java.util.List;
+import java.util.function.Function;
+
+/** 集合资源的统一响应格式 */
+public record PagedResponse&lt;T&gt;(
+    List&lt;T&gt; items,
+    long total,
+    int page,
+    int pageSize,
+    int totalPages,
+    String prev,      // 没有上一页时是 null
+    String next
+) {
+    public static &lt;E, T&gt; PagedResponse&lt;T&gt; of(Page&lt;E&gt; source,
+                                             Function&lt;E, T&gt; mapper,
+                                             String baseUrl) {
+        return new PagedResponse&lt;&gt;(
+            source.items().stream().map(mapper).toList(),
+            source.total(),
+            source.page(),
+            source.size(),
+            source.totalPages(),
+            source.hasPrevious() ? baseUrl + "?page=" + source.previousPage() : null,
+            source.hasNext()     ? baseUrl + "?page=" + source.nextPage()     : null);
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="text">
+<pre>
+GET /api/v1/posts?page=2
+
+{
+  "items": [
+    {
+      "url": "http://localhost:7070/api/v1/posts/41",
+      "id": 41,
+      "body": "## 标题\n\n正文……",
+      "bodyHtml": "&lt;h2&gt;标题&lt;/h2&gt;\n&lt;p&gt;正文……&lt;/p&gt;",
+      "timestamp": "2026-10-20T14:02:11Z",
+      "authorUrl": "http://localhost:7070/api/v1/users/7",
+      "authorUsername": "john",
+      "commentsUrl": "http://localhost:7070/api/v1/posts/41/comments",
+      "commentCount": 3
+    }
+  ],
+  "total": 247,
+  "page": 2,
+  "pageSize": 20,
+  "totalPages": 13,
+  "prev": "http://localhost:7070/api/v1/posts?page=1",
+  "next": "http://localhost:7070/api/v1/posts?page=3"
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 另一种惯例：用 <code>Link</code> 响应头</div>
+  <p>
+    GitHub 等 API 把分页链接放在响应头里，响应体就是一个纯数组：
+  </p>
+  <div class="code" data-lang="text">
+<pre>
+Link: &lt;https://api.example.com/posts?page=3&gt;; rel="next",
+      &lt;https://api.example.com/posts?page=13&gt;; rel="last"
+X-Total-Count: 247
+</pre>
+  </div>
+  <p>
+    两种做法都很常见。放在响应体里对调用者更友好（不用解析头），
+    放在头里更"纯粹"（响应体就是资源本身）。挑一种，然后<strong>全站一致</strong>。
+  </p>
+</div>
+
+<h2 id="testing">用 HTTPie 测接口</h2>
+
+<p>
+  原书推荐 HTTPie，确实比 curl 好用得多（彩色高亮、自动 JSON、语法简洁）：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 安装
+pip install httpie      # 或 brew install httpie / apt install httpie
+
+# 1. 用邮箱密码换令牌
+http -a john@example.com:cat12345 POST :7070/api/v1/tokens
+
+# 输出：
+# {
+#     "token": "eyJhbGciOiJIUzI1NiJ9...",
+#     "tokenType": "Bearer",
+#     "expiresIn": 3600
+# }
+
+# 2. 存进 shell 变量
+TOKEN=$(http -a john@example.com:cat12345 POST :7070/api/v1/tokens | jq -r .token)
+
+# 3. 读列表
+http :7070/api/v1/posts "Authorization: Bearer $TOKEN"
+
+# 4. 发一篇文章（HTTPie 的 key=value 会自动变成 JSON）
+http POST :7070/api/v1/posts "Authorization: Bearer $TOKEN" \
+     body='这是通过 **API** 发的文章'
+
+# 5. 改一篇文章
+http PATCH :7070/api/v1/posts/42 "Authorization: Bearer $TOKEN" \
+     body='改过的内容'
+
+# 6. 看分页
+http :7070/api/v1/posts page==3 "Authorization: Bearer $TOKEN"
+</pre>
+</div>
+
+<p>对应的 curl 写法（没有 HTTPie 时用）：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+# 换令牌
+curl -u john@example.com:cat12345 -X POST http://localhost:7070/api/v1/tokens
+
+# 发文章
+curl -X POST http://localhost:7070/api/v1/posts \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"body": "通过 curl 发的文章"}'
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 别忘了 <code>Content-Type: application/json</code></div>
+  <p>
+    Javalin 7 有一个 <code>config.http.strictContentTypes</code> 选项。
+    打开它之后，如果请求想被解析成 JSON 却没带正确的 Content-Type，会直接报错 ——
+    这能帮你早点发现客户端的问题。HTTPie 会自动带上这个头，curl 需要手写。
+  </p>
+</div>
+
+<h2 id="openapi">加分项：自动生成 API 文档</h2>
+
+<p>
+  手写 API 文档一定会和代码脱节。Javalin 有一个 OpenAPI 插件，
+  能从注解生成 OpenAPI 规范，再配上 Swagger UI 就有了可交互的文档页：
+</p>
+
+<div class="code" data-lang="xml">
+<pre>
+&lt;dependency&gt;
+  &lt;groupId&gt;io.javalin.community.openapi&lt;/groupId&gt;
+  &lt;artifactId&gt;javalin-openapi-plugin&lt;/artifactId&gt;
+  &lt;version&gt;（和 Javalin 主版本对应的版本）&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;io.javalin.community.openapi&lt;/groupId&gt;
+  &lt;artifactId&gt;javalin-swagger-plugin&lt;/artifactId&gt;
+  &lt;version&gt;（同上）&lt;/version&gt;
+&lt;/dependency&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java">
+<pre>
+@OpenApi(
+    path = "/api/v1/posts",
+    methods = HttpMethod.GET,
+    summary = "列出全部文章",
+    queryParams = { @OpenApiParam(name = "page", type = Integer.class) },
+    responses = { @OpenApiResponse(status = "200",
+                                   content = @OpenApiContent(from = PagedResponse.class)) }
+)
+private void listPosts(Context ctx) { /* ... */ }
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 这个插件在独立仓库里</div>
+  <p>
+    OpenAPI 插件不在 Javalin 主仓库，版本号和发布节奏独立，
+    所以这里没写具体版本 —— 用之前请到
+    <code>github.com/javalin/javalin-openapi</code> 查当前兼容的版本。
+  </p>
+  <p>
+    另一种选择是<strong>手写 OpenAPI YAML 文件</strong>并把它当作"契约"：
+    先定契约，再写实现和客户端。
+    在多团队协作时这种"契约优先"的做法往往更好。
+  </p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本章对应原书 <b>git checkout 14a</b>（REST API 完整实现）。</div>
+</div>
+
+<h2 id="recap">和原书的差异小结</h2>
+
+<div class="tw">
+<table>
+<tr><th>原书的做法</th><th>本章的做法</th><th>为什么</th></tr>
+<tr><td>Flask-HTTPAuth 的 <code>@auth.login_required</code></td><td><code>before("/api/*", ...)</code> 过滤器</td><td>Javalin 的过滤器就够用，不需要扩展</td></tr>
+<tr><td>一个接口同时支持 Basic 和令牌（<code>verify_password</code> 里判断）</td><td>Basic 只用于换令牌，其他接口只认 Bearer</td><td>职责清楚；也避免每个请求都跑 bcrypt</td></tr>
+<tr><td><code>to_json()</code> / <code>from_json()</code> 写在模型类上</td><td>独立的 DTO record</td><td>模型不该知道 JSON 的存在；也防止字段泄露</td></tr>
+<tr><td>手写 <code>bad_request()</code> 等辅助函数</td><td>抛 Javalin 的标准异常</td><td>框架自带内容协商</td></tr>
+<tr><td>分页信息放在响应体里（<code>prev</code> / <code>next</code> / <code>count</code>）</td><td>一样</td><td>原书这个设计很好，直接沿用</td></tr>
+</table>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 HTTPie 走完整个流程：换令牌 → 列文章 → 发一篇 → 改它 → 看它的评论。
+        注意观察 201 响应的 <code>Location</code> 头。</li>
+    <li>不带 <code>Authorization</code> 头访问 <code>/api/v1/posts</code>，确认返回
+        401 和 JSON 格式的错误体。再带一个胡乱改过的令牌试一次。</li>
+    <li>故意违反第 ③ 节的建议：加一条路由直接 <code>ctx.json(user)</code>（传实体），
+        然后访问它。看看响应里出现了什么（<code>passwordHash</code>？递归？栈溢出？）
+        <strong>看完立刻删掉这条路由。</strong></li>
+    <li>试试批量赋值：往 <code>POST /api/v1/posts</code> 的 JSON 里加上
+        <code>"id": 9999</code> 和 <code>"authorUsername": "admin"</code>。
+        确认它们被忽略了。然后想一想：如果 <code>PostRequest</code> 里有这些字段会怎样？</li>
+    <li>把令牌有效期改成 10 秒，换一个令牌，等 15 秒后再用。确认收到 401。</li>
+    <li>用 A 用户的令牌去修改 B 用户的文章，确认返回 403。
+        （这是第 11 章 IDOR 检查的 API 版本。）</li>
+    <li>给 API 加一条 <code>DELETE /api/v1/posts/{id}</code>，返回 204 No Content。
+        注意：删除要检查归属，而且应该是<strong>幂等</strong>的
+        （删一个已经不存在的 id 应该返回 204 还是 404？两种设计都有人用，想清楚你选哪个、为什么）。</li>
+    <li>（进阶）给 <code>GET /api/v1/posts/{id}</code> 加上 <code>ETag</code> 支持：
+        用 <code>config.http.generateEtags = true</code> 打开，
+        然后用 <code>http :7070/api/v1/posts/1 "If-None-Match: &lt;上次的 ETag&gt;"</code>
+        验证返回 304 Not Modified。这就是 REST 第三个约束"可缓存"的实际应用。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

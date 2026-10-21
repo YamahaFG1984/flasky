@@ -1,0 +1,1208 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 17 章 · 部署 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="17">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 17 章</span>
+<h1>部署</h1>
+<p class="lede">
+  把应用放到真实的服务器上，让真实的用户访问。
+  这一章先把“任何部署方式都要做的事”讲清楚（部署任务、日志、打包），
+  再分别讲三条路：PaaS、Docker、传统服务器。
+  最后给一份上线前的检查清单。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>写一个幂等的部署任务</li>
+    <li>配好生产环境的日志：控制台、文件、以及把严重错误发邮件</li>
+    <li>打出一个带预编译模板的可执行 JAR</li>
+    <li>会用 PaaS、Docker、传统服务器三种方式部署</li>
+    <li>理解反向代理带来的 <code>X-Forwarded-*</code> 问题</li>
+    <li>有一份能照着过的上线检查清单</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="task">第一步：部署任务</h2>
+
+<p>
+  每次发新版本，服务器上都有一组固定动作要做：跑数据库迁移、更新角色定义、补数据。
+  手动执行既容易漏又容易错，所以第 7 章我们已经把它做成了一个命令：
+</p>
+
+<div class="code" data-lang="java" data-file="Cli.java（deploy 命令）">
+<pre>
+case "deploy" -&gt; {
+    // ① Db.init 里会先跑 Flyway 迁移
+    // ② 创建/更新角色定义（第 9 章）
+    // ③ 确保每个用户都关注了自己（第 12 章）
+    run(cfg, () -&gt; {
+        SeedService.insertRoles();
+        SeedService.addSelfFollows();
+    });
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 部署任务必须幂等</div>
+  <p>
+    原书强调了这一点：“这些函数的设计方式使得多次执行也不会有问题。
+    这样设计更新函数，就可以在每次安装或升级时直接运行 deploy 命令，
+    不用担心某个函数在错误的时机运行带来的副作用。”
+  </p>
+  <p>
+    为什么重要？因为部署会失败、会重试、会回滚重来。
+    一个"只能跑一次"的部署脚本会在第一次重试时就把你坑住。
+    <strong>验证方法：连着跑两次，结果应该一样。</strong>
+  </p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+java -cp target/javalinky.jar com.example.javalinky.Cli deploy
+</pre>
+</div>
+
+<h2 id="logging">生产环境的日志</h2>
+
+<p>
+  开发时出错，你看到的是控制台里的完整堆栈。
+  生产环境用户只会看到一个 500 页面 —— 堆栈<strong>必须被记录到某个地方</strong>，
+  否则你永远不知道出了什么事。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="日志的三个去向与级别">
+  <rect class="bx-a" x="280" y="24" width="200" height="54" rx="9"/>
+  <text class="ttl on-a" x="380" y="46" text-anchor="middle">SLF4J + Logback</text>
+  <text class="sm" x="380" y="66" text-anchor="middle">应用只调 log.info / log.error</text>
+
+  <rect class="bx-b" x="20" y="124" width="220" height="92" rx="9"/>
+  <text class="ttl on-b" x="130" y="146" text-anchor="middle">① 标准输出</text>
+  <text class="sm" x="130" y="166" text-anchor="middle">级别：INFO 及以上</text>
+  <text class="sm" x="130" y="184" text-anchor="middle">容器和 PaaS 的标准做法</text>
+  <text class="sm" x="130" y="202" text-anchor="middle">由平台负责收集和保存</text>
+
+  <rect class="bx-g" x="270" y="124" width="220" height="92" rx="9"/>
+  <text class="ttl on-g" x="380" y="146" text-anchor="middle">② 滚动文件</text>
+  <text class="sm" x="380" y="166" text-anchor="middle">级别：INFO 及以上</text>
+  <text class="sm" x="380" y="184" text-anchor="middle">传统服务器部署用</text>
+  <text class="sm" x="380" y="202" text-anchor="middle">按天切分，保留 30 天</text>
+
+  <rect class="bx-r" x="520" y="124" width="220" height="92" rx="9"/>
+  <text class="ttl on-r" x="630" y="146" text-anchor="middle">③ 邮件</text>
+  <text class="sm" x="630" y="166" text-anchor="middle">级别：<tspan class="on-r">只有 ERROR</tspan></text>
+  <text class="sm" x="630" y="184" text-anchor="middle">发给管理员</text>
+  <text class="sm" x="630" y="202" text-anchor="middle">原书也是这么做的</text>
+
+  <path class="ln-a" d="M330 80 L160 120" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M380 80 V120" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M430 80 L600 120" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-d" x="60" y="240" width="640" height="52" rx="9"/>
+  <text class="ttl" x="80" y="262">级别怎么用</text>
+  <text class="sm" x="80" y="282"><tspan class="mono on-r">ERROR</tspan> 需要人半夜起来处理　<tspan class="mono on-a">WARN</tspan> 第二天看一下　<tspan class="mono on-b">INFO</tspan> 正常运行的痕迹　<tspan class="mono">DEBUG</tspan> 只在排查时临时开</text>
+</svg>
+<figcaption>图 17-1　日志的三个去向</figcaption>
+</figure>
+
+<div class="code" data-lang="xml" data-file="src/main/resources/logback.xml">
+<pre>
+&lt;configuration&gt;
+
+  &lt;!-- 用环境变量控制，不用改文件就能调整 --&gt;
+  &lt;property name="LOG_DIR"   value="${LOG_DIR:-logs}"/&gt;
+  &lt;property name="LOG_LEVEL" value="${LOG_LEVEL:-INFO}"/&gt;
+
+  &lt;!-- ① 控制台（容器 / PaaS） --&gt;
+  &lt;appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender"&gt;
+    &lt;encoder&gt;
+      &lt;pattern&gt;%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{requestId}] %logger{25} - %msg%n&lt;/pattern&gt;
+    &lt;/encoder&gt;
+  &lt;/appender&gt;
+
+  &lt;!-- ② 滚动文件（传统服务器） --&gt;
+  &lt;appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender"&gt;
+    &lt;file&gt;${LOG_DIR}/javalinky.log&lt;/file&gt;
+    &lt;rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy"&gt;
+      &lt;fileNamePattern&gt;${LOG_DIR}/javalinky.%d{yyyy-MM-dd}.%i.log.gz&lt;/fileNamePattern&gt;
+      &lt;maxFileSize&gt;100MB&lt;/maxFileSize&gt;
+      &lt;maxHistory&gt;30&lt;/maxHistory&gt;
+      &lt;totalSizeCap&gt;3GB&lt;/totalSizeCap&gt;
+    &lt;/rollingPolicy&gt;
+    &lt;encoder&gt;
+      &lt;pattern&gt;%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{requestId}] %logger{25} - %msg%n&lt;/pattern&gt;
+    &lt;/encoder&gt;
+  &lt;/appender&gt;
+
+  &lt;!-- ③ 严重错误发邮件。注意用 ERROR 过滤器，否则会被日志淹没 --&gt;
+  &lt;appender name="EMAIL" class="ch.qos.logback.classic.net.SMTPAppender"&gt;
+    &lt;filter class="ch.qos.logback.classic.filter.ThresholdFilter"&gt;
+      &lt;level&gt;ERROR&lt;/level&gt;
+    &lt;/filter&gt;
+    &lt;smtpHost&gt;${MAIL_HOST:-localhost}&lt;/smtpHost&gt;
+    &lt;smtpPort&gt;${MAIL_PORT:-1025}&lt;/smtpPort&gt;
+    &lt;STARTTLS&gt;${MAIL_STARTTLS:-false}&lt;/STARTTLS&gt;
+    &lt;username&gt;${MAIL_USERNAME:-}&lt;/username&gt;
+    &lt;password&gt;${MAIL_PASSWORD:-}&lt;/password&gt;
+    &lt;to&gt;${ADMIN_EMAIL}&lt;/to&gt;
+    &lt;from&gt;${MAIL_FROM:-javalinky@localhost}&lt;/from&gt;
+    &lt;subject&gt;[Javalinky] 应用错误：%logger{20} - %msg&lt;/subject&gt;
+    &lt;!-- 一封邮件里带上出错前的若干条日志，便于还原现场 --&gt;
+    &lt;cyclicBufferTracker class="ch.qos.logback.core.spi.CyclicBufferTracker"&gt;
+      &lt;bufferSize&gt;20&lt;/bufferSize&gt;
+    &lt;/cyclicBufferTracker&gt;
+  &lt;/appender&gt;
+  &lt;!-- 邮件发送比较慢，包一层异步，别拖慢请求 --&gt;
+  &lt;appender name="ASYNC_EMAIL" class="ch.qos.logback.classic.AsyncAppender"&gt;
+    &lt;appender-ref ref="EMAIL"/&gt;
+    &lt;discardingThreshold&gt;0&lt;/discardingThreshold&gt;
+    &lt;queueSize&gt;256&lt;/queueSize&gt;
+  &lt;/appender&gt;
+
+  &lt;logger name="org.hibernate.SQL_SLOW" level="INFO"/&gt;
+
+  &lt;root level="${LOG_LEVEL}"&gt;
+    &lt;appender-ref ref="CONSOLE"/&gt;
+    &lt;appender-ref ref="FILE"/&gt;
+    &lt;appender-ref ref="ASYNC_EMAIL"/&gt;
+  &lt;/root&gt;
+&lt;/configuration&gt;
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 错误邮件一定要限流</div>
+  <p>
+    想象一下：数据库挂了，每个请求都报 ERROR，每秒 50 个请求 ——
+    <strong>你的邮箱会在一分钟内收到 3000 封邮件</strong>，
+    而且邮件服务商可能直接封了你的账号。
+  </p>
+  <p>
+    上面的 <code>AsyncAppender</code> 的 <code>queueSize=256</code> 提供了一道粗糙的防线（队列满就丢弃）。
+    但真正的解法是：<strong>别用邮件做告警</strong>——
+    用专门的错误聚合服务（Sentry、GlitchTip）或监控系统（Prometheus + Alertmanager），
+    它们会把相同的错误归并成一条，并支持告警静默。
+  </p>
+  <p>
+    原书用邮件是因为它零依赖、人人都能跑通。本教程保留它，但请把它当成"最低配方案"。
+  </p>
+</div>
+
+<h3>请求 ID：把一次请求的所有日志串起来</h3>
+
+<p>
+  注意上面日志格式里的 <code>[%X{requestId}]</code>。
+  <code>%X</code> 读的是 <strong>MDC</strong>（映射诊断上下文）—— 一个 ThreadLocal 的键值表。
+  给每个请求分配一个 ID 放进去，这一次请求产生的所有日志就都带着同一个 ID：
+</p>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/RequestId.java">
+<pre>
+package com.example.javalinky.web;
+
+import io.javalin.config.JavalinConfig;
+import org.slf4j.MDC;
+import java.util.UUID;
+
+public final class RequestId {
+
+    public static final String HEADER = "X-Request-Id";
+    private static final String MDC_KEY = "requestId";
+
+    public static void install(JavalinConfig config) {
+        config.routes.before(ctx -&gt; {
+            // 如果上游代理已经给了一个 ID 就沿用（便于跨服务追踪）
+            String id = ctx.header(HEADER);
+            if (id == null || id.isBlank() || id.length() &gt; 64) {
+                id = UUID.randomUUID().toString().substring(0, 8);
+            }
+            MDC.put(MDC_KEY, id);
+            ctx.header(HEADER, id);      // 回给客户端，用户报错时能提供这个 ID
+        });
+
+        // 必须清理！线程是复用的，不清会把 ID 带到下一个请求里
+        config.routes.after(ctx -&gt; MDC.remove(MDC_KEY));
+    }
+
+    private RequestId() {}
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么这个小东西价值很大</div>
+  <p>
+    用户来报："我刚才提交的时候报错了。" 没有请求 ID 的话，
+    你要在一秒产生几百行的日志里靠时间戳猜是哪一条。
+  </p>
+  <p>
+    有了它：500 错误页上显示"错误编号 a3f91b02"，用户把这串字符发给你，
+    <code>grep a3f91b02 javalinky.log</code> —— 整条链路的日志立刻全在眼前。
+  </p>
+  <div class="code" data-lang="jte" data-file="error/500.jte">
+<pre>
+&lt;p class="text-secondary small"&gt;
+  如果需要帮助，请把这个编号告诉我们：&lt;code&gt;${requestId}&lt;/code&gt;
+&lt;/p&gt;
+</pre>
+  </div>
+</div>
+
+<h2 id="package">打包：一个 JAR 搞定</h2>
+
+<p>
+  第 7 章已经配好了 <code>maven-shade-plugin</code>，但有个问题没解决：
+  <strong>JAR 里没有 <code>src/main/jte</code> 目录</strong>，
+  所以运行时编译模板的方式在生产环境行不通。
+</p>
+
+<p>解决办法是用 JTE 的 Maven 插件在打包时<strong>预编译</strong>模板：</p>
+
+<div class="code" data-lang="xml" data-file="pom.xml（新增插件）">
+<pre>
+&lt;plugin&gt;
+  &lt;groupId&gt;gg.jte&lt;/groupId&gt;
+  &lt;artifactId&gt;jte-maven-plugin&lt;/artifactId&gt;
+  &lt;version&gt;${jte.version}&lt;/version&gt;
+  &lt;configuration&gt;
+    &lt;sourceDirectory&gt;${basedir}/src/main/jte&lt;/sourceDirectory&gt;
+    &lt;contentType&gt;Html&lt;/contentType&gt;
+    &lt;!-- 把模板编译成 Java 源码，再由 javac 一起编译 --&gt;
+    &lt;targetDirectory&gt;${project.build.directory}/generated-sources/jte&lt;/targetDirectory&gt;
+  &lt;/configuration&gt;
+  &lt;executions&gt;
+    &lt;execution&gt;
+      &lt;phase&gt;generate-sources&lt;/phase&gt;
+      &lt;goals&gt;&lt;goal&gt;generate&lt;/goal&gt;&lt;/goals&gt;
+    &lt;/execution&gt;
+  &lt;/executions&gt;
+&lt;/plugin&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="web/Templates.java（补上生产模式）">
+<pre>
+/** 开发用：从目录读源文件，改了就生效 */
+public static TemplateEngine directory() {
+    return TemplateEngine.create(
+        new DirectoryCodeResolver(Path.of("src", "main", "jte")),
+        Path.of("jte-classes", "html"),
+        ContentType.Html);
+}
+
+/** 生产用：读 jar 里预编译好的模板类，启动快、不需要编译器 */
+public static TemplateEngine precompiled() {
+    return TemplateEngine.createPrecompiled(ContentType.Html);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn clean package
+
+# 产物
+ls -lh target/javalinky.jar          # 约 45 MB，包含一切
+
+# 用生产配置跑一下看看（本地验证打包结果）
+APP_PROFILE=prod \
+SITE_BASE_URL=http://localhost:8080 \
+DATABASE_URL="jdbc:h2:./data/prod-test;MODE=PostgreSQL" \
+DATABASE_USER=sa DATABASE_PASSWORD= \
+SECRET_KEY=$(openssl rand -hex 32) \
+ADMIN_EMAIL=you@example.com \
+java -jar target/javalinky.jar
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; Java 部署比 Python 简单的地方</div>
+  <div class="tw">
+  <table>
+  <tr><th></th><th>Python / Flask（原书）</th><th>Java / Javalin</th></tr>
+  <tr><td>运行时</td><td>服务器要装对版本的 Python</td><td>只要装 JRE 21（或者用容器自带）</td></tr>
+  <tr><td>依赖</td><td><code>pip install -r requirements.txt</code>，可能编译失败</td><td><strong>全部在 jar 里</strong>，不需要在服务器上装任何东西</td></tr>
+  <tr><td>Web 服务器</td><td>要另外装 Gunicorn / uWSGI</td><td><strong>不需要</strong>，Jetty 已经内嵌</td></tr>
+  <tr><td>进程管理</td><td>要配 Supervisor</td><td>systemd 直接管一个进程</td></tr>
+  <tr><td>启动</td><td><code>gunicorn flasky:app</code></td><td><code>java -jar javalinky.jar</code></td></tr>
+  </table>
+  </div>
+  <p>
+    代价是 jar 比较大（40 MB 起），以及 JVM 启动比 Python 慢一点（约 1 秒）。
+    对长期运行的服务来说这两个代价可以忽略。
+  </p>
+</div>
+
+<h2 id="models">三种部署模型</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="PaaS、容器、传统服务器三种部署模型">
+  <rect class="bx-g" x="20" y="24" width="230" height="200" rx="10"/>
+  <text class="ttl on-g" x="135" y="46" text-anchor="middle">① PaaS</text>
+  <text class="sm" x="135" y="64" text-anchor="middle">Fly.io / Render / Railway</text>
+  <text class="sm" x="36" y="90">你负责：</text>
+  <text class="sm" x="36" y="108">· 代码 + 一个配置文件</text>
+  <text class="sm" x="36" y="126">· 设置环境变量</text>
+  <text class="sm on-g" x="36" y="152">平台负责：</text>
+  <text class="sm" x="36" y="170">操作系统、HTTPS 证书、</text>
+  <text class="sm" x="36" y="188">负载均衡、日志收集、</text>
+  <text class="sm" x="36" y="206">自动重启、数据库备份</text>
+
+  <rect class="bx-a" x="266" y="24" width="230" height="200" rx="10"/>
+  <text class="ttl on-a" x="381" y="46" text-anchor="middle">② 容器</text>
+  <text class="sm" x="381" y="64" text-anchor="middle">Docker / Kubernetes</text>
+  <text class="sm" x="282" y="90">你负责：</text>
+  <text class="sm" x="282" y="108">· Dockerfile</text>
+  <text class="sm" x="282" y="126">· 编排配置</text>
+  <text class="sm" x="282" y="144">· 监控、日志、证书</text>
+  <text class="sm on-a" x="282" y="170">平台负责：</text>
+  <text class="sm" x="282" y="188">跑容器、重启挂掉的容器</text>
+  <text class="sm" x="282" y="206">（"环境一致性"是最大收益）</text>
+
+  <rect class="bx-p" x="512" y="24" width="228" height="200" rx="10"/>
+  <text class="ttl on-p" x="626" y="46" text-anchor="middle">③ 传统服务器</text>
+  <text class="sm" x="626" y="64" text-anchor="middle">一台 VPS / 物理机</text>
+  <text class="sm" x="528" y="90">你负责：</text>
+  <text class="sm" x="528" y="108">· 操作系统、安全更新</text>
+  <text class="sm" x="528" y="126">· 装数据库、配 nginx</text>
+  <text class="sm" x="528" y="144">· systemd、证书、防火墙</text>
+  <text class="sm" x="528" y="162">· 备份、监控、日志轮转</text>
+  <text class="sm on-p" x="528" y="188">换来：</text>
+  <text class="sm" x="528" y="206">最低成本、完全控制</text>
+
+  <rect class="bx-d" x="60" y="244" width="640" height="68" rx="10"/>
+  <text class="ttl" x="80" y="266">该选哪个</text>
+  <text class="lbl" x="80" y="288">个人项目、初创产品 → <tspan class="on-g">PaaS</tspan>（省下的时间远比省下的钱值钱）。</text>
+  <text class="lbl" x="80" y="306">团队有运维能力、或者有合规要求 → <tspan class="on-a">容器</tspan>。预算极紧、学习目的 → <tspan class="on-p">传统服务器</tspan>（本章都会讲）。</text>
+</svg>
+<figcaption>图 17-2　三种部署模型</figcaption>
+</figure>
+
+<h2 id="paas">路线一：PaaS</h2>
+
+<p>
+  原书用的是 Heroku（当时有免费额度，现在没有了）。
+  今天同类的选择有 Fly.io、Render、Railway、Koyeb 等等。
+  它们的流程大同小异，这里以通用形式讲，概念可以直接套用。
+</p>
+
+<h3>声明怎么启动</h3>
+
+<div class="code" data-lang="text" data-file="Procfile">
+<pre>
+release: java -cp target/javalinky.jar com.example.javalinky.Cli deploy
+web: java -XX:MaxRAMPercentage=75 -jar target/javalinky.jar
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; <code>release</code> 这一行很关键</div>
+  <p>
+    它声明了"每次部署新版本之后、新进程接管流量之前"要执行什么 ——
+    正是我们的 <code>deploy</code> 命令（跑迁移）。
+  </p>
+  <p>
+    为什么不能在应用启动时跑迁移？因为滚动部署时会<strong>同时启动多个实例</strong>，
+    它们会并发执行迁移 —— Flyway 有锁机制能挡住，但更干净的做法是
+    <strong>让迁移成为一个独立的、只跑一次的步骤</strong>。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>-XX:MaxRAMPercentage=75</code> 是什么</div>
+  <p>
+    JVM 默认最多用物理内存的 25% 当堆。在一个 512 MB 的容器里，
+    这意味着只用 128 MB —— 浪费了。
+  </p>
+  <p>
+    设成 75% 让它用到 384 MB，留下的部分给元空间、线程栈和堆外内存。
+    <strong>不要设成 100%</strong>，否则容器会因为超限被强杀（OOMKilled）。
+  </p>
+</div>
+
+<h3>设置环境变量</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+# 每个平台的命令不同，但要设的变量是一样的
+APP_PROFILE=prod
+SITE_BASE_URL=https://javalinky.example.com
+SECRET_KEY=&lt;openssl rand -hex 32 的输出&gt;
+ADMIN_EMAIL=you@example.com
+
+# 数据库：平台的托管 Postgres 通常会自动注入一个连接串，
+# 但格式往往是 postgres://user:pass@host/db（不是 JDBC 格式），要转换一下
+DATABASE_URL=jdbc:postgresql://host:5432/dbname
+DATABASE_USER=...
+DATABASE_PASSWORD=...
+
+# 邮件：用专业的发信服务，不要用个人邮箱
+MAIL_HOST=smtp.resend.com
+MAIL_PORT=587
+MAIL_STARTTLS=true
+MAIL_USERNAME=resend
+MAIL_PASSWORD=&lt;API key&gt;
+MAIL_FROM=Javalinky &lt;no-reply@javalinky.example.com&gt;
+
+HTTPS_ONLY=true
+LOG_LEVEL=INFO
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 很多平台给的连接串不是 JDBC 格式</div>
+  <p>
+    形如 <code>postgres://user:pass@host:5432/db</code> 的 URL 是
+    libpq 风格，JDBC 驱动不认。加一个小工具函数转换：
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+/** 把 postgres://user:pass@host:port/db 转成 JDBC 格式 */
+static String toJdbcUrl(String url) {
+    if (url.startsWith("jdbc:")) return url;
+    var uri = java.net.URI.create(url);
+    return "jdbc:postgresql://" + uri.getHost()
+         + (uri.getPort() &gt; 0 ? ":" + uri.getPort() : "")
+         + uri.getPath();
+}
+</pre>
+  </div>
+  <p>用户名和密码要从 <code>uri.getUserInfo()</code> 里分别取出来。</p>
+</div>
+
+<h3>HTTPS 与反向代理</h3>
+
+<p>
+  PaaS 平台在你的应用前面有一层负载均衡器，它负责 TLS 终止。
+  这带来一个必须处理的问题：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="反向代理后面的 X-Forwarded 问题">
+  <rect class="bx-b" x="20" y="54" width="130" height="56" rx="8"/>
+  <text class="sm on-b" x="85" y="76" text-anchor="middle">用户浏览器</text>
+  <text class="mono" x="85" y="94" text-anchor="middle">https://..</text>
+
+  <path class="ln-g" d="M152 82 H216" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="184" y="74" text-anchor="middle">HTTPS</text>
+
+  <rect class="bx-a" x="220" y="48" width="180" height="68" rx="8"/>
+  <text class="ttl on-a" x="310" y="70" text-anchor="middle">负载均衡 / nginx</text>
+  <text class="sm" x="310" y="88" text-anchor="middle">解开 TLS</text>
+  <text class="sm" x="310" y="104" text-anchor="middle">加上 X-Forwarded-* 头</text>
+
+  <path class="ln-r" d="M402 82 H466" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="434" y="74" text-anchor="middle">HTTP</text>
+
+  <rect class="bx" x="470" y="48" width="270" height="68" rx="8"/>
+  <text class="ttl" x="605" y="70" text-anchor="middle">你的 Javalin 应用</text>
+  <text class="sm on-r" x="605" y="88" text-anchor="middle">看到的是明文 HTTP、</text>
+  <text class="sm on-r" x="605" y="104" text-anchor="middle">以及代理的内网 IP</text>
+
+  <rect class="bx-r" x="20" y="140" width="350" height="140" rx="9"/>
+  <text class="ttl on-r" x="40" y="162">不处理会出三个 bug</text>
+  <text class="sm" x="40" y="186">① <tspan class="mono">ctx.scheme()</tspan> 返回 "http"</text>
+  <text class="sm" x="56" y="202">→ 生成的绝对 URL 是 http://，</text>
+  <text class="sm" x="56" y="216">　 邮件里的链接变成不安全链接</text>
+  <text class="sm" x="40" y="238">② <tspan class="mono">ctx.ip()</tspan> 返回代理的内网 IP</text>
+  <text class="sm" x="56" y="254">→ 限流、审计日志全都失效</text>
+  <text class="sm" x="40" y="274">③ HTTPS 重定向逻辑会变成无限循环</text>
+
+  <rect class="bx-g" x="390" y="140" width="350" height="140" rx="9"/>
+  <text class="ttl on-g" x="410" y="162">解法：让 Jetty 认这些头</text>
+  <text class="mono" x="410" y="188">config.jetty.modifyHttpConfiguration(</text>
+  <text class="mono" x="410" y="206">  http -&gt; http.addCustomizer(</text>
+  <text class="mono" x="410" y="224">    new ForwardedRequestCustomizer()));</text>
+  <text class="sm on-r" x="410" y="250">注意：只能在<tspan class="on-r">确实有可信代理</tspan>时开启。</text>
+  <text class="sm" x="410" y="268">直接暴露在公网时开启它 = 任何人都能伪造自己的 IP。</text>
+</svg>
+<figcaption>图 17-3　反向代理后面的 <code>X-Forwarded-*</code> 问题</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="JavalinkyApp.java（新增）">
+<pre>
+import org.eclipse.jetty.server.ForwardedRequestCustomizer;
+
+// 只在明确知道自己跑在代理后面时才开
+if (cfg.behindProxy()) {
+    javalin.jetty.modifyHttpConfiguration(httpConfig -&gt;
+        httpConfig.addCustomizer(new ForwardedRequestCustomizer()));
+}
+
+if (cfg.httpsOnly()) {
+    // 把 http:// 的请求 301 到 https://
+    javalin.bundledPlugins.enableSslRedirects();
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>behindProxy</code> 必须是一个显式配置，不能自动判断</div>
+  <p>
+    <code>X-Forwarded-For</code> 只是一个普通的 HTTP 头，<strong>任何客户端都能随便填</strong>。
+    如果你无条件信任它：
+  </p>
+  <div class="code" data-lang="bash">
+<pre>
+curl -H "X-Forwarded-For: 1.2.3.4" https://你的站/login
+# → 你的限流和审计日志里记的是 1.2.3.4，攻击者真实 IP 不留痕迹
+</pre>
+  </div>
+  <p>
+    所以规则是：<strong>只有当请求确实经过了你控制的代理时才信这个头</strong>。
+    PaaS 和自己配的 nginx 都满足这个条件（它们会覆盖客户端传来的值）；
+    直接暴露在公网的应用绝对不能开。
+  </p>
+</div>
+
+<h2 id="docker">路线二：Docker</h2>
+
+<h3>多阶段构建</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="Docker 多阶段构建">
+  <rect class="bx-a" x="20" y="30" width="330" height="140" rx="10"/>
+  <text class="ttl on-a" x="185" y="52" text-anchor="middle">阶段一：构建</text>
+  <text class="sm" x="185" y="70" text-anchor="middle">maven:3.9-eclipse-temurin-21</text>
+  <rect class="bx" x="40" y="82" width="290" height="22" rx="4"/>
+  <text class="sm" x="185" y="97" text-anchor="middle">JDK + Maven + 全部源码 + 依赖缓存</text>
+  <rect class="bx" x="40" y="110" width="290" height="22" rx="4"/>
+  <text class="sm" x="185" y="125" text-anchor="middle">mvn package → javalinky.jar</text>
+  <text class="sm on-r" x="185" y="152" text-anchor="middle">这个镜像有 800 MB+</text>
+  <text class="sm on-r" x="185" y="166" text-anchor="middle">但它<tspan class="on-r">不会进入最终产物</tspan></text>
+
+  <path class="ln-g" d="M352 100 H406" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="379" y="92" text-anchor="middle">只拷</text>
+  <text class="sm on-g" x="379" y="114" text-anchor="middle">一个 jar</text>
+
+  <rect class="bx-g" x="410" y="30" width="330" height="140" rx="10"/>
+  <text class="ttl on-g" x="575" y="52" text-anchor="middle">阶段二：运行</text>
+  <text class="sm" x="575" y="70" text-anchor="middle">eclipse-temurin:21-jre-alpine</text>
+  <rect class="bx" x="430" y="82" width="290" height="22" rx="4"/>
+  <text class="sm" x="575" y="97" text-anchor="middle">只有 JRE（没有编译器、没有 Maven）</text>
+  <rect class="bx" x="430" y="110" width="290" height="22" rx="4"/>
+  <text class="sm" x="575" y="125" text-anchor="middle">+ javalinky.jar</text>
+  <text class="sm on-g" x="575" y="152" text-anchor="middle">最终镜像约 <tspan class="ttl">180 MB</tspan></text>
+  <text class="sm on-g" x="575" y="166" text-anchor="middle">攻击面也小得多</text>
+
+  <rect class="bx-d" x="100" y="192" width="560" height="48" rx="9"/>
+  <text class="lbl" x="120" y="214">为什么要分两段：构建工具只在构建时需要。把它们留在运行镜像里</text>
+  <text class="sm" x="120" y="232">= 镜像大 4 倍、拉取慢、而且给攻击者提供了编译器和包管理器这类现成工具。</text>
+</svg>
+<figcaption>图 17-4　多阶段构建</figcaption>
+</figure>
+
+<div class="code" data-lang="dockerfile" data-file="Dockerfile">
+<pre>
+# ========== 阶段一：构建 ==========
+FROM maven:3.9-eclipse-temurin-21 AS build
+
+WORKDIR /build
+
+# 先只拷 pom.xml 并下载依赖 —— 这一层会被缓存，
+# 只要 pom 没变，改代码就不用重新下载几百个 jar
+COPY pom.xml .
+RUN mvn -B dependency:go-offline
+
+# 再拷源码
+COPY src ./src
+RUN mvn -B clean package -DskipTests
+
+# ========== 阶段二：运行 ==========
+FROM eclipse-temurin:21-jre-alpine
+
+# 不要用 root 跑应用
+RUN addgroup -S javalinky &amp;&amp; adduser -S -G javalinky javalinky
+
+WORKDIR /app
+COPY --from=build /build/target/javalinky.jar app.jar
+
+# 日志目录要让应用用户能写
+RUN mkdir -p /app/logs &amp;&amp; chown -R javalinky:javalinky /app
+USER javalinky
+
+ENV APP_PROFILE=prod \
+    PORT=8080 \
+    LOG_DIR=/app/logs
+
+EXPOSE 8080
+
+# 健康检查：让编排系统知道容器是不是真的能服务
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
+    CMD wget -q --spider http://localhost:8080/healthz || exit 1
+
+# exec 形式（不是 shell 形式）：这样 java 进程的 PID 是 1，
+# 能直接收到 docker stop 发的 SIGTERM，从而优雅关闭
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "app.jar"]
+</pre>
+</div>
+
+<p>健康检查端点要自己加一个：</p>
+
+<div class="code" data-lang="java">
+<pre>
+// 放在 MainRoutes 里，公开访问
+get("/healthz", ctx -&gt; {
+    // 不只是返回 200 —— 要真的验证依赖可用
+    try {
+        Db.em(ctx).createNativeQuery("select 1").getSingleResult();
+        ctx.json(Map.of("status", "ok"));
+    } catch (Exception e) {
+        ctx.status(503).json(Map.of("status", "degraded", "reason", "database"));
+    }
+});
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 优雅关闭：Javalin 已经帮你做好了</div>
+  <p>
+    收到 <code>SIGTERM</code> 时，理想行为是：停止接受新请求 →
+    等正在处理的请求做完 → 关掉数据库连接 → 退出。
+  </p>
+  <p>
+    Javalin 的默认 Jetty 配置带了 <code>StatisticsHandler</code>，
+    所以 <code>app.stop()</code> 会等活跃请求结束。
+    再加上第 7 章注册的 <code>serverStopping</code> 事件（关邮件线程池和数据库），
+    这件事就齐了。
+  </p>
+  <div class="code" data-lang="java">
+<pre>
+var app = JavalinkyApp.create(config).start(config.port());
+Runtime.getRuntime().addShutdownHook(new Thread(app::stop));
+</pre>
+  </div>
+</div>
+
+<h3>docker compose：带上数据库</h3>
+
+<div class="code" data-lang="yaml" data-file="compose.yaml">
+<pre>
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      APP_PROFILE: prod
+      SITE_BASE_URL: http://localhost:8080
+      DATABASE_URL: jdbc:postgresql://db:5432/javalinky
+      DATABASE_USER: javalinky
+      DATABASE_PASSWORD: ${DB_PASSWORD:?必须在 .env 里设置 DB_PASSWORD}
+      SECRET_KEY: ${SECRET_KEY:?必须设置 SECRET_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+    depends_on:
+      db:
+        condition: service_healthy     # 等数据库真的能连上，而不只是容器起来了
+    restart: unless-stopped
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: javalinky
+      POSTGRES_USER: javalinky
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?}
+    volumes:
+      - pgdata:/var/lib/postgresql/data    # 数据要放在命名卷里，否则重建容器就没了
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U javalinky -d javalinky"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # 开发/演示用的假邮件服务器，生产环境去掉
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "8025:8025"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+# 准备密钥
+cat &gt; .env &lt;&lt;EOF
+DB_PASSWORD=$(openssl rand -hex 16)
+SECRET_KEY=$(openssl rand -hex 32)
+ADMIN_EMAIL=you@example.com
+EOF
+
+docker compose up -d --build        # 构建并后台启动
+docker compose logs -f app          # 跟踪日志
+docker compose ps                   # 看状态和健康检查结果
+
+# 跑部署任务（迁移 + 播种）
+docker compose exec app java -cp app.jar com.example.javalinky.Cli deploy
+
+# 升级：改完代码重新 up 一次
+docker compose up -d --build
+
+docker compose down                 # 停止（数据卷保留）
+docker compose down -v              # 停止并删除数据卷 —— 小心！
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>${DB_PASSWORD:?...}</code> 这个写法很值得学</div>
+  <p>
+    冒号加问号表示"这个变量必须有值，否则报错退出"。
+    这和第 7 章 <code>Env.require()</code> 是同一个思路：
+    <strong>宁可启动失败，也不要带着默认密码上线。</strong>
+  </p>
+  <p>
+    没有它的话，忘记设 <code>DB_PASSWORD</code> 会让 compose 用空密码启动，
+    然后你有一个空密码的生产数据库。
+  </p>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 深入：原书提到的 Docker 生产环境的局限</div>
+  <p>原书列了四条，今天依然准确：</p>
+  <ol>
+    <li><strong>监控告警。</strong>Docker 能重启挂掉的容器，但不会告诉你它挂了、也不会在它"活着但不正常"时报警。</li>
+    <li><strong>日志。</strong>每个容器一个日志流，没有长期存储和检索。要配 ELK / Loki 这类系统。</li>
+    <li><strong>密钥管理。</strong>环境变量会出现在 <code>docker inspect</code> 的输出里，不算真正的保密。
+        需要 Docker Secrets、Vault 或云平台的密钥服务。</li>
+    <li><strong>可靠性与扩容。</strong>要跑多实例、要负载均衡、要滚动更新 ——
+        这些 Docker 本身不管，需要 Kubernetes、Swarm 或 Nomad。</li>
+  </ol>
+  <p>
+    所以 <code>docker compose</code> 很适合单机部署和开发环境，
+    但"容器化"和"有一套可运维的生产环境"是两件事。
+  </p>
+</div>
+
+<h2 id="traditional">路线三：传统服务器</h2>
+
+<p>一台 Ubuntu VPS。工作量最大，但你会完全清楚每一层在干什么。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="传统服务器上的组件架构">
+  <rect class="bx-d" x="20" y="24" width="720" height="206" rx="12"/>
+  <text class="sm" x="40" y="46">一台 Ubuntu 服务器</text>
+
+  <rect class="bx-b" x="40" y="58" width="150" height="60" rx="8"/>
+  <text class="ttl on-b" x="115" y="80" text-anchor="middle">nginx</text>
+  <text class="sm" x="115" y="98" text-anchor="middle">:80 / :443</text>
+  <text class="sm" x="115" y="112" text-anchor="middle">对外的唯一入口</text>
+
+  <path class="ln-a" d="M192 88 H246" marker-end="url(#ar-a)"/>
+  <text class="sm" x="219" y="80" text-anchor="middle">反代</text>
+
+  <rect class="bx-a" x="250" y="52" width="190" height="72" rx="8"/>
+  <text class="ttl on-a" x="345" y="74" text-anchor="middle">javalinky.service</text>
+  <text class="sm" x="345" y="92" text-anchor="middle">systemd 管的一个进程</text>
+  <text class="mono" x="345" y="110" text-anchor="middle">java -jar → 127.0.0.1:8080</text>
+
+  <path class="ln-a" d="M442 88 H496" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="500" y="58" width="150" height="60" rx="8"/>
+  <text class="ttl on-g" x="575" y="80" text-anchor="middle">PostgreSQL</text>
+  <text class="sm" x="575" y="98" text-anchor="middle">:5432</text>
+  <text class="sm" x="575" y="112" text-anchor="middle">只监听 localhost</text>
+
+  <rect class="bx-p" x="40" y="140" width="150" height="54" rx="8"/>
+  <text class="lbl on-p" x="115" y="162" text-anchor="middle">certbot</text>
+  <text class="sm" x="115" y="180" text-anchor="middle">自动续期 TLS 证书</text>
+
+  <rect class="bx-p" x="250" y="140" width="190" height="54" rx="8"/>
+  <text class="lbl on-p" x="345" y="162" text-anchor="middle">journald</text>
+  <text class="sm" x="345" y="180" text-anchor="middle">收集 stdout 日志</text>
+
+  <rect class="bx-p" x="500" y="140" width="150" height="54" rx="8"/>
+  <text class="lbl on-p" x="575" y="162" text-anchor="middle">ufw 防火墙</text>
+  <text class="sm" x="575" y="180" text-anchor="middle">只开 22 / 80 / 443</text>
+
+  <rect class="bx-r" x="40" y="204" width="610" height="20" rx="5"/>
+  <text class="sm on-r" x="345" y="218" text-anchor="middle">还需要：自动安全更新、数据库定时备份（并验证备份能恢复）、监控</text>
+
+  <text class="sm" x="40" y="258">关键点：应用<tspan class="on-a">只监听 127.0.0.1</tspan>，公网进不来。所有外部流量必须经过 nginx —— 这样 TLS、限流、</text>
+  <text class="sm" x="40" y="276">静态文件缓存都可以在 nginx 层统一处理，而且应用本身不暴露在公网上。</text>
+</svg>
+<figcaption>图 17-5　传统服务器的组件架构</figcaption>
+</figure>
+
+<h3>① 准备服务器</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+# JRE（只要运行时，不需要 JDK）
+sudo apt update
+sudo apt install -y openjdk-21-jre-headless postgresql nginx
+
+# 建数据库和用户
+sudo -u postgres psql &lt;&lt;'SQL'
+CREATE USER javalinky WITH PASSWORD '换成强密码';
+CREATE DATABASE javalinky OWNER javalinky;
+SQL
+
+# 建一个专门跑应用的系统用户（不能登录、没有家目录）
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin javalinky
+sudo mkdir -p /opt/javalinky /var/log/javalinky
+sudo chown javalinky:javalinky /var/log/javalinky
+
+# 防火墙
+sudo ufw allow 22,80,443/tcp
+sudo ufw enable
+</pre>
+</div>
+
+<h3>② 部署文件</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+# 本地打包，上传
+mvn clean package
+scp target/javalinky.jar user@server:/tmp/
+ssh user@server 'sudo mv /tmp/javalinky.jar /opt/javalinky/ &amp;&amp; \
+                 sudo chown javalinky:javalinky /opt/javalinky/javalinky.jar'
+</pre>
+</div>
+
+<div class="code" data-lang="env" data-file="/etc/javalinky.env　（权限必须是 600）">
+<pre>
+APP_PROFILE=prod
+PORT=8080
+SITE_BASE_URL=https://javalinky.example.com
+BEHIND_PROXY=true
+HTTPS_ONLY=false
+
+DATABASE_URL=jdbc:postgresql://localhost:5432/javalinky
+DATABASE_USER=javalinky
+DATABASE_PASSWORD=换成强密码
+
+SECRET_KEY=用 openssl rand -hex 32 生成
+
+MAIL_HOST=smtp.example.com
+MAIL_PORT=587
+MAIL_STARTTLS=true
+MAIL_USERNAME=apikey
+MAIL_PASSWORD=...
+MAIL_FROM=Javalinky &lt;no-reply@javalinky.example.com&gt;
+ADMIN_EMAIL=you@example.com
+
+LOG_DIR=/var/log/javalinky
+LOG_LEVEL=INFO
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+sudo chmod 600 /etc/javalinky.env
+sudo chown root:javalinky /etc/javalinky.env
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>HTTPS_ONLY=false</code> 但 <code>BEHIND_PROXY=true</code>，为什么</div>
+  <p>
+    HTTP → HTTPS 的重定向交给 <strong>nginx</strong> 做（更靠前、更便宜）。
+    应用自己不做重定向，否则会和 nginx 打架造成循环。
+  </p>
+  <p>
+    但应用<strong>需要知道</strong>原始请求是 HTTPS 的（为了生成正确的绝对 URL
+    和设置 Secure Cookie），这就是 <code>BEHIND_PROXY=true</code> 的作用。
+  </p>
+</div>
+
+<h3>③ systemd 服务</h3>
+
+<div class="code" data-lang="systemd" data-file="/etc/systemd/system/javalinky.service">
+<pre>
+[Unit]
+Description=Javalinky
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=javalinky
+Group=javalinky
+WorkingDirectory=/opt/javalinky
+EnvironmentFile=/etc/javalinky.env
+
+ExecStart=/usr/bin/java -XX:MaxRAMPercentage=70 -jar /opt/javalinky/javalinky.jar
+
+# 挂了就自动重启，但限制频率避免疯狂重启刷日志
+Restart=always
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+# 优雅关闭：发 SIGTERM 之后给 30 秒做完手里的请求
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# 日志进 journald（应用打到 stdout 就行）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=javalinky
+
+# 一组很便宜的安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/javalinky
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+sudo systemctl daemon-reload
+sudo systemctl enable --now javalinky
+
+sudo systemctl status javalinky        # 看状态
+sudo journalctl -u javalinky -f        # 跟踪日志
+sudo journalctl -u javalinky --since "10 min ago" -p err   # 只看错误
+</pre>
+</div>
+
+<h3>④ nginx 反向代理</h3>
+
+<div class="code" data-lang="nginx" data-file="/etc/nginx/sites-available/javalinky">
+<pre>
+# HTTP 全部跳到 HTTPS（证书验证路径除外）
+server {
+    listen 80;
+    server_name javalinky.example.com;
+
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name javalinky.example.com;
+
+    # 这两行由 certbot 自动填写
+    ssl_certificate     /etc/letsencrypt/live/javalinky.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/javalinky.example.com/privkey.pem;
+
+    # 安全响应头
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options    "nosniff" always;
+    add_header X-Frame-Options           "SAMEORIGIN" always;
+    add_header Referrer-Policy           "strict-origin-when-cross-origin" always;
+
+    client_max_body_size 10m;      # 上传限制
+
+    # 不要让内部端点暴露到公网
+    location /internal/ { deny all; }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Request-Id      $request_id;   # nginx 自己生成
+
+        proxy_http_version 1.1;
+        proxy_read_timeout 60s;
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+sudo ln -s /etc/nginx/sites-available/javalinky /etc/nginx/sites-enabled/
+sudo nginx -t &amp;&amp; sudo systemctl reload nginx
+
+# 申请证书（certbot 会自动改好上面那两行 ssl_certificate）
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d javalinky.example.com
+
+# 验证自动续期能工作
+sudo certbot renew --dry-run
+</pre>
+</div>
+
+<h3>⑤ 升级流程</h3>
+
+<div class="code" data-lang="bash" data-file="deploy.sh（放在本地）">
+<pre>
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOST="user@javalinky.example.com"
+
+echo "==&gt; 本地构建（包括跑测试）"
+mvn clean verify
+
+echo "==&gt; 上传"
+scp target/javalinky.jar "$HOST:/tmp/javalinky.jar"
+
+ssh "$HOST" bash -s &lt;&lt;'REMOTE'
+set -euo pipefail
+
+echo "==&gt; 备份当前版本（方便回滚）"
+sudo cp /opt/javalinky/javalinky.jar \
+        /opt/javalinky/javalinky.jar.bak-$(date +%Y%m%d-%H%M%S)
+
+echo "==&gt; 替换"
+sudo mv /tmp/javalinky.jar /opt/javalinky/javalinky.jar
+sudo chown javalinky:javalinky /opt/javalinky/javalinky.jar
+
+echo "==&gt; 跑部署任务（迁移 + 播种）"
+sudo -u javalinky env $(grep -v '^#' /etc/javalinky.env | xargs) \
+     java -cp /opt/javalinky/javalinky.jar com.example.javalinky.Cli deploy
+
+echo "==&gt; 重启"
+sudo systemctl restart javalinky
+
+echo "==&gt; 等它起来"
+for i in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1:8080/healthz &gt; /dev/null; then
+    echo "健康检查通过"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "启动失败，最近的日志："
+sudo journalctl -u javalinky -n 50 --no-pager
+exit 1
+REMOTE
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 这个脚本里有三个值得学的细节</div>
+  <ol>
+    <li><strong><code>set -euo pipefail</code></strong>：任何一步失败就立刻中止。
+        没有它的话，上传失败了脚本还会继续重启服务，于是你重启了一个旧版本还以为部署成功了。</li>
+    <li><strong>备份旧 jar</strong>：回滚就是 <code>mv</code> 回来再 restart，几秒钟的事。</li>
+    <li><strong>部署后做健康检查</strong>：不验证就等于不知道部署成功没有。
+        失败时自动打印日志，省得你再 ssh 一次。</li>
+  </ol>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 这个流程有一次短暂的服务中断</div>
+  <p>
+    <code>systemctl restart</code> 期间（约 1–3 秒）请求会被拒绝。
+    对个人项目完全可以接受。要做到零中断需要：
+  </p>
+  <ul>
+    <li>起两个实例（<code>javalinky@1</code>、<code>javalinky@2</code>，systemd 模板单元）；</li>
+    <li>nginx 配置 <code>upstream</code> 指向两个端口；</li>
+    <li>逐个重启，重启前先从 upstream 里摘掉。</li>
+  </ul>
+  <p>
+    另外注意：<strong>零中断部署要求数据库迁移是向后兼容的</strong>——
+    新旧两个版本会同时连着同一个数据库。
+    所以不能在一次发版里"删一列"：要先发一个版本停止使用它，下一个版本再删。
+  </p>
+</div>
+
+<h2 id="checklist">上线检查清单</h2>
+
+<div class="box key">
+  <div class="t">&#9728; 第一次上线前，照着过一遍</div>
+
+  <h4>安全</h4>
+  <ul>
+    <li><code>SECRET_KEY</code> 是随机生成的，不是默认值，而且没进版本库</li>
+    <li>数据库密码是强密码，数据库<strong>不监听公网</strong></li>
+    <li>全站 HTTPS，HTTP 301 跳转，HSTS 头已设置</li>
+    <li>会话 Cookie 带 <code>Secure</code> + <code>HttpOnly</code> + <code>SameSite</code></li>
+    <li>CSRF 防护开启（第 4 章），并确认 <code>/api/*</code> 被正确排除</li>
+    <li><code>enableDevLogging</code> 和 <code>enableRouteOverview</code> <strong>已关闭</strong></li>
+    <li><code>/internal/metrics</code> 之类的内部端点不可公网访问</li>
+    <li>应用不以 root 运行</li>
+    <li>错误页不泄露堆栈信息</li>
+  </ul>
+
+  <h4>数据</h4>
+  <ul>
+    <li>迁移在一个<strong>空库</strong>上从零跑通过（第 15 章的测试已经天天在验证这件事）</li>
+    <li>有自动备份，而且<strong>验证过能恢复</strong>（没验证过的备份等于没有备份）</li>
+    <li>连接池大小和数据库的 <code>max_connections</code> 匹配得上</li>
+  </ul>
+
+  <h4>可运维</h4>
+  <ul>
+    <li>日志有地方存、能检索，而且带请求 ID</li>
+    <li>有健康检查端点，并且真的检查了依赖</li>
+    <li>进程挂了会自动重启</li>
+    <li>错误有告警（哪怕只是邮件）</li>
+    <li>有一条命令就能回滚</li>
+    <li>慢查询日志已开启（第 16 章）</li>
+  </ul>
+
+  <h4>正确性</h4>
+  <ul>
+    <li>生产配置下本地跑通过（<code>APP_PROFILE=prod</code>）</li>
+    <li>邮件真的能发出去，而且链接是 <code>https://</code> 的绝对地址</li>
+    <li>反向代理后面 <code>ctx.ip()</code> 拿到的是真实客户端 IP</li>
+    <li>静态文件有缓存头，而且更新后不会取到旧版本</li>
+  </ul>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书检查点：本章对应原书 <b>git checkout 17a 到 17g</b>（部署任务、错误日志、Heroku、Docker、Compose、传统部署）。</div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>执行 <code>mvn clean package</code>，然后用生产配置在本地跑起打好的 jar。
+        确认模板能正常渲染（这验证了 JTE 预编译配置正确）。</li>
+    <li>把 <code>SECRET_KEY</code> 去掉再启动，确认它<strong>启动失败</strong>并明确告诉你缺什么。</li>
+    <li>按 Dockerfile 构建镜像，对比两个阶段镜像的大小：
+        <code>docker images</code>。然后 <code>docker compose up</code> 把应用和 Postgres 一起跑起来。</li>
+    <li>在容器里执行 <code>Cli deploy</code> 两次，确认第二次也成功（幂等）。</li>
+    <li>用 <code>docker compose stop app</code> 停掉应用，再看
+        <code>docker compose ps</code> 里 <code>db</code> 的健康状态。
+        然后 <code>docker compose up -d app</code>，观察它是怎么等数据库就绪的。</li>
+    <li>给 <code>RequestId</code> 过滤器加上，然后故意触发一个 500 错误。
+        在日志里 grep 那个请求 ID，确认能看到这次请求的全部日志行。</li>
+    <li>模拟代理场景：用 <code>curl -H "X-Forwarded-For: 1.2.3.4" -H "X-Forwarded-Proto: https"</code>
+        访问一个会打印 <code>ctx.ip()</code> 和 <code>ctx.scheme()</code> 的调试路由。
+        分别在 <code>BEHIND_PROXY</code> 为 true 和 false 时试，对比结果 ——
+        然后想一想为什么这个开关不能默认开。</li>
+    <li>（进阶）租一台最便宜的 VPS，按"路线三"完整部署一次，
+        包括申请 Let's Encrypt 证书。这个过程会让你对前 16 章的所有配置项
+        都有新的理解。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
