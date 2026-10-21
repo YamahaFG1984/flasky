@@ -22,8 +22,11 @@
 <div class="box note">
   <div class="t">&#9432; 关于这些报错文本的来源</div>
   <p>
-    标 <strong>&#10003;</strong> 的，是写这本书的配套代码时<strong>真的撞上并记录下来的原文</strong>
-    （完整清单在 <code>javalinky/TUTORIAL-DIFFS.md</code>）。
+    标 <strong>&#10003;</strong> 的，是写这本书的配套代码时<strong>真的撞上并记录下来的原文</strong>。
+    它们有两个来源：主线 1–18 章的完整清单在
+    <code>javalinky/TUTORIAL-DIFFS.md</code>；进阶专题（19–24 章）的则直接记在本附录里。
+  </p>
+  <p>
     没标的是 Java / Maven / Hibernate 生态里的常见报错，
     具体文字可能因版本略有出入，但关键词和原因是对的。
   </p>
@@ -184,6 +187,24 @@
 </tr>
 
 <tr>
+  <td><code>Unknown entity: com.example.javalinky.model.RecoveryCode</code></td>
+  <td>新建了 <code>@Entity</code> 但<strong>忘了往 <code>persistence.xml</code>
+      的 <code>&lt;class&gt;</code> 清单里加一行</strong>。
+      本项目是显式列实体的，不走自动扫描</td>
+  <td>加上那一行（第 22 章）。顺带提醒：新实体往往还要配一个 Flyway 迁移</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>Cannot access central
+      (https://repo.maven.apache.org/maven2)<br>in offline mode and the artifact
+      ... has not<br>been downloaded from it before</code></td>
+  <td>你在 <code>dependencyManagement</code> 里钉了一个<strong>新版本</strong>，
+      但本地仓库里没有它，而这次构建带了 <code>-o</code>（离线）</td>
+  <td>去掉 <code>-o</code> 跑一次（或 <code>mvn dependency:resolve</code>）
+      把它拉下来（第 24 章）</td>
+</tr>
+
+<tr>
   <td>启动后终端被几百行 <code>DEBUG</code> 刷屏</td>
   <td>没有 <code>logback.xml</code>，Logback 退回默认的 DEBUG 级别</td>
   <td>加一个最小的 <code>src/main/resources/logback.xml</code>（第 2 章）</td>
@@ -241,6 +262,52 @@
   <td>NPE。Java 14+ 的报错会<strong>明确指出是哪个表达式</strong>，
       比老版本的「NullPointerException」一行好查太多</td>
   <td>认真读那个变量名。常见来源：<code>ctx.formParam()</code> 对不存在的字段返回 null</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> 新加的路由一直 <code>404</code>，
+      但你确信注册了</td>
+  <td>在 <code>path("/auth", () -&gt; { ... })</code> 块里写了<strong>绝对路径</strong>。
+      块内路径是<strong>相对</strong>的，<code>get(Routes.TWO_FACTOR)</code>
+      （值是 <code>/auth/2fa</code>）会变成 <code>/auth/auth/2fa</code></td>
+  <td>块内只写 <code>"/2fa"</code>。
+      用 <code>enableRouteOverview("/routes")</code> 能一眼看出真实路径（第 22 章）</td>
+</tr>
+
+<tr>
+  <td>SSE 连上之后<strong>立刻断开，然后每 3 秒重连一次</strong></td>
+  <td>处理器里忘了调 <code>client.keepAlive()</code>。
+      方法一返回 Javalin 就把连接关了</td>
+  <td>加上 <code>keepAlive()</code>。
+      没加的话它等于一个<strong>非常昂贵的轮询</strong>（第 21 章）</td>
+</tr>
+
+<tr>
+  <td><code>IllegalStateException: 当前请求没有 EntityManager</code><br>
+      （在 WebSocket 回调里）</td>
+  <td><code>UnitOfWork</code> 是一个 HTTP <code>before</code> 过滤器，
+      <strong>WebSocket 的消息回调不经过它</strong>。
+      定时任务、<code>Cli</code> 也一样</td>
+  <td>用 <code>Db.withEntityManager(em -&gt; ...)</code> 自己开一个（第 21 章）</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>DateTimeException: Unknown time-zone ID</code><br>
+      而且<strong>这个用户的每个请求都 500</strong></td>
+  <td>时区偏好存在 Cookie 里 = 客户端完全可控。
+      <code>ZoneId.of()</code> 的异常没接住，于是连「去设置页改回来」
+      那个请求也是 500 —— 用户被自己锁死了</td>
+  <td>解析一律 try/catch 回落到默认值（第 23 章）。
+      同类的还有 <code>Integer.parseInt</code>、<code>UUID.fromString</code></td>
+</tr>
+
+<tr>
+  <td>上传稍大的图片就 <code>413 Request Entity Too Large</code>，
+      而且页面很难看</td>
+  <td>nginx 的 <code>client_max_body_size</code> <strong>默认只有 1MB</strong>，
+      请求根本没到应用</td>
+  <td>把它调到比应用层限制宽一点（第 17、20 章）。
+      报错和你改的东西毫无关系，所以很难联想</td>
 </tr>
 
 <tr>
@@ -312,6 +379,34 @@
 </tr>
 
 <tr>
+  <td><strong>&#10003;</strong> 手搓的 multipart 请求，
+      服务端<strong>一个字段都解析不出来</strong></td>
+  <td>换行用了 <code>\n</code>。multipart 的格式规定是
+      <strong><code>\r\n</code></strong></td>
+  <td>每一处换行都改成 <code>\r\n</code>（第 20 章）。
+      同样是静悄悄地失败 —— 请求发出去了，也有响应</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> SSE 测试：关掉连接后断言
+      「连接数变成 1」，实际是 2</td>
+  <td><strong>测试的假设错了，代码也错了。</strong>
+      TCP 对端关闭不会被服务端立刻感知；而且往半关闭的 socket 写
+      <b>是成功的</b>（实测推 4 次死连接纹丝不动）</td>
+  <td>代码加心跳，测试等一个心跳周期（第 21 章）。
+      <strong>测试失败时先问「是测试错了还是代码错了」</strong></td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> WebSocket 测试：
+      断言「发起者不该收到自己的消息」失败</td>
+  <td>Javalin <strong>每个事件都新建一个 <code>WsContext</code></strong>，
+      <code>onConnect</code> 存进集合的那个和 <code>onMessage</code>
+      拿到的不是同一个实例，<code>ctx != sender</code> 永远成立</td>
+  <td>按 <code>sessionId()</code> 比（第 21 章）</td>
+</tr>
+
+<tr>
   <td>并发测试<strong>一次都没红过</strong>，
       但你知道那段代码有竞态</td>
   <td>很可能用了虚拟线程。它们挤在 CPU 核数个载体线程上，
@@ -353,6 +448,37 @@
       纯文本模板需要单独的源目录 + <code>contentType=Plain</code>
       + <strong>不同的 packageName</strong></td>
   <td>配两个 execution（第 17 章）</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> <code>RequireUpperBoundDeps failed</code></td>
+  <td>Maven 的「最近者优先」仲裁选了一个<strong>比某条路径要求的还低</strong>
+      的版本。这正是第 8 章那个 <code>NoSuchMethodError</code> 的形状，
+      只是还没炸</td>
+  <td>在 <code>dependencyManagement</code> 里把它钉到够高的版本。
+      本项目实测有 4 条，修完就绿了（第 24 章）</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> 按 <code>dependency:analyze</code> 的
+      「Unused declared」提示删依赖，然后启动失败：<br>
+      <code>No suitable driver found</code> /
+      「没有日志实现」/「找不到校验器实现」</td>
+  <td><strong>那一组几乎全是误报。</strong>
+      JDBC 驱动、logback、hibernate-validator、angus-mail 都是靠
+      <code>ServiceLoader</code> 在运行时加载的，
+      代码里一行 <code>import</code> 都没有，静态分析看不见</td>
+  <td>把它们加进 <code>ignoredUnusedDeclaredDependencies</code>
+      标注出来，<strong>不要删</strong>（第 24 章）</td>
+</tr>
+
+<tr>
+  <td><code>DependencyConvergence failed</code>，
+      而且一报就是几十条</td>
+  <td>这条规则要求<strong>所有路径的版本完全一致</strong>，
+      对真实项目太严。本项目 7 条里绝大多数是无害的补丁号差异</td>
+  <td>改用 <code>requireUpperBoundDeps</code> ——
+      它只管「有没有选低了」，报出来的每一条都是真问题（第 24 章）</td>
 </tr>
 
 <tr>
@@ -426,6 +552,120 @@
 </tr>
 
 <tr>
+  <td><strong>&#10003;</strong> 表单提交一切正常，但
+      <code>ctx.uploadedFile()</code> <strong>永远是 null</strong></td>
+  <td>表单漏了 <code>enctype="multipart/form-data"</code>。
+      默认编码<strong>只把文件名当普通文本字段发过去</strong>，内容根本不发。
+      浏览器、服务器都不报错</td>
+  <td>20</td>
+</tr>
+
+<tr>
+  <td>上传功能「工作正常」，直到有人传了个 webshell 进来</td>
+  <td>按扩展名或 <code>Content-Type</code> 判断文件类型。
+      <strong>这两个都是客户端说了算的</strong>，
+      <code>curl -F "x=@shell.jsp;filename=a.png;type=image/png"</code> 就绕过了</td>
+  <td>20</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> SSE 连接数只增不减，内存慢慢涨</td>
+  <td>没有心跳。两个直觉都是错的：断开不会被立刻感知（TCP 半关闭），
+      <strong>而且往半关闭的 socket 写是成功的</strong>
+      —— 实测连推 4 次，死连接纹丝不动</td>
+  <td>21</td>
+</tr>
+
+<tr>
+  <td><strong>&#10003;</strong> WebSocket 广播时，发起者<strong>收到了自己的消息</strong></td>
+  <td>用 <code>ctx != sender</code> 判断发起者。
+      Javalin 每个事件都新建一个 <code>WsContext</code>。
+      坑在于它<strong>重写了 <code>equals</code></strong>，
+      所以放进 <code>Set</code> 去重是对的 —— 只有引用比较会错</td>
+  <td>21</td>
+</tr>
+
+<tr>
+  <td>推送来的评论内容里带 <code>&lt;script&gt;</code>，然后它执行了</td>
+  <td>前端用 <code>innerHTML</code> 拼推送内容。
+      <strong>服务端 JTE 的自动转义管不到浏览器里拼的 HTML</strong></td>
+  <td>21</td>
+</tr>
+
+<tr>
+  <td><strong>开了两步验证，但它形同虚设</strong></td>
+  <td>密码校验通过后就先把用户登录了，再跳到验证码页面「挡」一下。
+      攻击者<strong>不访问那个页面</strong>，直接去 <code>/edit-profile</code> 就进去了</td>
+  <td>22</td>
+</tr>
+
+<tr>
+  <td>所有用户都说验证码不对，但你的算法「看起来是对的」</td>
+  <td>TOTP 实现差一位。<strong>结果照样是六位数字</strong>，
+      看不出任何异常 —— 你会先去怀疑用户的手机时间</td>
+  <td>22</td>
+</tr>
+
+<tr>
+  <td>同一个验证码能用两次</td>
+  <td>只校验了「码对不对」，没记用过的时间片。
+      一个码在 30 秒窗口内本来就有效很多次</td>
+  <td>22</td>
+</tr>
+
+<tr>
+  <td><strong>用户的账号被别人接管了</strong>，而且日志里一切正常</td>
+  <td>第三方登录无条件「按邮箱关联已有账号」。
+      攻击者先用受害者的邮箱注册但<strong>不验证</strong>，
+      等受害者用 GitHub 登录，就被绑到攻击者的账号上了</td>
+  <td>22</td>
+</tr>
+
+<tr>
+  <td>服务器从上海迁到法兰克福之后，<strong>所有历史时间都错了 7 小时</strong>，
+      而且修不回来</td>
+  <td>实体里用了 <code>LocalDateTime</code>。它没有时区，
+      所以你<strong>不知道每条记录当初是按哪个时区写的</strong></td>
+  <td>23</td>
+</tr>
+
+<tr>
+  <td>每年两天，定时任务的执行时间莫名其妙差一小时</td>
+  <td>把「加一天」写成了 <code>plus(Duration.ofDays(1))</code>。
+      夏令时切换当天只有 23 小时。日历意义上的加一天是 <code>plusDays(1)</code></td>
+  <td>23</td>
+</tr>
+
+<tr>
+  <td>定时任务在夏令时切换那天<strong>跑在了错误的时刻</strong></td>
+  <td>用了一个<strong>不存在的本地时间</strong>（如纽约 3/8 02:30）。
+      <code>java.time</code> 会静默顺延到 03:30 而不是报错</td>
+  <td>23</td>
+</tr>
+
+<tr>
+  <td>晚上发的内容，第二天凌晨显示成「2 小时前」而不是「昨天」</td>
+  <td>跨日判断写成了 <code>elapsed.toHours() &lt; 48</code>。
+      <strong>「今天/昨天」是日历概念，必须先转到用户时区再比 <code>LocalDate</code></strong></td>
+  <td>23</td>
+</tr>
+
+<tr>
+  <td>同一份代码，开发机显示中文、服务器显示英文</td>
+  <td><code>ResourceBundle</code> 找不到对应语言时，
+      默认<strong>回退到运行 JVM 那台机器的系统语言</strong>。
+      在开发机上永远复现不出来</td>
+  <td>23</td>
+</tr>
+
+<tr>
+  <td>依赖「目前没问题」，某次例行升级后突然 <code>NoSuchMethodError</code></td>
+  <td>仲裁一直选着一个偏低的版本，只是那几个补丁版本之间
+      <strong>碰巧</strong>没有新增必需的 API。隐患一直在</td>
+  <td>24</td>
+</tr>
+
+<tr>
   <td>首页越来越慢，但每条 SQL 都很快</td>
   <td>N+1。单条都快，架不住发了 21 条</td>
   <td>11、16</td>
@@ -449,7 +689,7 @@
 </div>
 
 <div class="box key">
-  <div class="t">&#9728; 从这张表里能总结出三条经验</div>
+  <div class="t">&#9728; 从这张表里能总结出五条经验</div>
   <ol>
     <li>
       <strong>「配了但不生效」比「配错了报错」危险得多。</strong>
@@ -469,6 +709,21 @@
       <strong><code>NoSuchMethodError</code> 永远先想依赖冲突。</strong>
       它和 <code>ClassNotFoundException</code> 的区别是整个 Java 依赖体系里
       最值得记住的一条：前者是版本不对，后者是压根没有。
+    </li>
+    <li>
+      <strong>测试失败时，先问「是测试错了还是代码错了」。</strong>
+      上面那条 SSE 的连接回收，<strong>两个都错了</strong> ——
+      测试的假设不成立，代码也真的在泄漏。
+      如果当时图省事把断言改成 <code>&le; 2</code> 让它变绿，
+      泄漏就会一直留在代码里。
+      <strong>把失败的测试「改成通过」是最容易犯、代价最大的一类操作。</strong>
+    </li>
+    <li>
+      <strong>别全信工具。</strong><code>dependency:analyze</code> 的
+      「Unused declared」几乎全是误报，照着删会把应用删崩；
+      <code>dependencyConvergence</code> 报的几十条里大多数无害。
+      工具给的是<strong>线索</strong>，不是结论 ——
+      能分辨哪条该听，才是这件事里真正的技能。
     </li>
   </ol>
 </div>
