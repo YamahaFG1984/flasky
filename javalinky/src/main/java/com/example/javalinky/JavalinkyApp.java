@@ -53,6 +53,7 @@ public final class JavalinkyApp {
             // 过滤器（顺序有讲究，见下面的说明）
             UnitOfWork.install(javalin);
             Csrf.install(javalin);
+            CurrentUser.install(javalin);   // 必须在 UnitOfWork 之后：它要用 EntityManager
 
             // 按配置开关开发辅助
             if (cfg.devLogging())    javalin.bundledPlugins.enableDevLogging();

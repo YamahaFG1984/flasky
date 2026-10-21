@@ -69,8 +69,11 @@ public record AppConfig(
             Profile.TEST,
             0,                       // 0 = 让系统随便分配一个空闲端口
             "http://localhost",
-            // 每次测试一个全新的内存库，互不干扰
-            "jdbc:h2:mem:test-" + java.util.UUID.randomUUID() + ";MODE=PostgreSQL",
+            // 每次测试一个全新的内存库，互不干扰。
+            // DB_CLOSE_DELAY=-1 必不可少：否则 Flyway 迁移完关掉连接，
+            // 整个内存库就被丢掉了，Hibernate 再连上去会发现“表不存在”
+            "jdbc:h2:mem:test-" + java.util.UUID.randomUUID()
+                + ";MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
             "sa", "",
             "test-secret-key",
             false,

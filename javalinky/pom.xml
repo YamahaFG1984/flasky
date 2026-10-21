@@ -18,6 +18,7 @@
     <javalin.version>7.2.3</javalin.version>
     <logback.version>1.5.20</logback.version>
     <jte.version>3.2.4</jte.version>
+    <jackson.version>2.20.0</jackson.version>
     <junit.version>5.14.0</junit.version>
     <assertj.version>3.27.6</assertj.version>
     <hibernate-validator.version>9.0.1.Final</hibernate-validator.version>
@@ -25,9 +26,20 @@
     <flyway.version>11.14.0</flyway.version>
   </properties>
 
-  <!-- 用 BOM 统一管理 JUnit 各模块的版本 -->
+  <!-- 用 BOM 统一管理一组库的版本。
+       Jackson 这一条是必需的：java-jwt 带来 jackson-databind 2.19，
+       传递下来的 jackson-core 却是 2.15，运行时会抛
+       NoSuchMethodError: BufferRecycler.releaseToPool()。
+       导入 jackson-bom 能把整组 jackson 对齐到同一个版本。 -->
   <dependencyManagement>
     <dependencies>
+      <dependency>
+        <groupId>com.fasterxml.jackson</groupId>
+        <artifactId>jackson-bom</artifactId>
+        <version>${jackson.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
       <dependency>
         <groupId>org.junit</groupId>
         <artifactId>junit-bom</artifactId>
@@ -111,6 +123,20 @@
       <groupId>com.h2database</groupId>
       <artifactId>h2</artifactId>
       <version>2.3.232</version>
+    </dependency>
+
+    <!-- 纯 Java 实现的 bcrypt，没有本地库依赖 -->
+    <dependency>
+      <groupId>at.favre.lib</groupId>
+      <artifactId>bcrypt</artifactId>
+      <version>0.10.2</version>
+    </dependency>
+
+    <!-- 签发/校验确认邮件、重置密码用的令牌 -->
+    <dependency>
+      <groupId>com.auth0</groupId>
+      <artifactId>java-jwt</artifactId>
+      <version>4.5.0</version>
     </dependency>
 
     <!-- Jakarta Mail 的 API + 实现（Angus Mail 自带 API，加一个就够） -->

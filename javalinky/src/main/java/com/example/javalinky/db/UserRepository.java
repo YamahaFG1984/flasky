@@ -56,6 +56,13 @@ public class UserRepository {
                  .getSingleResult();
     }
 
+    public boolean usernameExists(String username) {
+        return em.createQuery(
+                "select count(u) from User u where lower(u.username) = lower(:name)", Long.class)
+            .setParameter("name", username)
+            .getSingleResult() > 0;
+    }
+
     public boolean emailExists(String email) {
         return em.createQuery(
                 "select count(u) from User u where lower(u.email) = lower(:email)", Long.class)

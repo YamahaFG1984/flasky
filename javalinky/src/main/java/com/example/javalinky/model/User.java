@@ -1,5 +1,6 @@
 package com.example.javalinky.model;
 
+import com.example.javalinky.util.Passwords;
 import jakarta.persistence.*;
 import java.time.Instant;
 
@@ -48,6 +49,16 @@ public class User {
     public void setUsername(String username) { this.username = username; }
     public String getPasswordHash() { return passwordHash; }
     public void setPasswordHash(String h) { this.passwordHash = h; }
+
+    /** 设置密码。注意：参数是明文，但存进字段的是哈希 */
+    public void setPassword(String plaintext) {
+        this.passwordHash = Passwords.hash(plaintext);
+    }
+
+    /** 校验密码 */
+    public boolean checkPassword(String plaintext) {
+        return Passwords.verify(plaintext, this.passwordHash);
+    }
     public boolean isConfirmed() { return confirmed; }
     public void setConfirmed(boolean c) { this.confirmed = c; }
     public Instant getMemberSince() { return memberSince; }

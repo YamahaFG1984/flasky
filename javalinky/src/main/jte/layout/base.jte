@@ -1,5 +1,6 @@
 @import gg.jte.Content
 @import com.example.javalinky.web.Layout
+@import com.example.javalinky.web.Routes
 
 @param Layout layout
 @param Content content
@@ -27,10 +28,37 @@
     </button>
     <div class="collapse navbar-collapse" id="nav">
       <ul class="navbar-nav me-auto">
-        <li class="nav-item"><a class="nav-link" href="/">首页</a></li>
+        <li class="nav-item"><a class="nav-link" href="${Routes.INDEX}">首页</a></li>
+        @if(layout.isAuthenticated())
+          <li class="nav-item">
+            <a class="nav-link" href="${Routes.user(layout.currentUser().getUsername())}">我的主页</a>
+          </li>
+        @endif
       </ul>
+
       <ul class="navbar-nav">
-        <%-- 第 8 章在这里放登录/账户菜单 --%>
+        @if(layout.isAuthenticated())
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle" href="#" data-bs-toggle="dropdown">
+              ${layout.currentUser().getUsername()}
+            </a>
+            <ul class="dropdown-menu dropdown-menu-end">
+              <li><a class="dropdown-item" href="${Routes.CHANGE_PASSWORD}">修改密码</a></li>
+              <li><a class="dropdown-item" href="${Routes.CHANGE_EMAIL}">修改邮箱</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li>
+                <%-- 登出用 POST，不用 GET --%>
+                <form method="post" action="${Routes.LOGOUT}" class="px-3 py-1">
+                  @template.tag.csrf(token = layout.csrfToken())
+                  <button class="btn btn-sm btn-outline-secondary w-100" type="submit">登出</button>
+                </form>
+              </li>
+            </ul>
+          </li>
+        @else
+          <li class="nav-item"><a class="nav-link" href="${Routes.LOGIN}">登录</a></li>
+          <li class="nav-item"><a class="nav-link" href="${Routes.REGISTER}">注册</a></li>
+        @endif
       </ul>
     </div>
   </div>

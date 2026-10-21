@@ -4,6 +4,7 @@ import com.example.javalinky.config.AppConfig;
 import com.example.javalinky.db.Db;
 import com.example.javalinky.db.UserRepository;
 import com.example.javalinky.mail.MailService;
+import com.example.javalinky.service.AuthService;
 import io.javalin.http.Context;
 
 /**
@@ -14,11 +15,12 @@ import io.javalin.http.Context;
  */
 public record Services(
     AppConfig config,
-    MailService mail
+    MailService mail,
+    AuthService auth
 ) {
 
     public static Services wire(AppConfig cfg, MailService mail) {
-        return new Services(cfg, mail);
+        return new Services(cfg, mail, new AuthService(cfg, mail));
     }
 
     // ---- 请求级别的仓储（每次调用都用当前请求的 EntityManager）----

@@ -11,6 +11,10 @@ public final class Routes {
     public static final String LOGOUT = "/auth/logout";
     public static final String REGISTER = "/auth/register";
     public static final String EDIT_PROFILE = "/edit-profile";
+    public static final String CHANGE_PASSWORD = "/auth/change-password";
+    public static final String CHANGE_EMAIL = "/auth/change-email";
+    public static final String RESET_PASSWORD = "/auth/reset";
+    public static final String UNCONFIRMED = "/auth/unconfirmed";
 
     public static String user(String username) {
         return "/user/" + enc(username);
