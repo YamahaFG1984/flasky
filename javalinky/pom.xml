@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!-- 1. 本项目自己的坐标 -->
+  <groupId>com.example</groupId>
+  <artifactId>javalinky</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <!-- 2. 把版本号集中在一处，后面引用 ${javalin.version} 即可 -->
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <javalin.version>7.2.3</javalin.version>
+    <logback.version>1.5.20</logback.version>
+  </properties>
+
+  <!-- 3. 依赖 -->
+  <dependencies>
+    <dependency>
+      <groupId>io.javalin</groupId>
+      <artifactId>javalin</artifactId>
+      <version>${javalin.version}</version>
+    </dependency>
+
+    <!-- Javalin 只依赖 SLF4J 接口，不带实现。不加这一条启动时会警告“没有日志实现” -->
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <version>${logback.version}</version>
+    </dependency>
+  </dependencies>
+
+  <!-- 4. 插件：告诉 Maven 用什么工具干活 -->
+  <build>
+    <plugins>
+      <!-- 用 mvn exec:java 直接运行 main 方法，省得手拼 classpath -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <configuration>
+          <mainClass>com.example.javalinky.App</mainClass>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

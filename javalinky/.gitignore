@@ -1,0 +1,14 @@
+target/
+.env
+*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# JTE 生成的类（第 3 章）
+jte-classes/
