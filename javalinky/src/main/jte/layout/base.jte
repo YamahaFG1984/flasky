@@ -37,7 +37,15 @@
 </nav>
 
 <div class="container py-4">
-  <%-- 第 4 章在这里渲染 Flash 消息 --%>
+
+  @for(var flash : layout.flashes())
+    <div class="alert alert-${flash.level()} alert-dismissible fade show" role="alert">
+      ${flash.message()}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"
+              aria-label="关闭"></button>
+    </div>
+  @endfor
+
   ${content}
 </div>
 

@@ -1,9 +1,5 @@
 package com.example.javalinky.web;
 
-/** 所有页面都需要的、和布局有关的数据。第 8 章会往里加 currentUser。 */
-public record Layout(String title) {
+import java.util.List;
 
-    public static Layout of(String title) {
-        return new Layout(title);
-    }
-}
+public record Layout(String title, String csrfToken, List<Flash> flashes) {}

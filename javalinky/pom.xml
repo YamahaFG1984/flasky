@@ -18,6 +18,7 @@
     <javalin.version>7.2.3</javalin.version>
     <logback.version>1.5.20</logback.version>
     <jte.version>3.2.4</jte.version>
+    <hibernate-validator.version>9.0.1.Final</hibernate-validator.version>
   </properties>
 
   <!-- 3. 依赖 -->
@@ -47,6 +48,19 @@
       <groupId>gg.jte</groupId>
       <artifactId>jte</artifactId>
       <version>${jte.version}</version>
+    </dependency>
+
+    <!-- Bean Validation 的参考实现 -->
+    <dependency>
+      <groupId>org.hibernate.validator</groupId>
+      <artifactId>hibernate-validator</artifactId>
+      <version>${hibernate-validator.version}</version>
+    </dependency>
+    <!-- 注解里 message 的表达式求值需要它 -->
+    <dependency>
+      <groupId>org.glassfish.expressly</groupId>
+      <artifactId>expressly</artifactId>
+      <version>6.0.0</version>
     </dependency>
   </dependencies>
 
