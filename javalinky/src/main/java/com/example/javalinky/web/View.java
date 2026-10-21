@@ -13,7 +13,9 @@ public final class View {
             title,
             ctx.attribute("csrfToken"),   // 由 CSRF 过滤器放进来
             Flash.consume(ctx),           // 注意：读取即清空
-            CurrentUser.get(ctx)
+            CurrentUser.get(ctx),
+            Localization.formats(ctx),    // 第 23 章
+            Localization.messages(ctx)
         ));
         for (int i = 0; i < pairs.length; i += 2) {
             model.put((String) pairs[i], pairs[i + 1]);   // HashMap 允许 null 值

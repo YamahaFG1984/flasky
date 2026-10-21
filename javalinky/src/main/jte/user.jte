@@ -38,8 +38,8 @@
       @endif
 
       <p class="text-secondary small mb-2">
-        注册于 @template.tag.timeago(at = page.memberSince(), relative = false)
-        · 最后活跃 @template.tag.timeago(at = page.lastSeen())
+        注册于 @template.tag.timeago(layout = layout, at = page.memberSince(), relative = false)
+        · 最后活跃 @template.tag.timeago(layout = layout, at = page.lastSeen())
       </p>
 
       <p class="small">

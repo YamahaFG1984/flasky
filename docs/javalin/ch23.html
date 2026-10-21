@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 23 章 · 时区与国际化 — Javalin 社交博客实战</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="23">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 23 章</span>
+<h1>时区与国际化</h1>
+<p class="lede">
+  这一章的内容有个特点：<strong>平时完全看不出问题，
+  到了某几个特定的时刻就集体出错</strong> ——
+  跨年的那一夜、夏令时切换的那两个小时、用户出了一趟国。
+  好消息是我们从第 5 章起就把时间存成了 <code>Instant</code>，
+  地基是对的；要补的是「渲染的那一刻」。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>分清 <code>Instant</code> / <code>LocalDateTime</code> / <code>ZonedDateTime</code>，知道什么时候用哪个</li>
+    <li>理解<strong>「偏移量不是时区」</strong>，以及为什么这个区别会害死人</li>
+    <li>知道「昨天」「今天」这类判断<strong>必须先转时区再比日历</strong></li>
+    <li>用 <code>ResourceBundle</code> 做多语言，并正确协商 <code>Accept-Language</code></li>
+    <li>把用户输入的时区名当成不可信数据</li>
+  </ul>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128230; 本章代码</div>
+  <p>
+    这一章结束时的完整项目在仓库的 <code>javalinky/</code> 目录里，对应标签 <code>jv-ch23</code>：
+  </p>
+<div class="code" data-lang="bash">
+<pre>
+git checkout jv-ch23
+cd javalinky &amp;&amp; mvn -q compile exec:exec     # 打开 http://localhost:7070
+</pre>
+</div>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="types">先分清三个类型</h2>
+
+<p>
+  <code>java.time</code> 的设计非常好，但前提是<strong>你选对了类型</strong>。
+  选错的代价要很久以后才显现。
+</p>
+
+<div class="tw">
+<table>
+<tr><th>类型</th><th>表示什么</th><th>举例</th><th>什么时候用</th></tr>
+<tr>
+  <td><code>Instant</code></td>
+  <td><strong>时间轴上的一个点</strong>。没有时区、没有日历，
+      就是「从 1970 年起过了多少纳秒」</td>
+  <td>某条评论<strong>被发出</strong>的那一瞬间</td>
+  <td><strong>存数据库、记日志、算时长 —— 默认就用它</strong></td>
+</tr>
+<tr>
+  <td><code>LocalDateTime</code></td>
+  <td>墙上挂钟的读数。<strong>没有时区，所以它不对应任何确定的时刻</strong></td>
+  <td>「3 月 8 日上午 9 点」—— 但哪里的 9 点？</td>
+  <td>生日、营业时间、闹钟这类「在当地几点」的概念</td>
+</tr>
+<tr>
+  <td><code>ZonedDateTime</code></td>
+  <td>时刻 + 时区 + 日历规则，三者齐全</td>
+  <td>「纽约时间 3 月 8 日上午 9 点」</td>
+  <td>要做日历运算的时候（加一天、取这一天的开始）</td>
+</tr>
+</table>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 一条贯穿全书的规矩：<strong>存 UTC，渲染时才转</strong></div>
+<div class="code" data-lang="java">
+<pre>
+// 实体里（第 5 章起就是这样）
+@Column(nullable = false)
+private Instant timestamp = Instant.now();      // ✅ 没有时区的歧义
+
+// ❌ 千万别这样
+private LocalDateTime timestamp;                // 哪个时区的？谁也说不清
+</pre>
+</div>
+  <p>
+    <code>LocalDateTime</code> 存进数据库，<strong>在服务器从上海迁到法兰克福的那天
+    会集体错 7 小时</strong>，而且<strong>历史数据无法修复</strong> ——
+    因为你不知道每条记录当初是按哪个时区写的。
+  </p>
+  <p>
+    <code>Instant</code> 就没有这个问题：它本身就是绝对的，
+    服务器在哪、用户在哪，都只影响<strong>显示</strong>。
+  </p>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 偏移量不是时区</div>
+  <p>
+    <code>+08:00</code> 和 <code>Asia/Shanghai</code> 看起来是一回事，
+    <strong>完全不是</strong>：
+  </p>
+  <ul>
+    <li><code>+08:00</code> 是一个<strong>固定偏移</strong>，永远比 UTC 快 8 小时</li>
+    <li><code>Asia/Shanghai</code> 是一套<strong>规则</strong>：
+        现在是 +08:00，但 1986–1991 年中国实行过夏令时，那几年夏天是 +09:00</li>
+  </ul>
+  <p>
+    对有夏令时的地区，这个区别每年咬你两次：
+  </p>
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/LocalizationTest.java">
+<pre>
+@Test
+void 偏移量不等于时区() {
+    var realZone = ZoneId.of("America/New_York");
+    var fixed    = ZoneId.of("-05:00");    // 纽约的冬季偏移
+
+    Instant summer = Instant.parse("2026-07-01T12:00:00Z");
+    assertThat(summer.atZone(realZone).getHour())
+        .as("真时区懂夏令时，夏天是 -04:00")
+        .isNotEqualTo(summer.atZone(fixed).getHour());
+}
+</pre>
+</div>
+  <p>
+    <strong>所以用户的时区偏好一定要存 IANA 的名字</strong>
+    （<code>Asia/Shanghai</code>），不能存偏移量。
+    浏览器那边用 <code>Intl.DateTimeFormat().resolvedOptions().timeZone</code>
+    就能拿到正确的名字。
+  </p>
+</div>
+
+<h2 id="dst">夏令时：三个会咬人的事实</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="夏令时切换时的时间跳跃">
+  <text class="ttl" x="20" y="18">美国 2026 年 3 月 8 日，纽约本地时间</text>
+
+  <rect class="bx-d" x="20" y="30" width="720" height="80" rx="9"/>
+  <rect class="bx" x="40" y="48" width="110" height="30" rx="5"/>
+  <text class="mono sm" x="52" y="68">01:59:59</text>
+  <path class="ln-a" d="M155 63 H245" marker-end="url(#ar-a)"/>
+  <rect class="bx-r" x="250" y="48" width="200" height="30" rx="5"/>
+  <text class="sm on-r" x="262" y="68">02:00 ~ 02:59 不存在</text>
+  <path class="ln-a" d="M455 63 H545" marker-end="url(#ar-a)"/>
+  <rect class="bx" x="550" y="48" width="110" height="30" rx="5"/>
+  <text class="mono sm" x="562" y="68">03:00:00</text>
+  <text class="sm" x="40" y="98">时钟直接跳过一小时 —— 这一天只有 23 小时</text>
+
+  <rect class="bx-d" x="20" y="122" width="720" height="80" rx="9"/>
+  <text class="ttl" x="40" y="144">11 月 1 日回调时正好相反</text>
+  <rect class="bx-a" x="40" y="152" width="300" height="30" rx="5"/>
+  <text class="sm on-a" x="52" y="172">01:00 ~ 01:59 出现<tspan class="on-a">两次</tspan></text>
+  <text class="sm" x="360" y="172">所以「本地时间 01:30」是有歧义的，对应两个不同的时刻</text>
+
+  <rect class="bx-r" x="20" y="212" width="720" height="30" rx="7"/>
+  <text class="sm on-r" x="380" y="232" text-anchor="middle">推论：「一天 = 86400 秒」是错的，「加一天 = 加 24 小时」也是错的</text>
+</svg>
+<figcaption>图 23-1　夏令时切换当天，本地时间会跳过一小时或重复一小时</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="src/test/java/com/example/javalinky/LocalizationTest.java">
+<pre>
+@Test
+void 夏令时切换当天只有23小时() {
+    ZoneId ny = ZoneId.of("America/New_York");
+
+    ZonedDateTime before = ZonedDateTime.of(2026, 3, 8, 0, 30, 0, 0, ny);
+    ZonedDateTime after  = ZonedDateTime.of(2026, 3, 9, 0, 30, 0, 0, ny);
+
+    assertThat(java.time.Duration.between(before, after).toHours())
+        .as("日历上过了一天，但只过了 23 小时 —— 所以『一天 = 86400 秒』是错的")
+        .isEqualTo(23);
+}
+
+@Test
+void 不存在的本地时间会被调整而不是抛异常() {
+    ZoneId ny = ZoneId.of("America/New_York");
+    // 2026-03-08 02:30 在纽约<b>根本不存在</b>（时钟从 2:00 跳到 3:00）
+    ZonedDateTime ghost = ZonedDateTime.of(2026, 3, 8, 2, 30, 0, 0, ny);
+
+    assertThat(ghost.getHour())
+        .as("java.time 会把它顺延到 3:30，不会报错 —— 所以这种 bug 很难发现")
+        .isEqualTo(3);
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 「加一天」有两种含义，而且结果不一样</div>
+<div class="code" data-lang="java">
+<pre>
+ZonedDateTime t = ZonedDateTime.of(2026, 3, 7, 12, 0, 0, 0, ZoneId.of("America/New_York"));
+
+t.plusDays(1)            // 3 月 8 日 12:00 —— <b>日历上的一天</b>（实际过了 23 小时）
+t.plus(Duration.ofDays(1))  // 3 月 8 日 13:00 —— <b>物理上的 24 小时</b>
+</pre>
+</div>
+  <p>
+    两个都对，看你要的是哪个。「每天上午 9 点发日报」要的是前者，
+    「24 小时后令牌过期」要的是后者。
+    <strong>把它们搞混，用户就会在每年两个特定的日子收到晚一小时的日报。</strong>
+  </p>
+</div>
+
+<h2 id="render">渲染：时区在最后一刻才参与</h2>
+
+<div class="code" data-lang="java" data-file="src/main/java/com/example/javalinky/web/Formats.java">
+<pre>
+/**
+ * 按「看的人是谁」来格式化时间。
+ * 存的一律是 Instant（= UTC 的一个时刻，没有时区概念）；
+ * <b>时区只在渲染的那一刻才参与进来</b>。
+ */
+public record Formats(ZoneId zone, Locale locale) {
+
+    /** 2026年3月14日 15:09 */
+    public String dateTime(Instant at) {
+        if (at == null) return "";
+        return DateTimeFormatter.ofLocalizedDateTime(FormatStyle.LONG, FormatStyle.SHORT)
+            .withLocale(locale).withZone(zone).format(at);
+    }
+
+    /**
+     * 「3 分钟前」。
+     * 注意「昨天」「今天」这类判断必须<b>先转到用户时区再比日期</b> ——
+     * 直接拿 Instant 相减得到的是绝对时长，不是日历上的天数。
+     */
+    public String relative(Instant at, Instant now) {
+        if (at == null) return "";
+
+        Duration elapsed = Duration.between(at, now);
+        if (elapsed.isNegative()) return "刚刚";
+
+        long seconds = elapsed.toSeconds();
+        if (seconds &lt; 60)   return "刚刚";
+        if (seconds &lt; 3600) return elapsed.toMinutes() + " 分钟前";
+
+        // 跨不跨天是按<b>用户所在时区的日历</b>算的，不是按 24 小时
+        LocalDate thatDay = at.atZone(zone).toLocalDate();
+        LocalDate today   = now.atZone(zone).toLocalDate();
+
+        if (thatDay.equals(today))                return elapsed.toHours() + " 小时前";
+        if (thatDay.equals(today.minusDays(1)))   return "昨天";
+        if (thatDay.isAfter(today.minusDays(7)))  return today.toEpochDay() - thatDay.toEpochDay() + " 天前";
+        return date(at);
+    }
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 「昨天」不是「24 小时前」</div>
+  <p>
+    最常见的写法是 <code>if (elapsed.toHours() &lt; 48) return "昨天";</code>。
+    这在<strong>晚上</strong>会错得很明显：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+@Test
+void 跨日判断要按用户时区算而不是按24小时() {
+    ZoneId ny = ZoneId.of("America/New_York");
+    var formats = new Formats(ny, Locale.SIMPLIFIED_CHINESE);
+
+    // 纽约时间 1 月 1 日 23:00 和 1 月 2 日 01:00，只差 2 小时但<b>跨了一天</b>
+    Instant lateNight = ZonedDateTime.of(2026, 1, 1, 23, 0, 0, 0, ny).toInstant();
+    Instant nextDay   = ZonedDateTime.of(2026, 1, 2, 1, 0, 0, 0, ny).toInstant();
+
+    assertThat(formats.relative(lateNight, nextDay))
+        .as("只隔 2 小时，但日历上是昨天")
+        .isEqualTo("昨天");
+}
+</pre>
+</div>
+  <p>
+    正确的做法是把两个 <code>Instant</code> <strong>各自转到用户时区</strong>
+    拿到 <code>LocalDate</code>，再比日期。
+    「几分钟前」「几小时前」这类<strong>时长</strong>可以直接减，
+    「今天/昨天」这类<strong>日历概念</strong>不行。
+  </p>
+</div>
+
+<h3>模板那边</h3>
+
+<div class="code" data-lang="jte" data-file="src/main/jte/tag/timeago.jte">
+<pre>
+@param Layout layout
+@param Instant at
+@param boolean relative = true
+
+&lt;%-- datetime 属性里永远是 UTC 的 ISO 串（机器读），
+     显示出来的才是用户时区的本地时间（人读） --%&gt;
+&lt;time datetime="${layout.formats().iso(at)}"
+      title="${layout.formats().dateTime(at)}"&gt;
+    ${relative ? layout.formats().relative(at, Instant.now()) : layout.formats().dateTime(at)}
+&lt;/time&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么从「前端 JS 格式化」改成了服务端</div>
+  <p>
+    第 3 章那版是把 ISO 串扔给浏览器，让 JS 去转。那样有三个问题：
+    <strong>没有 JS 就看到一串 <code>2026-03-14T07:09:00Z</code></strong>、
+    爬虫和邮件里不对、以及<strong>首屏会闪一下</strong>（先显示 UTC 再被改写）。
+  </p>
+  <p>
+    服务端渲染的代价是：用户换了时区要刷新页面才生效。
+    对博客来说这完全可以接受。
+    <strong><code>&lt;time datetime&gt;</code> 属性仍然保留 UTC 的 ISO 串</strong> ——
+    那是给机器看的（搜索引擎、阅读器、辅助技术），两边各取所需。
+  </p>
+</div>
+
+<h2 id="i18n">多语言</h2>
+
+<div class="code" data-lang="properties" data-file="src/main/resources/messages_zh_CN.properties">
+<pre>
+# 注意 Java 9 起 .properties 默认按 UTF-8 读，不用再 native2ascii 了
+nav.home=首页
+nav.logout=登出
+
+post.comments={0,choice,0#还没有评论|1#1 条评论|1&lt;{0} 条评论}
+profile.member_since=注册于 {0}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9728; 不要自己拼句子</div>
+  <p>
+    最常见的国际化错误是这样写：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+// ❌ 这段代码无法翻译成很多语言
+String text = count + " " + msg.get("comments") + (count == 1 ? "" : "s");
+</pre>
+</div>
+  <p>
+    问题是<strong>语序和单复数规则是每种语言自己的事</strong>。
+    英语两种形式（1 / 其它），俄语三种，阿拉伯语六种，
+    中文一种但量词有很多个。把句子拆成零件在代码里拼，
+    等于假定所有语言都和英语一个结构。
+  </p>
+  <p>
+    正确做法是<strong>整句进文案文件，数字当参数传</strong>，
+    由 <code>MessageFormat</code> 的 <code>choice</code> 去选：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+var en = Messages.of(Locale.ENGLISH);
+en.get("post.comments", 0);   // "No comments"
+en.get("post.comments", 1);   // "1 comment"
+en.get("post.comments", 5);   // "5 comments"
+
+var zh = Messages.of(Locale.SIMPLIFIED_CHINESE);
+zh.get("post.comments", 0);   // "还没有评论"
+zh.get("post.comments", 5);   // "5 条评论"
+</pre>
+</div>
+  <p>
+    同一个 key、同一个调用，两种语言给出各自自然的句子 ——
+    而调用处<strong>一个 if 都没有</strong>。
+  </p>
+</div>
+
+<h3>语言协商：别自己解析 <code>Accept-Language</code></h3>
+
+<div class="code" data-lang="java" data-file="web/Messages.java">
+<pre>
+/**
+ * 从 Accept-Language 头里挑一个我们支持的语言。
+ * 自己解析这个头很容易写错，JDK 的 Locale.lookup 已经实现了 RFC 4647。
+ */
+public static Locale fromAcceptLanguage(String header) {
+    if (header == null || header.isBlank()) return Formats.DEFAULT_LOCALE;
+    try {
+        List&lt;Locale.LanguageRange&gt; ranges = Locale.LanguageRange.parse(header);
+        Locale match = Locale.lookup(ranges, SUPPORTED);
+        return match == null ? Formats.DEFAULT_LOCALE : match;
+    } catch (IllegalArgumentException e) {
+        // 畸形的头不该让整个请求挂掉
+        return Formats.DEFAULT_LOCALE;
+    }
+}
+</pre>
+</div>
+
+<p>
+  <code>Accept-Language: zh-CN,zh;q=0.9,en;q=0.8</code> 这个头比看起来复杂：
+  有权重、有通配、有「语言-地区」的层级回退规则。
+  <strong>JDK 已经按 RFC 4647 实现好了</strong>，自己写只会写出 bug。
+</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 关掉 <code>ResourceBundle</code> 的默认回退</div>
+<div class="code" data-lang="java">
+<pre>
+// 显式用 Control 关掉「找不到就回退到系统默认语言」这个行为 ——
+// 服务器的系统语言和用户想看什么毫无关系
+this.bundle = ResourceBundle.getBundle(BUNDLE, locale,
+    ResourceBundle.Control.getNoFallbackControl(ResourceBundle.Control.FORMAT_PROPERTIES));
+</pre>
+</div>
+  <p>
+    默认情况下 <code>ResourceBundle</code> 找不到 <code>messages_fr.properties</code> 时，
+    会回退到<strong>运行 JVM 的那台机器的默认语言</strong>。
+    开发机是中文、服务器是英文的话，<strong>同一份代码在两台机器上显示不同的语言</strong> ——
+    而且在开发机上永远复现不出来。
+  </p>
+</div>
+
+<h2 id="untrusted">用户给的时区名是不可信输入</h2>
+
+<div class="code" data-lang="java" data-file="web/Localization.java">
+<pre>
+/**
+ * 时区名来自用户输入或 Cookie，<b>一定要当成不可信的</b>。
+ * ZoneId.of 对非法值会抛异常，不接住的话任何人都能用一个
+ * tz=../../ 的 Cookie 把整站打成 500。
+ */
+public static ZoneId parseZone(String raw) {
+    if (raw == null || raw.isBlank()) return null;
+    try {
+        return ZoneId.of(raw.trim());
+    } catch (DateTimeException e) {
+        return null;
+    }
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 这是一个很容易被忽略的 DoS</div>
+  <p>
+    时区偏好通常存在 Cookie 里，而 <strong>Cookie 是客户端完全可控的</strong>。
+    <code>ZoneId.of("随便什么")</code> 抛 <code>DateTimeException</code>，
+    不接住的话<strong>这个用户的每一个请求都会 500</strong>，
+    包括「去设置页把它改回来」那个请求 —— 他被自己锁死了，
+    而且不知道要去清 Cookie。
+  </p>
+  <p>
+    一般规律：<strong>凡是把外部输入喂给一个「解析」函数的地方，
+    都要问一句「它解析失败会怎样」。</strong>
+    <code>ZoneId.of</code>、<code>Integer.parseInt</code>、
+    <code>UUID.fromString</code>、<code>Instant.parse</code> 全都是这一类。
+  </p>
+</div>
+
+<h3>偏好从哪来：四级回退</h3>
+
+<div class="tw">
+<table>
+<tr><th>优先级</th><th>来源</th><th>给谁用</th></tr>
+<tr><td>1</td><td>用户设置里选的（存数据库）</td><td>登录用户，换设备也跟着走</td></tr>
+<tr><td>2</td><td>Cookie</td><td>匿名用户也该能切语言</td></tr>
+<tr><td>3</td><td><code>Accept-Language</code> 头</td><td>第一次来的人，零配置就对</td></tr>
+<tr><td>4</td><td>站点默认</td><td>兜底</td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 算一次就缓存在 <code>ctx</code> 属性里</div>
+  <p>
+    一个文章列表页可能渲染几十个时间。
+    每次都重新查用户、解析 Cookie、协商语言太浪费，
+    所以 <code>Localization</code> 把结果缓存在请求作用域里：
+  </p>
+<div class="code" data-lang="java">
+<pre>
+public static Formats formats(Context ctx) {
+    Formats cached = ctx.attribute(CTX_FORMATS);
+    if (cached != null) return cached;
+
+    Formats formats = new Formats(resolveZone(ctx), resolveLocale(ctx));
+    ctx.attribute(CTX_FORMATS, formats);
+    return formats;
+}
+</pre>
+</div>
+  <p>
+    <code>ctx</code> 属性是<strong>请求作用域</strong>的，
+    每个请求一份，所以不存在第 19 章那些并发问题。
+    这和 <code>UnitOfWork</code> 把 <code>EntityManager</code>
+    放进 <code>ctx</code> 是同一个模式。
+  </p>
+</div>
+
+<div class="checkpoint">
+  <span>&#9873;</span>
+  <div>原书没有对应章节。<code>mvn test</code> 应该看到 120 个测试全绿，其中 16 个来自本章。</div>
+</div>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>
+      <strong>亲眼看看夏令时的坑。</strong>写个小程序打印
+      <code>ZonedDateTime.of(2026, 3, 8, 2, 30, 0, 0, ZoneId.of("America/New_York"))</code>。
+      它不会报错，但打出来是 3:30。想清楚如果这是一个「每天 2:30 跑的定时任务」会怎样。
+    </li>
+    <li>
+      把 <code>relative()</code> 里的跨日判断改成 <code>elapsed.toHours() &lt; 48</code>，
+      跑 <code>LocalizationTest</code>，确认「跨日判断要按用户时区算」那条变红。
+    </li>
+    <li>
+      <strong>加一个时区选择器。</strong>用
+      <code>ZoneId.getAvailableZoneIds()</code> 生成下拉框，
+      并用 JS 的 <code>Intl.DateTimeFormat().resolvedOptions().timeZone</code>
+      自动选中用户当前的时区。
+    </li>
+    <li>
+      手动设一个 <code>Cookie: tz=乱七八糟</code> 再访问首页。
+      确认页面正常（回退到默认时区），不是 500。
+      然后把 <code>parseZone</code> 里的 try/catch 去掉，再试一次。
+    </li>
+    <li>
+      用 <code>curl -H "Accept-Language: en-US,en;q=0.9" localhost:7070</code>
+      确认页面变成英文。再试 <code>fr-FR</code>，确认回退到中文而不是报错。
+    </li>
+    <li>
+      <strong>把剩下的硬编码文案也抽出去。</strong>现在只抽了导航栏那几条。
+      搜一遍模板里的中文，挑一个页面全部换成 <code>layout.t(...)</code>，
+      体会一下工作量 —— <strong>这就是为什么国际化要在项目早期就做</strong>。
+    </li>
+    <li>
+      给邮件也加上语言：第 6 章的确认邮件现在永远是中文。
+      注意一个难点：<strong>发邮件时没有 HTTP 请求</strong>，
+      所以语言只能来自用户的偏好字段。
+    </li>
+    <li>
+      （进阶）<code>messages_*.properties</code> 很容易漏翻译。
+      写一个测试：<strong>遍历所有语言的文件，断言它们的 key 集合完全一致</strong>。
+      这比人工检查可靠得多。
+    </li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -28,7 +28,7 @@
           <span class="text-secondary small">· ${item.name()}</span>
         @endif
         <div class="small text-secondary">
-          @template.tag.timeago(at = item.since())
+          @template.tag.timeago(layout = layout, at = item.since())
         </div>
       </div>
     </li>

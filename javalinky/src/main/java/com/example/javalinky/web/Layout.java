@@ -8,8 +8,14 @@ public record Layout(
     String title,
     String csrfToken,
     List<Flash> flashes,
-    User currentUser          // 未登录时是 null
+    User currentUser,         // 未登录时是 null
+    Formats formats,          // 第 23 章：按看的人格式化时间
+    Messages messages         // 第 23 章：界面文案
 ) {
+    /** 模板里写 ${layout.t("nav.home")} 比 ${layout.messages().get(...)} 短 */
+    public String t(String key)                 { return messages.get(key); }
+    public String t(String key, Object... args) { return messages.get(key, args); }
+
     public boolean isAuthenticated() {
         return currentUser != null;
     }

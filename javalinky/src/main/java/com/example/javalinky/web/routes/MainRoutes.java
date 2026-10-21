@@ -411,11 +411,6 @@ public class MainRoutes implements RouteModule {
     // ---------- 编辑自己的资料 ----------
 
     /**
-     * 把上传的头像发出去（第 20 章）。
-     * 没走 staticFiles 是因为这些文件在数据目录里，不在 classpath 上；
-     * 而且这样才能自己控制 Content-Type 和缓存头。
-     */
-    /**
      * 实时通知流（第 21 章）。
      *
      * 这个方法返回后连接<b>不会</b>关闭 —— keepAlive() 告诉 Javalin
@@ -498,6 +493,38 @@ public class MainRoutes implements RouteModule {
         return flat.length() <= max ? flat : flat.substring(0, max) + "…";
     }
 
+    /**
+     * 保存时区 / 语言偏好（第 23 章）。
+     * 登录用户写进数据库，匿名用户写进 Cookie —— 两种人都该能切语言。
+     */
+    private void savePreferences(Context ctx) {
+        // 一律先校验。这些值会被拿去 ZoneId.of()，非法值不挡住就是 500
+        var parsedZone   = Localization.parseZone(ctx.formParam("timeZone"));
+        var parsedLocale = Localization.parseLocale(ctx.formParam("locale"));
+
+        User me = CurrentUser.get(ctx);
+        if (me != null) {
+            me.setTimeZone(parsedZone == null ? null : parsedZone.getId());
+            me.setLocale(parsedLocale == null ? null : parsedLocale.toLanguageTag());
+        } else {
+            int oneYear = 365 * 24 * 3600;
+            ctx.cookie(Localization.ZONE_COOKIE,
+                       parsedZone == null ? "" : parsedZone.getId(),
+                       parsedZone == null ? 0 : oneYear);
+            ctx.cookie(Localization.LOCALE_COOKIE,
+                       parsedLocale == null ? "" : parsedLocale.toLanguageTag(),
+                       parsedLocale == null ? 0 : oneYear);
+        }
+
+        Flash.success(ctx, Localization.messages(ctx).get("settings.saved"));
+        ctx.redirect(Routes.INDEX);
+    }
+
+    /**
+     * 把上传的头像发出去（第 20 章）。
+     * 没走 staticFiles 是因为这些文件在数据目录里，不在 classpath 上；
+     * 而且这样才能自己控制 Content-Type 和缓存头。
+     */
     private void serveAvatar(Context ctx) {
         String file = ctx.pathParam("file");
 

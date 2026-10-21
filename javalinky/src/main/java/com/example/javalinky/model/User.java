@@ -53,6 +53,16 @@ public class User {
     @Column(name = "avatar_file", length = 80)
     private String avatarFile;
 
+    // ---------- 第 23 章：本地化偏好 ----------
+
+    /** IANA 时区名，如 Asia/Shanghai。为空表示跟浏览器走 */
+    @Column(name = "time_zone", length = 64)
+    private String timeZone;
+
+    /** 语言标签，如 zh-CN。为空表示跟 Accept-Language 走 */
+    @Column(name = "locale", length = 16)
+    private String locale;
+
     // ---------- 第 22 章：两步验证 ----------
 
     @Column(name = "totp_secret", length = 64)
@@ -132,6 +142,11 @@ public class User {
         }
         return avatarHash;
     }
+
+    public String getTimeZone()                { return timeZone; }
+    public void   setTimeZone(String tz)       { this.timeZone = tz; }
+    public String getLocale()                  { return locale; }
+    public void   setLocale(String l)          { this.locale = l; }
 
     public String  getTotpSecret()             { return totpSecret; }
     public void    setTotpSecret(String s)     { this.totpSecret = s; }

@@ -19,7 +19,7 @@
         <a class="link-secondary" href="${Routes.user(c.authorUsername())}">
           ${c.authorUsername()}
         </a>
-        · @template.tag.timeago(at = c.timestamp())
+        · @template.tag.timeago(layout = layout, at = c.timestamp())
         @if(c.disabled())
           <span class="badge text-bg-warning">已隐藏</span>
         @endif

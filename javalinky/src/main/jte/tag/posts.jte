@@ -17,7 +17,7 @@
 
     <div class="flex-grow-1 min-width-0">
       <div class="small text-secondary">
-        @template.tag.timeago(at = post.timestamp())
+        @template.tag.timeago(layout = layout, at = post.timestamp())
       </div>
       <div>
         <a class="fw-semibold link-dark text-decoration-none"
